@@ -1,0 +1,488 @@
+@import 'tailwindcss';
+
+@import '@fontsource/instrument-serif/400.css';
+@import '@fontsource/instrument-serif/400-italic.css';
+@import '@fontsource-variable/instrument-sans';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+@import '@lichess-org/chessground/assets/chessground.base.css';
+@import '@lichess-org/chessground/assets/chessground.brown.css';
+@import '@lichess-org/chessground/assets/chessground.cburnett.css';
+
+/* ───────────────────────────────────────────────────────────────
+   COBRA — design tokens.
+   Two fundamentally different themes share the same token names,
+   so the rest of the codebase (Tailwind arbitrary values referring
+   to `var(--color-…)`) works unchanged in both.
+
+   Dark = "Informant Dark": warm near-black + brass gold + parchment.
+   Light = "Broadsheet": cream paper + oxblood red + ink.
+   ─────────────────────────────────────────────────────────────── */
+
+@theme {
+	--font-serif: 'Instrument Serif', ui-serif, 'Cormorant Garamond', Georgia, serif;
+	--font-sans: 'Instrument Sans Variable', 'Instrument Sans', system-ui, sans-serif;
+	--font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
+	/* Defaults = Informant Dark. `:root.light` overrides below. */
+
+	/* Surfaces — warm, near-black. Stone-tinted, not slate. */
+	--color-ink-950: #0b0a09;
+	--color-ink-900: #141210;
+	--color-ink-850: #1a1815;
+	--color-ink-800: #201d19;
+	--color-ink-700: #2b2723;
+	--color-ink-600: #3a342e;
+
+	/* Foreground — warm off-white, not stark. */
+	--color-parchment-50: #f7f3ec;
+	--color-parchment-100: #ede7dc;
+	--color-parchment-200: #d7cfbd;
+	--color-parchment-300: #b8ad96;
+	--color-parchment-400: #8a8070;
+	--color-parchment-500: #5d554a;
+
+	/* Primary accent: aged brass / ochre — the gold of a clock, inkstamps in a chess book. */
+	--color-brass-50: #f8efda;
+	--color-brass-100: #edd8a6;
+	--color-brass-200: #deb96a;
+	--color-brass-300: #c69f5b;
+	--color-brass-400: #a68144;
+	--color-brass-500: #7e612f;
+	--color-brass-600: #5a451f;
+
+	/* Correctness / success: muted olive — not alarming, agrees with paper. */
+	--color-olive-300: #7a8e4f;
+	--color-olive-400: #5b6d38;
+	--color-olive-500: #3e4c22;
+
+	/* Destructive / wrong: oxblood — warm red, not tech red. */
+	--color-oxblood-300: #b8494a;
+	--color-oxblood-400: #8b1a1a;
+	--color-oxblood-500: #5f0d0d;
+
+	/* Sharp / fighting: copper — warm orange-brown, between gold and red. */
+	--color-copper-300: #d18b5f;
+	--color-copper-400: #9e6237;
+	--color-copper-500: #5e3618;
+
+	/* Win-rate bar (explorer).
+	   Semantic slots: the "white wins" segment must always read as white,
+	   the "black wins" segment as black, regardless of theme. The parchment
+	   scale flips with themes (parchment-100 is cream on dark, ink on light)
+	   so hard-coded scale tokens would swap black and white. Dedicated
+	   tokens here, with per-theme values, keep the glyph meaning stable.
+	   Note: the bar's background is ink-800 — the "black" slot can't *be*
+	   ink-800 or it disappears. We push the "black" fill a solid two
+	   shades lighter than the bg so it still reads dark against the
+	   cream "white" slot, but doesn't melt into the bar's own surface.
+	   The "draws" tan is likewise bumped brighter for readability —
+	   the prior #8a8070 sat too close to a muddy parchment-500. */
+	--color-winbar-white: #ede7dc;
+	--color-winbar-draws: #a09279;
+	--color-winbar-black: #524639;
+
+	/* Shadows — warm, not blue. */
+	--shadow-xs: 0 1px 0 0 rgba(0, 0, 0, 0.25);
+	--shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
+	--shadow-md: 0 4px 12px -2px rgba(0, 0, 0, 0.5);
+	--shadow-lg: 0 16px 40px -8px rgba(0, 0, 0, 0.6);
+
+	--radius-xs: 0.125rem;
+	--radius-sm: 0.1875rem;
+	--radius: 0.25rem;
+	--radius-md: 0.375rem;
+	--radius-lg: 0.5rem;
+}
+
+:root {
+	color-scheme: dark;
+	--font-feature-settings: 'ss01', 'ss02', 'cv11';
+}
+
+/* ───────────────────────────────────────────────────────────────
+   Broadsheet Light — printed chess book: cream paper, deep ink,
+   oxblood-red accents instead of brass gold. Token names are
+   preserved; only values change, so no component needs to know
+   which theme is active.
+   ─────────────────────────────────────────────────────────────── */
+:root.light {
+	color-scheme: light;
+
+	/* Surfaces — paper stack. ink-950 is the outermost/lightest sheet. */
+	--color-ink-950: #fbf7ec;
+	--color-ink-900: #f3ede0;
+	--color-ink-850: #ebe4d3;
+	--color-ink-800: #d9cfb8;
+	--color-ink-700: #b8ac8e;
+	--color-ink-600: #8a7f63;
+
+	/* Foreground — deep ink. parchment-50 is the deepest, parchment-500 the palest. */
+	--color-parchment-50: #17110a;
+	--color-parchment-100: #241a10;
+	--color-parchment-200: #3c2e1c;
+	--color-parchment-300: #5a4930;
+	--color-parchment-400: #7f6a4c;
+	--color-parchment-500: #a08b6b;
+
+	/* Primary accent swaps to carmine / oxblood — chess-book red initials.
+	   Scale direction inverts from the dark palette for the text-bearing
+	   shades (-200 is normally *lighter* than -300, giving hover-lightens-text
+	   behaviour on dark surfaces). On cream paper a lighter red washes out,
+	   so -200 is instead *darker* than -300, preserving the "hover shifts
+	   colour" affordance while keeping text/badge fills readable on paper. */
+	--color-brass-50: #fbecea;
+	--color-brass-100: #f3cfca;
+	--color-brass-200: #6e1515;
+	--color-brass-300: #a0281f;
+	--color-brass-400: #7e1e17;
+	--color-brass-500: #5c1510;
+	--color-brass-600: #3d0d0a;
+
+	/* Olive darkens so a "correct" glyph still reads against cream. */
+	--color-olive-300: #4b5c28;
+	--color-olive-400: #38481d;
+	--color-olive-500: #283612;
+
+	/* Oxblood for destructive stays red but slightly darker for paper. */
+	--color-oxblood-300: #9b2423;
+	--color-oxblood-400: #6e1515;
+	--color-oxblood-500: #4a0d0d;
+
+	/* Win-rate bar overrides for the cream-paper theme. The bar's own
+	   background is a light beige (ink-800-light = #d9cfb8), so a pure
+	   white fill stands out crisply for the "white wins" slot without
+	   blending in; deep ink gives the black slot an equally hard edge. */
+	--color-winbar-white: #ffffff;
+	--color-winbar-draws: #8a7f63;
+	--color-winbar-black: #17110a;
+
+	/* Copper darkens so 'sharp' glyphs stay legible. */
+	--color-copper-300: #8b5227;
+	--color-copper-400: #683a18;
+	--color-copper-500: #3f210d;
+
+	/* Shadows — paper has subtler ambient occlusion. */
+	--shadow-xs: 0 1px 0 0 rgba(74, 55, 30, 0.08);
+	--shadow-sm: 0 1px 2px 0 rgba(74, 55, 30, 0.12);
+	--shadow-md: 0 4px 12px -2px rgba(74, 55, 30, 0.18);
+	--shadow-lg: 0 16px 40px -8px rgba(74, 55, 30, 0.22);
+
+	/*
+		Tailwind default palette overrides. Much of the Dossier UI reaches
+		for `text-emerald-*`, `text-amber-*`, `text-red-*` directly instead
+		of our theme tokens — those colours were tuned for a dark surface,
+		so on cream paper the mid shades (`-300`, `-400`) wash out and the
+		`-950`-tinted backgrounds all but vanish.
+
+		Rather than rewriting ~170 callsites across the dossier subtree, we
+		flip Tailwind's `--color-*-n` slots in light mode:
+		  • `-300`/`-400` (used as text) → darker, high-contrast shades.
+		  • `-500` (used as dots/badges) → still saturated but darker.
+		  • `-950` (used as page-dark tints at low alpha) → palest shade,
+		    so `bg-amber-950/20` reads as a subtle cream-tinted amber
+		    instead of an almost-black splotch.
+		The token-family semantics (bad=red, warn=amber, good=emerald) are
+		preserved — only contrast is restored.
+	*/
+	--color-emerald-200: #14532d;
+	--color-emerald-300: #166534;
+	--color-emerald-400: #15803d;
+	--color-emerald-500: #15803d;
+	--color-emerald-900: #a7f3d0;
+	--color-emerald-950: #d1fae5;
+
+	--color-amber-200: #713f12;
+	--color-amber-300: #b45309;
+	--color-amber-400: #92400e;
+	--color-amber-500: #b45309;
+	--color-amber-700: #fcd34d;
+	--color-amber-900: #fde68a;
+	--color-amber-950: #fef3c7;
+
+	--color-red-200: #881337;
+	--color-red-300: #9f1239;
+	--color-red-400: #991b1b;
+	--color-red-500: #991b1b;
+	--color-red-950: #fee2e2;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+/* Tailwind v4's preflight leaves native `<button>` at the default arrow cursor.
+   Restore a pointer on anything that reads as clickable so the affordance is
+   obvious, while leaving disabled controls showing the default arrow. */
+button:not(:disabled),
+[role='button']:not([aria-disabled='true']),
+[role='tab']:not([aria-disabled='true']),
+summary,
+label[for],
+select:not(:disabled),
+input[type='button']:not(:disabled),
+input[type='submit']:not(:disabled),
+input[type='reset']:not(:disabled),
+input[type='checkbox']:not(:disabled),
+input[type='radio']:not(:disabled),
+input[type='file']:not(:disabled) {
+	cursor: pointer;
+}
+
+html,
+body {
+	height: 100%;
+	margin: 0;
+}
+
+html {
+	background: var(--color-ink-950);
+	/* A whisper of warmth — subtle noise from radial-gradient atmospherics. */
+	background-image:
+		radial-gradient(1200px circle at 10% -20%, rgba(198, 159, 91, 0.04), transparent 40%),
+		radial-gradient(1000px circle at 110% 120%, rgba(198, 159, 91, 0.025), transparent 50%);
+	background-attachment: fixed;
+}
+
+/* Light theme gets a different ambient — pale ochre wash that reads like
+   light raking across paper, not lamplight against a dark room. */
+:root.light html,
+html:is(.light) {
+	background-image:
+		radial-gradient(1400px circle at 0% -10%, rgba(160, 40, 31, 0.05), transparent 45%),
+		radial-gradient(1200px circle at 110% 110%, rgba(160, 40, 31, 0.03), transparent 55%);
+}
+
+body {
+	color: var(--color-parchment-100);
+	font-family: var(--font-sans);
+	font-size: 15px;
+	line-height: 1.55;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	text-rendering: optimizeLegibility;
+	font-feature-settings:
+		'ss01' on,
+		'cv11' on;
+}
+
+h1,
+h2,
+h3 {
+	font-family: var(--font-serif);
+	letter-spacing: -0.005em;
+	font-weight: 400;
+}
+
+.font-serif {
+	font-family: var(--font-serif);
+	letter-spacing: -0.005em;
+}
+
+.font-mono {
+	font-family: var(--font-mono);
+	font-feature-settings: 'ss01';
+}
+
+.eyebrow {
+	font-family: var(--font-sans);
+	font-size: 10.5px;
+	line-height: 1;
+	font-weight: 600;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+	color: var(--color-parchment-400);
+}
+
+.hairline {
+	border-color: var(--color-ink-700);
+}
+
+.ink-panel {
+	background: linear-gradient(180deg, var(--color-ink-850), var(--color-ink-900));
+	border: 1px solid var(--color-ink-700);
+	border-radius: var(--radius-md);
+}
+
+.paper-divider {
+	display: flex;
+	align-items: center;
+	gap: 0.75rem;
+	color: var(--color-parchment-400);
+}
+
+.paper-divider::before,
+.paper-divider::after {
+	content: '';
+	flex: 1;
+	height: 1px;
+	background: linear-gradient(
+		to right,
+		transparent,
+		var(--color-ink-700) 25%,
+		var(--color-ink-700) 75%,
+		transparent
+	);
+}
+
+/* Small chess-themed ornament (⁂ asterism meets ♞) */
+.ornament {
+	display: inline-block;
+	color: var(--color-brass-300);
+	font-family: var(--font-serif);
+}
+
+/* Color-picker king glyphs.
+   The Unicode "white king" ♔ is hollow/outlined — a chess-book convention
+   that reads as "white piece" only when printed as dark ink on light paper
+   (the outline shows the paper color through it). On a dark background the
+   convention inverts: a cream-colored outlined glyph actually shows dark
+   interior through its hole, which reads as black; a cream-colored filled
+   glyph reads as white. So we swap the glyphs per theme to keep each card's
+   picture matching its "White" / "Black" label in either palette. */
+.chess-king-white::before {
+	content: '\265A'; /* ♚ solid — on dark bg, cream fill reads as a white piece */
+}
+.chess-king-black::before {
+	content: '\2654'; /* ♔ hollow — on dark bg, cream outline around dark reads as a black piece */
+}
+:root.light .chess-king-white::before {
+	content: '\2654'; /* ♔ hollow — on cream bg, dark ink outline reads as a white piece */
+}
+:root.light .chess-king-black::before {
+	content: '\265A'; /* ♚ solid — on cream bg, dark ink fill reads as a black piece */
+}
+
+/* Scrollbar — discreet, warm. */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--color-ink-700) transparent;
+}
+*::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+	background: var(--color-ink-700);
+	border-radius: 10px;
+	border: 2px solid transparent;
+	background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+	background: var(--color-ink-600);
+	background-clip: padding-box;
+	border: 2px solid transparent;
+}
+
+/* Focus ring — brass, warm. */
+:focus-visible {
+	outline: 2px solid var(--color-brass-300);
+	outline-offset: 2px;
+	border-radius: 3px;
+}
+
+.cg-wrap {
+	width: 100%;
+	aspect-ratio: 1 / 1;
+	box-shadow: var(--shadow-lg);
+	border-radius: var(--radius);
+	overflow: hidden;
+	background: var(--color-ink-900);
+	/* Swallow touch gestures on the board so mobile users can drag pieces
+	   without the page scrolling out from under their finger. Chessground
+	   listens for touchstart/move/end directly; the browser's default
+	   pan/zoom would otherwise hijack the first touch. */
+	touch-action: none;
+}
+
+/* Selection — accent on surface. Both themes get the accent colour flip
+   via the token; the paired background is the deepest-contrast surface. */
+::selection {
+	background: var(--color-brass-300);
+	color: var(--color-ink-950);
+}
+
+/* In light mode, selection highlighting a dark-red accent with cream
+   text reads fine; the default rule already achieves that because
+   ink-950 is now cream and brass-300 is oxblood. No override needed. */
+
+/* Entrance animations. */
+@keyframes ot-fade-up {
+	from {
+		opacity: 0;
+		transform: translateY(8px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+@keyframes ot-fade {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+@keyframes ot-scale-in {
+	from {
+		opacity: 0;
+		transform: scale(0.98);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+.ot-fade-up {
+	animation: ot-fade-up 500ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.ot-fade {
+	animation: ot-fade 400ms ease-out both;
+}
+.ot-scale-in {
+	animation: ot-scale-in 400ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+/* Stagger children: add .stagger, set --i on each child. */
+.stagger > * {
+	animation: ot-fade-up 520ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+	animation-delay: calc(var(--i, 0) * 45ms);
+}
+
+@keyframes drill-shrink {
+	from {
+		width: 100%;
+	}
+	to {
+		width: 0%;
+	}
+}
+
+.board-correct-ring {
+	box-shadow:
+		0 0 0 2px rgba(123, 142, 79, 0.75),
+		0 0 28px -4px rgba(123, 142, 79, 0.4),
+		var(--shadow-lg);
+}
+
+.board-wrong-ring {
+	box-shadow:
+		0 0 0 2px rgba(184, 73, 74, 0.75),
+		0 0 28px -4px rgba(184, 73, 74, 0.35),
+		var(--shadow-lg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0ms !important;
+		animation-delay: 0ms !important;
+		transition-duration: 0ms !important;
+	}
+}

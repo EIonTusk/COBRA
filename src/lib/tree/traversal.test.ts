@@ -1,0 +1,72 @@
+import { describe, expect, it } from 'vitest';
+import type { Edge, RepertoireNode } from '$lib/types';
+import { pathToFenKey } from './traversal';
+
+function node(fenKey: string, children: Edge[]): RepertoireNode {
+	return { repertoireId: 'r', fenKey, children };
+}
+
+function edge(san: string, toFenKey: string): Edge {
+	return { san, uci: 'xxxx', toFenKey };
+}
+
+describe('pathToFenKey', () => {
+	it('returns an empty path when target equals root', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('root', node('root', []));
+		expect(pathToFenKey(m, 'root', 'root')).toEqual([]);
+	});
+
+	it('returns a 3-move mainline in order', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a')]));
+		m.set('a', node('a', [edge('e5', 'b')]));
+		m.set('b', node('b', [edge('Nf3', 'c')]));
+		m.set('c', node('c', []));
+		const path = pathToFenKey(m, 'r', 'c');
+		expect(path?.map((e) => e.san)).toEqual(['e4', 'e5', 'Nf3']);
+	});
+
+	it('picks the shorter of two move orders on transposition', () => {
+		// r -> A via [1.e4 c5 2.Nf3 d6] (4 plies)
+		// r -> A via [1.Nf3 d6 2.e4 c5]  (also 4 plies)
+		// r -> A via [1.e4 c5 2.Nf3 d6 3.e5 d5 ...] (longer) — BFS picks 4.
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a1'), edge('Nf3', 'b1')]));
+		m.set('a1', node('a1', [edge('c5', 'a2')]));
+		m.set('a2', node('a2', [edge('Nf3', 'a3')]));
+		m.set('a3', node('a3', [edge('d6', 'A'), edge('Nc6', 'long')]));
+		m.set('b1', node('b1', [edge('d6', 'b2')]));
+		m.set('b2', node('b2', [edge('e4', 'b3')]));
+		m.set('b3', node('b3', [edge('c5', 'A')]));
+		m.set('A', node('A', []));
+		m.set('long', node('long', [edge('Nc3', 'A')]));
+		const path = pathToFenKey(m, 'r', 'A');
+		expect(path).not.toBeNull();
+		expect(path!.length).toBe(4);
+	});
+
+	it('returns null when target is unreachable', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a')]));
+		m.set('a', node('a', []));
+		expect(pathToFenKey(m, 'r', 'missing')).toBeNull();
+	});
+
+	it('does not hang on a cycle', () => {
+		const m = new Map<string, RepertoireNode>();
+		// r <-> a cycle; target 'z' is unreachable.
+		m.set('r', node('r', [edge('m1', 'a')]));
+		m.set('a', node('a', [edge('m2', 'r')]));
+		expect(pathToFenKey(m, 'r', 'z')).toBeNull();
+	});
+
+	it('handles a cycle that still leads to the target', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('m1', 'a')]));
+		m.set('a', node('a', [edge('back', 'r'), edge('fwd', 't')]));
+		m.set('t', node('t', []));
+		const path = pathToFenKey(m, 'r', 't');
+		expect(path?.map((e) => e.san)).toEqual(['m1', 'fwd']);
+	});
+});

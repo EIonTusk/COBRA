@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# Runs the same gates as CI: version alignment, svelte-check, lint, unit tests.
+# Skip with `git commit --no-verify` for emergency commits (don't make a habit).
+
+set -e
+
+npm run check:versions
+npm run check
+npm run lint
+npm run test:unit -- --run

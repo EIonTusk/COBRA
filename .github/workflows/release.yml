@@ -1,0 +1,439 @@
+name: Release (Tauri)
+
+# Builds and publishes desktop bundles for Windows, macOS, and Linux, plus an
+# Android APK, attaching everything to a GitHub Release. Triggered by pushing
+# a tag like `v0.1.0`, or manually via workflow_dispatch.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release as (e.g. v0.0.1)'
+        required: true
+        default: 'v0.0.0-dev'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: npm ci --no-audit --no-fund
+
+      - name: Version alignment
+        run: npm run check:versions
+
+      - name: Ensure tag matches package version
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Svelte check
+        run: npm run check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test:unit -- --run
+
+  # Generate platform-specific icons once from static/icon.svg and share them
+  # with every downstream build, so each runner doesn't need librsvg.
+  icons:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install librsvg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends librsvg2-bin
+
+      - name: Install JS dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: npm ci --no-audit --no-fund
+
+      - name: Render source PNG
+        run: |
+          mkdir -p src-tauri/icons
+          rsvg-convert -w 1024 -h 1024 static/icon.svg -o src-tauri/icons/source.png
+
+      - name: Generate icons
+        run: npx tauri icon src-tauri/icons/source.png --output src-tauri/icons
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tauri-icons
+          path: src-tauri/icons
+          retention-days: 1
+
+  desktop:
+    needs: icons
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: ''
+            args: ''
+          - os: macos-latest
+            target: 'aarch64-apple-darwin'
+            args: '--target aarch64-apple-darwin'
+          - os: macos-latest
+            target: 'x86_64-apple-darwin'
+            args: '--target x86_64-apple-darwin'
+          - os: windows-latest
+            target: ''
+            args: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: ${{ matrix.os }}-${{ matrix.target }}
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            patchelf \
+            build-essential \
+            file \
+            wget
+
+      - name: Install JS dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: npm ci --no-audit --no-fund
+
+      - name: Prep Stockfish assets
+        run: npm run prep:stockfish
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tauri-icons
+          path: src-tauri/icons
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build & publish (tauri-action)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ steps.tag.outputs.value }}
+          releaseName: 'COBRA ${{ steps.tag.outputs.value }}'
+          releaseBody: 'Automated release. See the commit history for changes.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+  ios:
+    needs: icons
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Rust (iOS targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: ios
+
+      - name: Install JS dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: npm ci --no-audit --no-fund
+
+      - name: Prep Stockfish assets
+        run: npm run prep:stockfish
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tauri-icons
+          path: src-tauri/icons
+
+      - name: Initialize iOS project
+        run: npx tauri ios init --ci
+
+      - name: Configure signing
+        id: signing
+        env:
+          IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          if [ -z "$IOS_CERTIFICATE_BASE64" ] || [ -z "$IOS_TEAM_ID" ]; then
+            echo "No Apple signing secrets set — will build unsigned for the simulator."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PWD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          echo "$IOS_CERTIFICATE_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$IOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$IOS_PROVISIONING_PROFILE_BASE64" | base64 -d > "$HOME/Library/MobileDevice/Provisioning Profiles/cobra.mobileprovision"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build iOS
+        env:
+          APPLE_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+        run: |
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            npx tauri ios build --export-method app-store-connect
+          else
+            npx tauri ios build --target aarch64-sim
+          fi
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect iOS artifacts
+        run: |
+          mkdir -p dist
+          shopt -s globstar nullglob
+          for f in src-tauri/gen/apple/build/**/*.ipa; do
+            cp "$f" "dist/cobra-${{ steps.tag.outputs.value }}-$(basename "$f")"
+          done
+          # Simulator builds produce .app bundles — zip them up.
+          for d in src-tauri/gen/apple/build/**/*.app; do
+            (cd "$(dirname "$d")" && zip -qr "$GITHUB_WORKSPACE/dist/cobra-${{ steps.tag.outputs.value }}-sim-$(basename "$d").zip" "$(basename "$d")")
+          done
+          ls -la dist || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-artifacts
+          path: dist/*
+          if-no-files-found: warn
+
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --draft --title "COBRA $TAG" --notes "Automated release."
+          fi
+
+      - name: Upload iOS assets to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          shopt -s nullglob
+          files=(dist/*)
+          if [ ${#files[@]} -gt 0 ]; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+          fi
+
+  android:
+    needs: icons
+    runs-on: ubuntu-22.04
+    env:
+      NDK_VERSION: '26.3.11579264'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: |
+          sdkmanager "ndk;${NDK_VERSION}" "platforms;android-34" "platform-tools" "build-tools;34.0.0"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install Rust (Android targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: android
+
+      - name: Install JS dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: npm ci --no-audit --no-fund
+
+      - name: Prep Stockfish assets
+        run: npm run prep:stockfish
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tauri-icons
+          path: src-tauri/icons
+
+      - name: Initialize Android project
+        run: npx tauri android init --ci
+
+      - name: Configure signing
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "No keystore secret set — will produce an unsigned release APK."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          KEYSTORE_PATH="${GITHUB_WORKSPACE}/src-tauri/gen/android/release.keystore"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
+          PROPS="${GITHUB_WORKSPACE}/src-tauri/gen/android/keystore.properties"
+          {
+            echo "storeFile=$KEYSTORE_PATH"
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "keyPassword=$ANDROID_KEY_PASSWORD"
+          } > "$PROPS"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build Android APK
+        run: |
+          if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
+            npx tauri android build --apk
+          else
+            npx tauri android build --apk --debug
+          fi
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect APK artifacts
+        id: collect
+        run: |
+          mkdir -p dist
+          shopt -s globstar nullglob
+          for f in src-tauri/gen/android/app/build/outputs/apk/**/*.apk; do
+            name="cobra-${{ steps.tag.outputs.value }}-$(basename "$f")"
+            cp "$f" "dist/$name"
+          done
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apks
+          path: dist/*.apk
+
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --draft --title "COBRA $TAG" --notes "Automated release."
+          fi
+
+      - name: Upload APKs to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          gh release upload "$TAG" dist/*.apk --clobber

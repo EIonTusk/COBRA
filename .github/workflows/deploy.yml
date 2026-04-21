@@ -1,0 +1,71 @@
+name: Deploy COBRA to GitHub Pages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Prep Stockfish assets
+        run: npm run prep:stockfish
+
+      # Skip Playwright download during the deploy step; tests ran in CI
+      # elsewhere and the browser bundle isn't needed for a static build.
+      - name: Build
+        env:
+          # Matches `https://eiontusk.github.io/COBRA/`.
+          COBRA_BASE_PATH: /COBRA
+        run: npm run build
+
+      # GitHub Pages doesn't let you set custom headers, which means
+      # SharedArrayBuffer (threaded Stockfish) is disabled. Single-threaded
+      # Stockfish still works fine. Drop a 404 fallback so client-side
+      # routing survives direct deep-links.
+      - name: SPA fallback
+        run: cp build/index.html build/404.html
+
+      # Prevent Jekyll from rewriting files that start with an underscore
+      # (SvelteKit emits `_app/`).
+      - name: Disable Jekyll
+        run: touch build/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

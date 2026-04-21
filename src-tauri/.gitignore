@@ -1,0 +1,4 @@
+/target
+/gen
+Cargo.lock
+icons/

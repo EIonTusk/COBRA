@@ -1,0 +1,46 @@
+{
+	"source": "eyeballed",
+	"axes": {
+		"forcing": 0.3,
+		"capture": 0.25,
+		"pawnPlay": 0.32,
+		"queenside": 0.5,
+		"earlyCastle": 0.78
+	},
+	"tension": {
+		"releaseRate": 0.45,
+		"creationRate": 0.06
+	},
+	"evalByPhaseColor": {
+		"opening": {
+			"white": { "moves": 0, "avgCpLoss": 48, "blunderRate": 0.04, "inaccuracyRate": 0.14 },
+			"black": { "moves": 0, "avgCpLoss": 54, "blunderRate": 0.05, "inaccuracyRate": 0.15 }
+		},
+		"middle": {
+			"white": { "moves": 0, "avgCpLoss": 72, "blunderRate": 0.09, "inaccuracyRate": 0.18 },
+			"black": { "moves": 0, "avgCpLoss": 78, "blunderRate": 0.1, "inaccuracyRate": 0.19 }
+		},
+		"end": {
+			"white": { "moves": 0, "avgCpLoss": 95, "blunderRate": 0.12, "inaccuracyRate": 0.17 },
+			"black": { "moves": 0, "avgCpLoss": 100, "blunderRate": 0.13, "inaccuracyRate": 0.17 }
+		}
+	},
+	"criticalMoments": {
+		"conversionRate": 0.7,
+		"conversionGames": 0,
+		"defenseRate": 0.18,
+		"defenseGames": 0,
+		"equalityWinRate": 0.35,
+		"equalityLossRate": 0.32,
+		"equalityGames": 0
+	},
+	"clockSpend": {
+		"opening": 0.32,
+		"middle": 0.48,
+		"end": 0.2,
+		"blunderOpening": 0.15,
+		"blunderMiddle": 0.45,
+		"blunderEnd": 0.4
+	},
+	"computedAt": null
+}
