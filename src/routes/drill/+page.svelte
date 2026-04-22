@@ -200,7 +200,10 @@
 		if (!entry) return;
 		const token = { cancelled: false };
 		untrack(() => {
-			hintLevel = 0;
+			// First-ever cards auto-reveal the full-hint arrow: there's nothing
+			// to recall yet, so skip straight to the teaching cue the user
+			// would otherwise have to click for.
+			hintLevel = entry.card.lastReview ? 0 : 2;
 			wrongAttempts = 0;
 			userLastMove = undefined;
 			userPlayedSan = null;
