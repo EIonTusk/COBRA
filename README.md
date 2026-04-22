@@ -8,8 +8,6 @@
   </a>
 </p>
 
-Inspired by [chessbook.com](https://chessbook.com).
-
 > ⚠️ **Heads-up — this was vibe-coded.** Every line in this repo was written
 > in an extended conversation with Claude. No human reviewed each commit for
 > correctness line-by-line. Treat it as a hobby-grade tool that happens to
@@ -22,8 +20,7 @@ master games for ideas, and get an honest list of the positions where you've
 been going wrong in your own games. Everything is stored locally —
 nothing is uploaded anywhere.
 
-Inspired by [chessbook.com](https://chessbook.com) and the way serious
-players actually prepare.
+Inspired by [chessbook.com](https://chessbook.com)
 
 ---
 
