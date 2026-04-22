@@ -10,6 +10,9 @@
 	import { getSettings, saveSettings } from '$lib/storage/settings';
 	import { scanAllAccounts, collectAccountsFromSettings } from '$lib/lichess/mistakeScan';
 	import { applySoundSettings } from '$lib/ui/sounds';
+	import pkg from '../../package.json';
+
+	const appVersion = pkg.version;
 
 	let { children } = $props();
 
@@ -284,7 +287,7 @@
 					<span aria-hidden="true">☕</span>
 					Support
 				</a>
-				<span>AGPL-3.0 · local-first</span>
+				<span>AGPL-3.0 · v{appVersion}</span>
 			</span>
 		</div>
 	</footer>
