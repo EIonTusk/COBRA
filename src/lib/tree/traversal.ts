@@ -33,3 +33,30 @@ export function pathToFenKey(
 
 	return null;
 }
+
+/**
+ * Walk down from `rootKey` following the unique child as long as exactly one
+ * child exists, stopping at the first branching (or leaf) node encountered.
+ * Used as the default "starting position" for game analysis: a repertoire
+ * whose opening moves are a fixed sequence (e.g. 1.e4 e5 2.Nf3 Nc6 …) should
+ * only start flagging mistakes once that prefix is on the board, so games
+ * starting from a different opening don't get spurious "off-book" flags.
+ *
+ * Guards against cycles (three-fold repetition positions can create loops).
+ * If the root itself already branches (0 or 2+ children) it is returned
+ * unchanged.
+ */
+export function nearestBranchingFenKey(
+	nodes: Map<string, RepertoireNode>,
+	rootKey: string
+): string {
+	const visited = new Set<string>();
+	let key = rootKey;
+	while (!visited.has(key)) {
+		visited.add(key);
+		const node = nodes.get(key);
+		if (!node || node.children.length !== 1) return key;
+		key = node.children[0].toFenKey;
+	}
+	return key;
+}

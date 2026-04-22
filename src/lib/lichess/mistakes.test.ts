@@ -131,6 +131,50 @@ describe('mistake scanner', () => {
 		expect(mistake!.expectedSan).toBe('Bc4');
 	});
 
+	it('skips a rep when the game never reaches its starting position', () => {
+		// Rep covers the Italian after 1.e4 e5 2.Nf3 Nc6 3.Bc4; its gate is
+		// pinned at "after 1.e4 e5 2.Nf3 Nc6" (the first user-to-move
+		// position the rep actually analyses). A game that opens 1.d4
+		// should be skipped — no mistake, no gap — because the gate never
+		// opens. Without the gate the user's 1.d4 would look like a
+		// deviation from the Italian prep.
+		const rep = buildRep('rep-w', 'Italian', 'white', [
+			['e4', 'e5', 'Nf3', 'Nc6', 'Bc4', 'Bc5', 'c3']
+		]);
+		// Compute the gate EPD deterministically so the test can't drift
+		// with chessops' FEN formatting.
+		const gatePos = Chess.fromSetup(parseFen(INITIAL_FEN).unwrap()).unwrap();
+		for (const san of ['e4', 'e5', 'Nf3', 'Nc6']) {
+			makeSanAndPlay(gatePos, parseSan(gatePos, san)!);
+		}
+		rep.startingFenKey = makeFen(gatePos.toSetup(), { epd: true });
+		const game = gameFromSans('game-skip', ['d4', 'd5', 'c4'], 'hero', 'villain');
+		const result = analyzeGame(game, 'hero', [rep]);
+		expect(result.mistake).toBeUndefined();
+		expect(result.gap).toBeUndefined();
+		expect(result.wdlHits ?? []).toEqual([]);
+	});
+
+	it('activates analysis once the starting position is transposed into', () => {
+		// Gate pinned at "after 1.e4 e5 2.Nf3 Nc6" (white to move). The
+		// user reaches that node via the transposition 1.Nf3 Nc6 2.e4 e5
+		// — same final position, different move order. Once the gate
+		// opens, the user's Ng5 (instead of prepared Bc4) should flag.
+		const rep = buildRep('rep-w', 'Italian', 'white', [
+			['e4', 'e5', 'Nf3', 'Nc6', 'Bc4', 'Bc5', 'c3']
+		]);
+		const gatePos = Chess.fromSetup(parseFen(INITIAL_FEN).unwrap()).unwrap();
+		for (const san of ['e4', 'e5', 'Nf3', 'Nc6']) {
+			makeSanAndPlay(gatePos, parseSan(gatePos, san)!);
+		}
+		rep.startingFenKey = makeFen(gatePos.toSetup(), { epd: true });
+		const game = gameFromSans('game-trans', ['Nf3', 'Nc6', 'e4', 'e5', 'Ng5'], 'hero', 'villain');
+		const mistake = detectMistake(game, 'hero', [rep]);
+		expect(mistake).not.toBeNull();
+		expect(mistake!.playedSan).toBe('Ng5');
+		expect(mistake!.expectedSan).toBe('Bc4');
+	});
+
 	it('returns null when the user is not in the game', () => {
 		const rep = buildRep('rep-w', 'Italian', 'white', [['e4']]);
 		const game = gameFromSans('game-6', ['e4', 'e5'], 'alice', 'bob');

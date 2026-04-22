@@ -31,7 +31,7 @@
 	import Explorer from '$lib/explorer/Explorer.svelte';
 	import { listGapsForRepertoire } from '$lib/storage/empiricalGaps';
 	import { listPositionWdlAtFenKey, type PositionWdlRow } from '$lib/storage/positionWdl';
-	import { getRepertoire, touchRepertoire } from '$lib/storage/repertoires';
+	import { getRepertoire, touchRepertoire, setStartingPosition } from '$lib/storage/repertoires';
 	import { nodesMap, addEdge, removeEdge, setNodeComment } from '$lib/storage/nodes';
 	import {
 		deleteIdeaCard,
@@ -50,7 +50,7 @@
 		sanAtFen
 	} from '$lib/chess/position';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
-	import { pathToFenKey } from '$lib/tree/traversal';
+	import { pathToFenKey, nearestBranchingFenKey } from '$lib/tree/traversal';
 	import {
 		collectMissingMoves,
 		collectSaveableLeaves,
@@ -985,6 +985,47 @@
 		}
 		history = next;
 		currentFen = fen;
+	}
+
+	// Effective starting position for game analysis: the user-pinned
+	// `startingFenKey` when set, otherwise the nearest branching node from
+	// the rep's root. Games that never reach this position are skipped by
+	// the mistake scanner — displayed here so the user can see what the
+	// gate actually is and pin a different one if they want.
+	const effectiveStartingFenKey = $derived.by<string>(() => {
+		if (!rep) return '';
+		if (rep.startingFenKey) return rep.startingFenKey;
+		return nearestBranchingFenKey(nodes, rep.rootFenKey);
+	});
+	const startingIsPinned = $derived(!!rep?.startingFenKey);
+	const startingIsRoot = $derived(!!rep && effectiveStartingFenKey === rep.rootFenKey);
+	const startingIsCurrent = $derived(!!currentFenKey && currentFenKey === effectiveStartingFenKey);
+	// Build a SAN line describing the starting position by walking from the
+	// root. Falls back to "starting position" when the gate is the root.
+	const startingLineLabel = $derived.by<string>(() => {
+		if (!rep || !effectiveStartingFenKey) return '';
+		if (startingIsRoot) return 'starting position';
+		const edges = pathToFenKey(nodes, rep.rootFenKey, effectiveStartingFenKey);
+		if (!edges || edges.length === 0) return 'starting position';
+		const parts: string[] = [];
+		for (let i = 0; i < edges.length; i++) {
+			const san = edges[i].san;
+			if (i % 2 === 0) parts.push(`${Math.floor(i / 2) + 1}.${san}`);
+			else parts[parts.length - 1] += ` ${san}`;
+		}
+		return parts.join(' ');
+	});
+
+	async function pinStartingPositionHere() {
+		if (!rep || !currentFenKey) return;
+		await setStartingPosition(rep.id, currentFenKey);
+		rep = { ...rep, startingFenKey: currentFenKey };
+	}
+
+	async function clearStartingPosition() {
+		if (!rep) return;
+		await setStartingPosition(rep.id, undefined);
+		rep = { ...rep, startingFenKey: undefined };
 	}
 
 	function jumpTopEmpiricalGap() {
@@ -2037,6 +2078,66 @@
 				<p class="mt-2 text-[11px] text-[var(--color-parchment-500)]">
 					Saves on blur. Tied to the current FEN.
 				</p>
+			</div>
+
+			<!--
+				Analysis gate: the fenKey past which mistake-scan considers
+				this rep's tree "active". Defaults to the nearest branching
+				node from the root so a rep whose opening is a fixed
+				sequence (e.g. 1.e4 e5 2.Nf3 Nc6) only starts flagging
+				mistakes once that prefix is on the board. Pinning lets the
+				user override — useful for reps that cover a particular
+				middlegame structure reached via many move orders.
+			-->
+			<div class="ink-panel order-9 p-4 lg:order-none lg:col-start-1 lg:row-start-7">
+				<div class="mb-2 flex items-baseline justify-between gap-3">
+					<span class="eyebrow">Analysis starts from</span>
+					<span class="font-mono text-[10px] text-[var(--color-parchment-500)]">
+						{startingIsPinned ? 'pinned' : 'auto'}
+					</span>
+				</div>
+				<p class="mb-3 font-serif text-[13px] text-[var(--color-parchment-300)]">
+					Games only contribute mistakes and gaps once they reach
+					<span class="font-mono text-[12px] text-[var(--color-parchment-100)]">
+						{startingLineLabel}
+					</span>.
+					{#if !startingIsPinned}
+						<span class="text-[var(--color-parchment-500)] italic">
+							Auto-detected as the first branching position in the tree.
+						</span>
+					{/if}
+				</p>
+				<div class="flex flex-wrap items-center gap-2">
+					<Button
+						variant="secondary"
+						size="sm"
+						onclick={pinStartingPositionHere}
+						disabled={startingIsCurrent && startingIsPinned}
+						title="Pin the current position as the gate for mistake analysis. Games that never reach it are skipped for this repertoire."
+					>
+						{startingIsCurrent && startingIsPinned ? 'Pinned to current' : 'Pin current position'}
+					</Button>
+					{#if startingIsPinned}
+						<Button
+							variant="secondary"
+							size="sm"
+							onclick={clearStartingPosition}
+							title="Clear the pin and revert to auto-detection (nearest branching node)."
+						>
+							Clear pin
+						</Button>
+					{/if}
+					{#if !startingIsCurrent && effectiveStartingFenKey}
+						<Button
+							variant="secondary"
+							size="sm"
+							onclick={() => jumpToFenKey(effectiveStartingFenKey)}
+							title="Navigate the board to the current starting position."
+						>
+							Jump there
+						</Button>
+					{/if}
+				</div>
 			</div>
 
 			<div class="ink-panel order-8 p-4 lg:order-none lg:col-start-1 lg:row-start-6">

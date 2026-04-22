@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Edge, RepertoireNode } from '$lib/types';
-import { pathToFenKey } from './traversal';
+import { pathToFenKey, nearestBranchingFenKey } from './traversal';
 
 function node(fenKey: string, children: Edge[]): RepertoireNode {
 	return { repertoireId: 'r', fenKey, children };
@@ -59,6 +59,42 @@ describe('pathToFenKey', () => {
 		m.set('r', node('r', [edge('m1', 'a')]));
 		m.set('a', node('a', [edge('m2', 'r')]));
 		expect(pathToFenKey(m, 'r', 'z')).toBeNull();
+	});
+
+	it('nearestBranchingFenKey walks past single-child chain to first branch', () => {
+		const m = new Map<string, RepertoireNode>();
+		// r -e4-> a -e5-> b, then b branches into Nf3 and d4.
+		m.set('r', node('r', [edge('e4', 'a')]));
+		m.set('a', node('a', [edge('e5', 'b')]));
+		m.set('b', node('b', [edge('Nf3', 'c'), edge('d4', 'd')]));
+		m.set('c', node('c', []));
+		m.set('d', node('d', []));
+		expect(nearestBranchingFenKey(m, 'r')).toBe('b');
+	});
+
+	it('nearestBranchingFenKey returns root unchanged when root itself branches', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a'), edge('d4', 'b')]));
+		m.set('a', node('a', []));
+		m.set('b', node('b', []));
+		expect(nearestBranchingFenKey(m, 'r')).toBe('r');
+	});
+
+	it('nearestBranchingFenKey returns the leaf when the tree is a single line', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a')]));
+		m.set('a', node('a', [edge('e5', 'b')]));
+		m.set('b', node('b', []));
+		expect(nearestBranchingFenKey(m, 'r')).toBe('b');
+	});
+
+	it('nearestBranchingFenKey does not hang on a cycle', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('m1', 'a')]));
+		m.set('a', node('a', [edge('m2', 'r')]));
+		// Cycle: root has one child, child has one child back to root.
+		// Should terminate and return either node (whichever is visited second).
+		expect(nearestBranchingFenKey(m, 'r')).toBeDefined();
 	});
 
 	it('handles a cycle that still leads to the target', () => {

@@ -82,6 +82,18 @@ export async function saveCoverageSnapshot(
 	await db.put('repertoires', JSON.parse(JSON.stringify(rep)));
 }
 
+export async function setStartingPosition(
+	id: string,
+	fenKey: string | null | undefined
+): Promise<void> {
+	const db = await getDB();
+	const rep = await db.get('repertoires', id);
+	if (!rep) return;
+	rep.startingFenKey = fenKey ?? undefined;
+	rep.updatedAt = Date.now();
+	await db.put('repertoires', JSON.parse(JSON.stringify(rep)));
+}
+
 export async function setLichessStudyLink(
 	id: string,
 	link: LichessStudyLink | null
