@@ -24,7 +24,7 @@
 		isPromotionMove
 	} from '$lib/chess/position';
 	import { colorToMove, fenKeyFromFen } from '$lib/chess/fen';
-	import { pathToFenKey } from '$lib/tree/traversal';
+	import { pathToFenKey, nearestBranchingFenKey } from '$lib/tree/traversal';
 	import { Button, confirmDialog } from '$lib/ui';
 	import { playCorrect, playIncorrect } from '$lib/ui/sounds';
 	import { DRILL_INTRO_MS } from '$lib/types';
@@ -273,10 +273,39 @@
 				}
 			}
 		}
+		// Honour the "open at starting position" preference: when the
+		// board isn't already on the path (startIdx === 0), fast-forward
+		// past any forced prefix up to the rep's starting fenKey so the
+		// animation only covers the meaningful part of the line. Drills
+		// for cards *before* the starting position keep the full intro
+		// — the user explicitly drills them, so dropping animation would
+		// feel abrupt.
+		let skippedFen: string | null = null;
+		let skippedLastMove: [Key, Key] | undefined;
+		if (startIdx === 0 && settings?.openAtStartingPosition !== false) {
+			const startKey = rep.startingFenKey ?? nearestBranchingFenKey(nodes, rep.rootFenKey);
+			if (startKey && startKey !== rep.rootFenKey && startKey !== card.fenKey) {
+				let walkFen = rep.rootFen;
+				for (let i = 0; i < pathFromRoot.length; i++) {
+					const edge = pathFromRoot[i];
+					walkFen = fenAfterMove(walkFen, edge);
+					if (edge.toFenKey === startKey) {
+						startIdx = i + 1;
+						skippedFen = walkFen;
+						skippedLastMove = [edge.uci.slice(0, 2) as Key, edge.uci.slice(2, 4) as Key];
+						break;
+					}
+				}
+			}
+		}
 
 		phase = 'intro';
 		let fen: string;
-		if (startIdx === 0) {
+		if (skippedFen) {
+			fen = skippedFen;
+			currentFen = fen;
+			userLastMove = skippedLastMove;
+		} else if (startIdx === 0) {
 			fen = rep.rootFen;
 			currentFen = fen;
 			userLastMove = undefined;

@@ -180,6 +180,17 @@ export interface AppSettings {
 	 * Master volume multiplier for UI sounds, 0–1. Defaults to 1.
 	 */
 	soundsVolume?: number;
+	/**
+	 * When true, opening the builder and starting a drill session jump
+	 * straight to the repertoire's starting position instead of the rep
+	 * root. Pairs with the per-rep `startingFenKey` (or its auto-detected
+	 * nearest-branching-node fallback) — reps with a deep starting
+	 * position skip the forced prefix entirely, so the user lands on the
+	 * first position where there's a real choice. Defaults to enabled; the
+	 * builder honours it only on a fresh open (no `?jump=` deep-link, no
+	 * prep walk-through), so existing flows aren't hijacked.
+	 */
+	openAtStartingPosition?: boolean;
 }
 
 export interface StoredMistake {

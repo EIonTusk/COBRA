@@ -19,7 +19,8 @@ export function defaultSettings(): AppSettings {
 		useLichessServerEval: true,
 		styleAdviceEnabled: false,
 		soundsEnabled: true,
-		soundsVolume: 1
+		soundsVolume: 1,
+		openAtStartingPosition: true
 	};
 }
 

@@ -7,6 +7,7 @@
 	import { createEmptyCard } from 'ts-fsrs';
 	import {
 		ArrowLeft,
+		Bookmark,
 		Bot,
 		ChevronDown,
 		ChevronFirst,
@@ -696,8 +697,20 @@
 		// Used by the Opponent-prep page to drop you straight at the
 		// position whose reply you need to add.
 		const jumpKey = page.url.searchParams.get('jump');
+		const isPrepWalk = page.url.searchParams.get('prep') === 'walk';
 		if (jumpKey && nodes.has(jumpKey)) {
 			jumpToFenKey(jumpKey);
+		} else if (!isPrepWalk && settings?.openAtStartingPosition !== false && nodes.size > 0) {
+			// Per-user default: open the builder straight at the rep's
+			// starting position (explicit pin, else nearest branching
+			// node) so the user doesn't have to click through the forced
+			// prefix every time. Skipped when a deep-link target, a prep
+			// walk-through, or the starting position resolves to the
+			// root (nothing to skip).
+			const startKey = rep.startingFenKey ?? nearestBranchingFenKey(nodes, rep.rootFenKey);
+			if (startKey && startKey !== rep.rootFenKey && nodes.has(startKey)) {
+				jumpToFenKey(startKey);
+			}
 		}
 		// Walk-through from the Opponent-prep page. Loads the queued list of
 		// gaps from sessionStorage, jumps to the first one, and surfaces a
@@ -988,44 +1001,28 @@
 	}
 
 	// Effective starting position for game analysis: the user-pinned
-	// `startingFenKey` when set, otherwise the nearest branching node from
-	// the rep's root. Games that never reach this position are skipped by
-	// the mistake scanner — displayed here so the user can see what the
-	// gate actually is and pin a different one if they want.
+	// `startingFenKey` when set, otherwise the nearest branching node
+	// from the rep's root. The bookmark icon on the Line strip renders
+	// at whichever ply matches this fenKey; clicking toggles the pin.
 	const effectiveStartingFenKey = $derived.by<string>(() => {
 		if (!rep) return '';
 		if (rep.startingFenKey) return rep.startingFenKey;
 		return nearestBranchingFenKey(nodes, rep.rootFenKey);
 	});
 	const startingIsPinned = $derived(!!rep?.startingFenKey);
-	const startingIsRoot = $derived(!!rep && effectiveStartingFenKey === rep.rootFenKey);
-	const startingIsCurrent = $derived(!!currentFenKey && currentFenKey === effectiveStartingFenKey);
-	// Build a SAN line describing the starting position by walking from the
-	// root. Falls back to "starting position" when the gate is the root.
-	const startingLineLabel = $derived.by<string>(() => {
-		if (!rep || !effectiveStartingFenKey) return '';
-		if (startingIsRoot) return 'starting position';
-		const edges = pathToFenKey(nodes, rep.rootFenKey, effectiveStartingFenKey);
-		if (!edges || edges.length === 0) return 'starting position';
-		const parts: string[] = [];
-		for (let i = 0; i < edges.length; i++) {
-			const san = edges[i].san;
-			if (i % 2 === 0) parts.push(`${Math.floor(i / 2) + 1}.${san}`);
-			else parts[parts.length - 1] += ` ${san}`;
-		}
-		return parts.join(' ');
-	});
 
-	async function pinStartingPositionHere() {
-		if (!rep || !currentFenKey) return;
-		await setStartingPosition(rep.id, currentFenKey);
-		rep = { ...rep, startingFenKey: currentFenKey };
-	}
-
-	async function clearStartingPosition() {
-		if (!rep) return;
-		await setStartingPosition(rep.id, undefined);
-		rep = { ...rep, startingFenKey: undefined };
+	/**
+	 * Toggle the analysis gate at the given fenKey. Pins if unpinned (or
+	 * pinned elsewhere); unpins if this ply is already the pinned gate,
+	 * reverting to auto-detection. Called from the inline bookmark icon
+	 * on each ply in the Line strip — the icon is only shown on
+	 * non-branching positions, so callers don't need to re-validate.
+	 */
+	async function toggleGateAtPly(fenKey: string) {
+		if (!rep || !fenKey) return;
+		const nextKey = rep.startingFenKey && rep.startingFenKey === fenKey ? undefined : fenKey;
+		await setStartingPosition(rep.id, nextKey);
+		rep = { ...rep, startingFenKey: nextKey };
 	}
 
 	function jumpTopEmpiricalGap() {
@@ -2013,10 +2010,14 @@
 							{#each history as step, i (i)}
 								{@const prefix = moveNumberPrefix(i)}
 								{@const sibs = siblingsAt(i)}
+								{@const plyNode = nodes.get(step.fenKey)}
+								{@const plyBranching = (plyNode?.children.length ?? 0) > 1}
+								{@const plyIsGate = step.fenKey === effectiveStartingFenKey}
+								{@const plyBookmarkable = !plyBranching && !!plyNode}
 								{#if prefix}
 									<span class="text-[var(--color-parchment-500)]">{prefix}</span>
 								{/if}
-								<span class="inline-flex items-center gap-1">
+								<span class="group/ply inline-flex items-center gap-1">
 									<button
 										type="button"
 										onclick={() => goToPly(i)}
@@ -2025,6 +2026,31 @@
 									>
 										{step.san}
 									</button>
+									{#if plyIsGate || plyBookmarkable}
+										{@const gateClasses = plyIsGate
+											? startingIsPinned
+												? 'text-[var(--color-brass-300)] hover:text-[var(--color-brass-200)]'
+												: 'text-[var(--color-parchment-500)] hover:text-[var(--color-brass-300)]'
+											: 'text-[var(--color-parchment-500)] opacity-0 group-hover/ply:opacity-60 hover:!opacity-100 hover:text-[var(--color-brass-300)]'}
+										<button
+											type="button"
+											onclick={() => toggleGateAtPly(step.fenKey)}
+											disabled={!plyBookmarkable}
+											title={plyIsGate
+												? startingIsPinned
+													? 'Analysis starts here — click to unpin (revert to auto)'
+													: 'Auto-detected analysis start — click to pin explicitly'
+												: 'Pin analysis to start from this position'}
+											aria-label="Analysis starting position marker"
+											class="inline-flex size-4 items-center justify-center rounded-[2px] transition-colors {gateClasses}"
+										>
+											<Bookmark
+												class="size-3"
+												strokeWidth={1.75}
+												fill={plyIsGate && startingIsPinned ? 'currentColor' : 'none'}
+											/>
+										</button>
+									{/if}
 								</span>
 								{#if sibs.length > 0}
 									<span class="text-[var(--color-parchment-600)]">(</span>
@@ -2078,66 +2104,6 @@
 				<p class="mt-2 text-[11px] text-[var(--color-parchment-500)]">
 					Saves on blur. Tied to the current FEN.
 				</p>
-			</div>
-
-			<!--
-				Analysis gate: the fenKey past which mistake-scan considers
-				this rep's tree "active". Defaults to the nearest branching
-				node from the root so a rep whose opening is a fixed
-				sequence (e.g. 1.e4 e5 2.Nf3 Nc6) only starts flagging
-				mistakes once that prefix is on the board. Pinning lets the
-				user override — useful for reps that cover a particular
-				middlegame structure reached via many move orders.
-			-->
-			<div class="ink-panel order-9 p-4 lg:order-none lg:col-start-1 lg:row-start-7">
-				<div class="mb-2 flex items-baseline justify-between gap-3">
-					<span class="eyebrow">Analysis starts from</span>
-					<span class="font-mono text-[10px] text-[var(--color-parchment-500)]">
-						{startingIsPinned ? 'pinned' : 'auto'}
-					</span>
-				</div>
-				<p class="mb-3 font-serif text-[13px] text-[var(--color-parchment-300)]">
-					Games only contribute mistakes and gaps once they reach
-					<span class="font-mono text-[12px] text-[var(--color-parchment-100)]">
-						{startingLineLabel}
-					</span>.
-					{#if !startingIsPinned}
-						<span class="text-[var(--color-parchment-500)] italic">
-							Auto-detected as the first branching position in the tree.
-						</span>
-					{/if}
-				</p>
-				<div class="flex flex-wrap items-center gap-2">
-					<Button
-						variant="secondary"
-						size="sm"
-						onclick={pinStartingPositionHere}
-						disabled={startingIsCurrent && startingIsPinned}
-						title="Pin the current position as the gate for mistake analysis. Games that never reach it are skipped for this repertoire."
-					>
-						{startingIsCurrent && startingIsPinned ? 'Pinned to current' : 'Pin current position'}
-					</Button>
-					{#if startingIsPinned}
-						<Button
-							variant="secondary"
-							size="sm"
-							onclick={clearStartingPosition}
-							title="Clear the pin and revert to auto-detection (nearest branching node)."
-						>
-							Clear pin
-						</Button>
-					{/if}
-					{#if !startingIsCurrent && effectiveStartingFenKey}
-						<Button
-							variant="secondary"
-							size="sm"
-							onclick={() => jumpToFenKey(effectiveStartingFenKey)}
-							title="Navigate the board to the current starting position."
-						>
-							Jump there
-						</Button>
-					{/if}
-				</div>
 			</div>
 
 			<div class="ink-panel order-8 p-4 lg:order-none lg:col-start-1 lg:row-start-6">
