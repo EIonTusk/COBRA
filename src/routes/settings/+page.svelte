@@ -950,15 +950,37 @@
 					COBRA is free and local-first. If it's useful to you, a coffee helps fuel the next
 					feature.
 				</p>
-				<a
-					href="https://www.buymeacoffee.com/EIonTusk"
-					target="_blank"
-					rel="noopener"
-					class="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-4 text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-brass-300)]/50 hover:bg-[var(--color-ink-850)]"
-				>
-					<span aria-hidden="true">☕</span>
-					<span>Buy me a coffee</span>
-				</a>
+				<div class="flex flex-wrap items-center gap-2">
+					<a
+						href="https://www.buymeacoffee.com/EIonTusk"
+						target="_blank"
+						rel="noopener"
+						class="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-4 text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-brass-300)]/50 hover:bg-[var(--color-ink-850)]"
+					>
+						<span aria-hidden="true">☕</span>
+						<span>Buy me a coffee</span>
+					</a>
+					<a
+						href="https://github.com/EIonTusk/COBRA/issues/new?labels=enhancement&template=feature_request.md"
+						target="_blank"
+						rel="noopener"
+						class="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-4 text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-brass-300)]/50 hover:bg-[var(--color-ink-850)]"
+					>
+						<span aria-hidden="true">💡</span>
+						<span>Request a feature</span>
+						<ExternalLink class="size-3 text-[var(--color-parchment-500)]" strokeWidth={1.75} />
+					</a>
+					<a
+						href="https://github.com/EIonTusk/COBRA/issues/new?labels=bug"
+						target="_blank"
+						rel="noopener"
+						class="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-4 text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-brass-300)]/50 hover:bg-[var(--color-ink-850)]"
+					>
+						<AlertTriangle class="size-3.5 text-[var(--color-parchment-400)]" />
+						<span>Report a bug</span>
+						<ExternalLink class="size-3 text-[var(--color-parchment-500)]" strokeWidth={1.75} />
+					</a>
+				</div>
 			</section>
 		</div>
 	{/if}
