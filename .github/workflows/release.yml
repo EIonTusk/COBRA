@@ -274,14 +274,13 @@ jobs:
       - name: Collect iOS artifacts
         run: |
           mkdir -p dist
-          shopt -s globstar nullglob
-          for f in src-tauri/gen/apple/build/**/*.ipa; do
+          while IFS= read -r -d '' f; do
             cp "$f" "dist/cobra-${{ steps.tag.outputs.value }}-$(basename "$f")"
-          done
+          done < <(find src-tauri/gen/apple/build -type f -name '*.ipa' -print0 2>/dev/null)
           # Simulator builds produce .app bundles — zip them up.
-          for d in src-tauri/gen/apple/build/**/*.app; do
+          while IFS= read -r -d '' d; do
             (cd "$(dirname "$d")" && zip -qr "$GITHUB_WORKSPACE/dist/cobra-${{ steps.tag.outputs.value }}-sim-$(basename "$d").zip" "$(basename "$d")")
-          done
+          done < <(find src-tauri/gen/apple/build -type d -name '*.app' -print0 2>/dev/null)
           ls -la dist || true
 
       - uses: actions/upload-artifact@v4
@@ -410,11 +409,10 @@ jobs:
         id: collect
         run: |
           mkdir -p dist
-          shopt -s globstar nullglob
-          for f in src-tauri/gen/android/app/build/outputs/apk/**/*.apk; do
+          while IFS= read -r -d '' f; do
             name="cobra-${{ steps.tag.outputs.value }}-$(basename "$f")"
             cp "$f" "dist/$name"
-          done
+          done < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print0 2>/dev/null)
           ls -la dist
 
       - uses: actions/upload-artifact@v4
