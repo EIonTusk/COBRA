@@ -108,7 +108,10 @@ interface BaselineBucketJson {
 	games?: number;
 	totalMoves?: number;
 	axes: AxisRates;
+	/** Optional per-axis SD of the peer sample; enables z-score comparison. */
+	axesSd?: AxisRates;
 	tension: { releaseRate: number; creationRate: number };
+	tensionSd?: { releaseRate: number; creationRate: number };
 	/** ISO string from the offline script, or epoch ms from a runtime calibration. */
 	computedAt?: string | number;
 	seedUsers?: string[];
@@ -128,6 +131,8 @@ interface BaselineBucketJson {
 export interface BaselinePhaseStatsJson {
 	moves: number;
 	avgCpLoss: number;
+	/** Population SD of per-move CP loss in this bucket; enables z-scores. */
+	avgCpLossSd?: number;
 	blunderRate: number;
 	inaccuracyRate: number;
 }
@@ -201,13 +206,18 @@ export const BASELINE_META = {
 
 export interface PickedBaseline {
 	axes: AxisRates;
+	/** Per-axis population SD for the picked peer bucket; undefined on eyeballed fallback. */
+	axesSd?: AxisRates;
 	tension: TensionStats;
+	tensionSd?: { releaseRate: number; creationRate: number };
 	source: 'eyeballed' | 'empirical' | 'bucketed' | 'self-calibrated';
 	bucket: BaselineBucketJson | null;
 	/** v2 peer fields — present only when the picked bucket carries them. */
 	evalByPhaseColor?: BaselinePhaseColorJson;
 	criticalMoments?: BaselineCriticalMomentsJson;
 	clockSpend?: BaselineClockSpendJson;
+	/** Peer sample size (games) for methodology disclosure. */
+	peerGames?: number;
 }
 
 /**
@@ -236,24 +246,30 @@ export function pickBaseline(rating: number | null, speed?: string): PickedBasel
 		if (fromRuntime) {
 			return {
 				axes: fromRuntime.axes,
+				axesSd: fromRuntime.axesSd,
 				tension: { tensionedMoves: 0, ...fromRuntime.tension },
+				tensionSd: fromRuntime.tensionSd,
 				source: 'self-calibrated',
 				bucket: fromRuntime,
 				evalByPhaseColor: fromRuntime.evalByPhaseColor ?? rootEval,
 				criticalMoments: fromRuntime.criticalMoments ?? rootCritical,
-				clockSpend: fromRuntime.clockSpend ?? rootClock
+				clockSpend: fromRuntime.clockSpend ?? rootClock,
+				peerGames: fromRuntime.games
 			};
 		}
 		const fromStatic = pickFrom(BASELINE_BUCKETS, rating, speed);
 		if (fromStatic) {
 			return {
 				axes: fromStatic.axes,
+				axesSd: fromStatic.axesSd,
 				tension: { tensionedMoves: 0, ...fromStatic.tension },
+				tensionSd: fromStatic.tensionSd,
 				source: 'bucketed',
 				bucket: fromStatic,
 				evalByPhaseColor: fromStatic.evalByPhaseColor ?? rootEval,
 				criticalMoments: fromStatic.criticalMoments ?? rootCritical,
-				clockSpend: fromStatic.clockSpend ?? rootClock
+				clockSpend: fromStatic.clockSpend ?? rootClock,
+				peerGames: fromStatic.games
 			};
 		}
 	}

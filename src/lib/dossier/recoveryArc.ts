@@ -7,6 +7,7 @@
  */
 
 import type { EvalMoveResult } from './evalAxes';
+import { wilsonInterval, type Interval } from './stats';
 
 export interface RecoveryPoint {
 	offset: number; // 0 = the blunder itself, 1..N = subsequent user moves
@@ -19,7 +20,9 @@ export interface RecoveryArcSummary {
 	totalBlunders: number;
 	points: RecoveryPoint[];
 	cascadeRate: number; // fraction of blunders followed by another blunder within 3 moves
+	cascadeCI95: Interval;
 	steadyRate: number; // fraction followed by 3 consecutive ≤30cp-loss moves
+	steadyCI95: Interval;
 }
 
 const HORIZON = 5;
@@ -28,7 +31,14 @@ export function analyseRecoveryArc(
 	evalMoves: EvalMoveResult[] | null | undefined
 ): RecoveryArcSummary {
 	if (!evalMoves || evalMoves.length === 0)
-		return { totalBlunders: 0, points: [], cascadeRate: 0, steadyRate: 0 };
+		return {
+			totalBlunders: 0,
+			points: [],
+			cascadeRate: 0,
+			cascadeCI95: { lo: 0, hi: 0 },
+			steadyRate: 0,
+			steadyCI95: { lo: 0, hi: 0 }
+		};
 
 	const byGame = new Map<string, EvalMoveResult[]>();
 	for (const m of evalMoves) {
@@ -92,6 +102,8 @@ export function analyseRecoveryArc(
 		totalBlunders: blunderCount,
 		points,
 		cascadeRate: blunderCount > 0 ? cascade / blunderCount : 0,
-		steadyRate: blunderCount > 0 ? steady / blunderCount : 0
+		cascadeCI95: wilsonInterval(cascade, blunderCount),
+		steadyRate: blunderCount > 0 ? steady / blunderCount : 0,
+		steadyCI95: wilsonInterval(steady, blunderCount)
 	};
 }

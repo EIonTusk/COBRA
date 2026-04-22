@@ -13,6 +13,7 @@
 
 import type { ClassifiedGame, MoveFeatures } from './classify';
 import type { EvalMoveResult } from './evalAxes';
+import { wilsonInterval, type Interval } from './stats';
 
 export type DifficultyBucket = 'only-move' | 'few-options' | 'many-options';
 
@@ -23,11 +24,14 @@ export interface DefenseRow {
 	flipped: number;
 	lost: number;
 	defenseRate: number;
+	/** Wilson 95% CI for this bucket's defense rate. */
+	defenseCI95: Interval;
 }
 
 export interface DefenseSummary {
 	totalLosingEntries: number;
 	overallDefenseRate: number;
+	overallDefenseCI95: Interval;
 	byDifficulty: DefenseRow[];
 	avgLegalMovesAtEntry: number;
 }
@@ -50,6 +54,7 @@ export function analyseDefensiveResource(
 		return {
 			totalLosingEntries: 0,
 			overallDefenseRate: 0,
+			overallDefenseCI95: { lo: 0, hi: 0 },
 			byDifficulty: [],
 			avgLegalMovesAtEntry: 0
 		};
@@ -72,14 +77,23 @@ export function analyseDefensiveResource(
 	}
 
 	const rows: Record<DifficultyBucket, DefenseRow> = {
-		'only-move': { bucket: 'only-move', games: 0, held: 0, flipped: 0, lost: 0, defenseRate: 0 },
+		'only-move': {
+			bucket: 'only-move',
+			games: 0,
+			held: 0,
+			flipped: 0,
+			lost: 0,
+			defenseRate: 0,
+			defenseCI95: { lo: 0, hi: 0 }
+		},
 		'few-options': {
 			bucket: 'few-options',
 			games: 0,
 			held: 0,
 			flipped: 0,
 			lost: 0,
-			defenseRate: 0
+			defenseRate: 0,
+			defenseCI95: { lo: 0, hi: 0 }
 		},
 		'many-options': {
 			bucket: 'many-options',
@@ -87,7 +101,8 @@ export function analyseDefensiveResource(
 			held: 0,
 			flipped: 0,
 			lost: 0,
-			defenseRate: 0
+			defenseRate: 0,
+			defenseCI95: { lo: 0, hi: 0 }
 		}
 	};
 
@@ -115,14 +130,17 @@ export function analyseDefensiveResource(
 	let saved = 0;
 	for (const k of ['only-move', 'few-options', 'many-options'] as const) {
 		const r = rows[k];
-		r.defenseRate = r.games > 0 ? (r.held + r.flipped) / r.games : 0;
+		const savedInBucket = r.held + r.flipped;
+		r.defenseRate = r.games > 0 ? savedInBucket / r.games : 0;
+		r.defenseCI95 = wilsonInterval(savedInBucket, r.games);
 		total += r.games;
-		saved += r.held + r.flipped;
+		saved += savedInBucket;
 	}
 
 	return {
 		totalLosingEntries: total,
 		overallDefenseRate: total > 0 ? saved / total : 0,
+		overallDefenseCI95: wilsonInterval(saved, total),
 		byDifficulty: [rows['only-move'], rows['few-options'], rows['many-options']],
 		avgLegalMovesAtEntry: legalCount > 0 ? legalSum / legalCount : 0
 	};

@@ -39,6 +39,7 @@ import type { DossierScanResult } from './scan';
 import { analyseEvalAxes, type EvalAxesSummary, type EvalMoveResult } from './evalAxes';
 import { buildCriticalMoments } from './criticalMoments';
 import { buildClockSpend } from './clockSpend';
+import type { BaselineAxisSd } from '$lib/storage/db';
 
 export interface CalibrateOpts {
 	settings: AppSettings;
@@ -185,13 +186,19 @@ export async function calibrateBaseline(opts: CalibrateOpts): Promise<CalibrateR
 		}
 
 		if (evalSummary && evalSummary.movesAnalysed > 0) {
-			evalByPhaseColor = toBaselinePhaseColor(evalSummary);
+			evalByPhaseColor = toBaselinePhaseColor(evalSummary, evalSummary.allMoves);
 			criticalMoments = toBaselineCriticalMoments(evalSummary.allMoves);
 			clockSpend = toBaselineClockSpend(subset, evalSummary.allMoves);
 			evalGamesSampled = subset.length;
 			evalMovesAnalysed = evalSummary.movesAnalysed;
 		}
 	}
+
+	const axesSd = axesSdFrom(acc.perGame);
+	const tensionSd = {
+		releaseRate: round(sdOf(acc.perGame.map((r) => r.releaseRate))),
+		creationRate: round(sdOf(acc.perGame.map((r) => r.creationRate)))
+	};
 
 	const bucket: StoredBaselineBucket = {
 		id: bucketKey(speed, ratingMin, ratingMax),
@@ -207,10 +214,12 @@ export async function calibrateBaseline(opts: CalibrateOpts): Promise<CalibrateR
 			queenside: round(acc.queenside / acc.totalMoves),
 			earlyCastle: round(acc.castledGames / Math.max(1, acc.games))
 		},
+		axesSd,
 		tension: {
 			releaseRate: acc.tensioned > 0 ? round(acc.released / acc.tensioned) : 0,
 			creationRate: round(acc.created / acc.totalMoves)
 		},
+		tensionSd,
 		computedAt: Date.now(),
 		source: 'self-calibrated',
 		seedCount: sample.length,
@@ -229,32 +238,52 @@ export async function calibrateBaseline(opts: CalibrateOpts): Promise<CalibrateR
 	};
 }
 
-function toBaselinePhaseColor(summary: EvalAxesSummary): BaselinePhaseColor {
+function toBaselinePhaseColor(
+	summary: EvalAxesSummary,
+	allMoves: EvalMoveResult[]
+): BaselinePhaseColor {
+	const cpBuckets = bucketCpLoss(allMoves);
 	return {
 		opening: {
-			white: roundPhase(summary.byPhaseColor.opening.white),
-			black: roundPhase(summary.byPhaseColor.opening.black)
+			white: roundPhase(summary.byPhaseColor.opening.white, cpBuckets.opening.white),
+			black: roundPhase(summary.byPhaseColor.opening.black, cpBuckets.opening.black)
 		},
 		middle: {
-			white: roundPhase(summary.byPhaseColor.middle.white),
-			black: roundPhase(summary.byPhaseColor.middle.black)
+			white: roundPhase(summary.byPhaseColor.middle.white, cpBuckets.middle.white),
+			black: roundPhase(summary.byPhaseColor.middle.black, cpBuckets.middle.black)
 		},
 		end: {
-			white: roundPhase(summary.byPhaseColor.end.white),
-			black: roundPhase(summary.byPhaseColor.end.black)
+			white: roundPhase(summary.byPhaseColor.end.white, cpBuckets.end.white),
+			black: roundPhase(summary.byPhaseColor.end.black, cpBuckets.end.black)
 		}
 	};
 }
 
-function roundPhase(p: {
-	moves: number;
-	avgCpLoss: number;
-	blunderRate: number;
-	inaccuracyRate: number;
-}) {
+type PhaseColorCpBuckets = Record<Phase, Record<'white' | 'black', number[]>>;
+
+function bucketCpLoss(moves: EvalMoveResult[]): PhaseColorCpBuckets {
+	const out: PhaseColorCpBuckets = {
+		opening: { white: [], black: [] },
+		middle: { white: [], black: [] },
+		end: { white: [], black: [] }
+	};
+	for (const m of moves) out[m.phase][m.userColor].push(m.cpLoss);
+	return out;
+}
+
+function roundPhase(
+	p: {
+		moves: number;
+		avgCpLoss: number;
+		blunderRate: number;
+		inaccuracyRate: number;
+	},
+	cpSamples: number[]
+) {
 	return {
 		moves: p.moves,
 		avgCpLoss: Math.round(p.avgCpLoss * 10) / 10,
+		avgCpLossSd: Math.round(sdOf(cpSamples) * 10) / 10,
 		blunderRate: round(p.blunderRate),
 		inaccuracyRate: round(p.inaccuracyRate)
 	};
@@ -291,6 +320,23 @@ function toBaselineClockSpend(
 // Keep unused type imports from triggering lint when tree-shaken.
 void (null as unknown as Phase);
 
+/**
+ * Per-game axis rates collected alongside the scalar counters. Used to
+ * compute population SDs for z-score baselines. Each row is one peer
+ * game, so SD is "how much do *peers* vary from one another" — the
+ * correct denominator for comparing a user's per-game or per-move axis
+ * to the peer distribution.
+ */
+interface PerGameRow {
+	forcing: number;
+	capture: number;
+	pawnPlay: number;
+	queenside: number;
+	earlyCastle: number;
+	releaseRate: number;
+	creationRate: number;
+}
+
 interface Acc {
 	totalMoves: number;
 	games: number;
@@ -302,6 +348,8 @@ interface Acc {
 	tensioned: number;
 	released: number;
 	created: number;
+	/** Per-game axis samples; length == games. Used for SD computation. */
+	perGame: PerGameRow[];
 }
 
 function emptyAcc(): Acc {
@@ -315,27 +363,90 @@ function emptyAcc(): Acc {
 		castledGames: 0,
 		tensioned: 0,
 		released: 0,
-		created: 0
+		created: 0,
+		perGame: []
 	};
 }
 
 function absorb(acc: Acc, g: ClassifiedGame) {
 	acc.games += 1;
 	let castled = false;
+	let gForcing = 0;
+	let gCapture = 0;
+	let gPawn = 0;
+	let gQueen = 0;
+	let gTensioned = 0;
+	let gReleased = 0;
+	let gCreated = 0;
+	const gMoves = g.moves.length;
 	for (const m of g.moves) {
 		acc.totalMoves += 1;
-		if (m.isCapture || m.isCheck) acc.forcing += 1;
-		if (m.isCapture) acc.capture += 1;
-		if (m.isPawnMove) acc.pawnPlay += 1;
-		if (m.toFile <= 3) acc.queenside += 1;
+		if (m.isCapture || m.isCheck) {
+			acc.forcing += 1;
+			gForcing += 1;
+		}
+		if (m.isCapture) {
+			acc.capture += 1;
+			gCapture += 1;
+		}
+		if (m.isPawnMove) {
+			acc.pawnPlay += 1;
+			gPawn += 1;
+		}
+		if (m.toFile <= 3) {
+			acc.queenside += 1;
+			gQueen += 1;
+		}
 		if (m.tensionBefore > 0) {
 			acc.tensioned += 1;
-			if (m.tensionAction === 'released') acc.released += 1;
+			gTensioned += 1;
+			if (m.tensionAction === 'released') {
+				acc.released += 1;
+				gReleased += 1;
+			}
 		}
-		if (m.tensionAction === 'created') acc.created += 1;
+		if (m.tensionAction === 'created') {
+			acc.created += 1;
+			gCreated += 1;
+		}
 		if (isEarlyCastle(m)) castled = true;
 	}
 	if (castled) acc.castledGames += 1;
+	const safeMoves = gMoves || 1;
+	acc.perGame.push({
+		forcing: gForcing / safeMoves,
+		capture: gCapture / safeMoves,
+		pawnPlay: gPawn / safeMoves,
+		queenside: gQueen / safeMoves,
+		earlyCastle: castled ? 1 : 0,
+		releaseRate: gTensioned > 0 ? gReleased / gTensioned : 0,
+		creationRate: gCreated / safeMoves
+	});
+}
+
+/**
+ * Population SD of a per-game axis across the peer sample. Skips buckets
+ * with <2 games (SD undefined); consumers fall back to zero-SD handling
+ * in `stats.ts:zScore`.
+ */
+function sdOf(samples: number[]): number {
+	if (samples.length < 2) return 0;
+	let sum = 0;
+	for (const x of samples) sum += x;
+	const mean = sum / samples.length;
+	let sq = 0;
+	for (const x of samples) sq += (x - mean) * (x - mean);
+	return Math.sqrt(sq / samples.length);
+}
+
+function axesSdFrom(rows: PerGameRow[]): BaselineAxisSd {
+	return {
+		forcing: round(sdOf(rows.map((r) => r.forcing))),
+		capture: round(sdOf(rows.map((r) => r.capture))),
+		pawnPlay: round(sdOf(rows.map((r) => r.pawnPlay))),
+		queenside: round(sdOf(rows.map((r) => r.queenside))),
+		earlyCastle: round(sdOf(rows.map((r) => r.earlyCastle)))
+	};
 }
 
 function isEarlyCastle(m: MoveFeatures): boolean {

@@ -17,6 +17,7 @@ import {
 	type OpeningProfile,
 	type DossierFingerprint
 } from './fingerprint';
+import { zScore, type ZScore } from './stats';
 
 export interface Archetype {
 	headline: string;
@@ -24,6 +25,18 @@ export interface Archetype {
 	tags: string[];
 	structure: StructureLabel;
 	tempo: TempoLabel;
+	/**
+	 * Per-axis z-scores against the peer baseline, when the baseline
+	 * carries second moments. Null when the baseline is eyeballed or
+	 * lacks SDs — in that case the archetype label falls back to fixed
+	 * delta thresholds, the previous v1 behaviour.
+	 */
+	axisZ: {
+		forcing: ZScore | null;
+		pawnPlay: ZScore | null;
+		releaseRate: ZScore | null;
+		creationRate: ZScore | null;
+	};
 }
 
 export type StructureLabel =
@@ -52,36 +65,72 @@ export function deriveArchetype(fp: DossierFingerprint): Archetype {
 	const releaseDelta = fp.tension.releaseRate - baseline.tension.releaseRate;
 	const forcingDelta = fp.overall.forcing - baseline.axes.forcing;
 
+	// z-scores when the baseline carries SDs. Labels prefer |z| >= Z_STRONG
+	// (meaningful) when available, falling back to fixed delta thresholds
+	// on older baselines.
+	const axisZ = {
+		pawnPlay: baseline.axesSd
+			? zScore(fp.overall.pawnPlay, baseline.axes.pawnPlay, baseline.axesSd.pawnPlay)
+			: null,
+		forcing: baseline.axesSd
+			? zScore(fp.overall.forcing, baseline.axes.forcing, baseline.axesSd.forcing)
+			: null,
+		creationRate: baseline.tensionSd
+			? zScore(
+					fp.tension.creationRate,
+					baseline.tension.creationRate,
+					baseline.tensionSd.creationRate
+				)
+			: null,
+		releaseRate: baseline.tensionSd
+			? zScore(fp.tension.releaseRate, baseline.tension.releaseRate, baseline.tensionSd.releaseRate)
+			: null
+	};
+	const Z_STRONG = 0.8;
+	const Z_MODERATE = 0.4;
+
 	const tags: string[] = [];
 
+	const highPawn = axisZ.pawnPlay ? axisZ.pawnPlay.z > Z_STRONG : pawnDelta > 0.03;
+	const lowPawn = axisZ.pawnPlay ? axisZ.pawnPlay.z < -Z_STRONG : pawnDelta < -0.03;
+	const highCreate = axisZ.creationRate ? axisZ.creationRate.z > Z_MODERATE : createDelta > 0.015;
+	const lowCreate = axisZ.creationRate ? axisZ.creationRate.z < -Z_MODERATE : createDelta < -0.015;
+
 	let structure: StructureLabel;
-	if (pawnDelta < -0.03 && createDelta < -0.015) {
+	if (lowPawn && lowCreate) {
 		structure = 'conservative';
 		tags.push('pieces over pawns', 'avoids initiating contact');
-	} else if (pawnDelta > 0.03 && createDelta > 0.015) {
+	} else if (highPawn && highCreate) {
 		structure = 'aggressor';
 		tags.push('pawn-driven', 'initiates pawn breaks');
-	} else if (pawnDelta < -0.03) {
+	} else if (lowPawn) {
 		structure = 'piece_player';
 		tags.push('low pawn share');
-	} else if (pawnDelta > 0.03) {
+	} else if (highPawn) {
 		structure = 'pawn_driven';
 		tags.push('above-average pawn share');
 	} else {
 		structure = 'balanced';
 	}
 
+	const highRelease = axisZ.releaseRate ? axisZ.releaseRate.z > Z_STRONG : releaseDelta > 0.03;
+	const lowRelease = axisZ.releaseRate ? axisZ.releaseRate.z < -Z_STRONG : releaseDelta < -0.03;
+	const highForcing = axisZ.forcing ? axisZ.forcing.z > Z_STRONG : forcingDelta > 0.04;
+	const lowForcing = axisZ.forcing ? axisZ.forcing.z < -Z_STRONG : forcingDelta < -0.04;
+	const forcingUp = axisZ.forcing ? axisZ.forcing.z > Z_MODERATE : forcingDelta > 0.02;
+	const forcingDown = axisZ.forcing ? axisZ.forcing.z < -Z_MODERATE : forcingDelta < 0.02;
+
 	let tempo: TempoLabel;
-	if (releaseDelta < -0.03 && forcingDelta < 0.02) {
+	if (lowRelease && forcingDown) {
 		tempo = 'patient';
 		tags.push('keeps positions complex');
-	} else if (releaseDelta > 0.03 && forcingDelta > 0.02) {
+	} else if (highRelease && forcingUp) {
 		tempo = 'trader';
 		tags.push('resolves contact early');
-	} else if (forcingDelta > 0.04) {
+	} else if (highForcing) {
 		tempo = 'forcing';
 		tags.push('reaches for tactics');
-	} else if (forcingDelta < -0.04) {
+	} else if (lowForcing) {
 		tempo = 'quiet';
 	} else {
 		tempo = 'balanced';
@@ -89,7 +138,7 @@ export function deriveArchetype(fp: DossierFingerprint): Archetype {
 
 	const headline = `${labelStructure(structure)} · ${labelTempo(tempo)}`;
 	const subline = sublineFor(structure, tempo);
-	return { headline, subline, tags, structure, tempo };
+	return { headline, subline, tags, structure, tempo, axisZ };
 }
 
 function labelStructure(s: StructureLabel): string {

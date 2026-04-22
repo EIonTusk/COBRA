@@ -5,6 +5,7 @@
  */
 
 import type { EvalMoveResult } from './evalAxes';
+import { wilsonInterval, type Interval } from './stats';
 
 export interface BlunderTimingBucket {
 	label: string;
@@ -15,6 +16,7 @@ export interface BlunderTimingBucket {
 	mistakes: number;
 	inaccuracies: number;
 	rate: number; // (blunders + mistakes) / moves
+	rateCI95: Interval;
 }
 
 export interface BlunderTimingSummary {
@@ -45,7 +47,8 @@ export function analyseBlunderTiming(
 		blunders: 0,
 		mistakes: 0,
 		inaccuracies: 0,
-		rate: 0
+		rate: 0,
+		rateCI95: { lo: 0, hi: 0 }
 	}));
 
 	for (const m of evalMoves) {
@@ -63,8 +66,13 @@ export function analyseBlunderTiming(
 	let totalBlunders = 0;
 	let peak: BlunderTimingBucket | null = null;
 	for (const b of buckets) {
-		b.rate = b.moves > 0 ? (b.blunders + b.mistakes) / b.moves : 0;
+		const bad = b.blunders + b.mistakes;
+		b.rate = b.moves > 0 ? bad / b.moves : 0;
+		b.rateCI95 = wilsonInterval(bad, b.moves);
 		totalBlunders += b.blunders;
+		// Only declare a peak if the bucket's CI lower bound clears the
+		// overall rate — prevents calling a noisy move-51+ bucket "peak"
+		// on 12 moves when the headline is really just sampling noise.
 		if (b.moves >= 20 && (!peak || b.rate > peak.rate)) peak = b;
 	}
 

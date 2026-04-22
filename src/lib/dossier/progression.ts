@@ -7,6 +7,7 @@
 
 import type { ClassifiedGame } from './classify';
 import type { EvalMoveResult } from './evalAxes';
+import { shrinkageMean } from './stats';
 
 export interface MonthlyPoint {
 	monthKey: string; // YYYY-MM
@@ -18,7 +19,15 @@ export interface MonthlyPoint {
 	winRate: number;
 	avgRating: number | null;
 	avgCpLoss: number | null;
+	/**
+	 * Empirical-Bayes shrunk CP loss for this month — pulls low-volume
+	 * months toward the user's lifetime mean so a 3-game month doesn't
+	 * swing the progression chart. `avgCpLoss` is the raw value; prefer
+	 * this for headlines and trend comparisons.
+	 */
+	shrunkCpLoss: number | null;
 	blunderRate: number | null;
+	shrunkBlunderRate: number | null;
 	forcing: number;
 	capture: number;
 	pawnPlay: number;
@@ -30,6 +39,8 @@ export interface ProgressionSummary {
 	deltaCpLoss: number | null;
 	deltaWinRate: number | null;
 	direction: 'improving' | 'stable' | 'slipping' | null;
+	/** Prior weight used by the shrinkage (games). Exposed for methodology. */
+	shrinkagePriorGames: number;
 }
 
 export function analyseProgression(
@@ -104,7 +115,7 @@ export function analyseProgression(
 		}
 	}
 
-	const months: MonthlyPoint[] = Array.from(byMonth.entries())
+	const rawMonths = Array.from(byMonth.entries())
 		.sort(([a], [b]) => (a < b ? -1 : 1))
 		.map(([monthKey, e]) => ({
 			monthKey,
@@ -117,18 +128,88 @@ export function analyseProgression(
 				e.games.length > 0 ? e.games.filter((g) => g.result === 'win').length / e.games.length : 0,
 			avgRating: e.ratingN > 0 ? e.ratingSum / e.ratingN : null,
 			avgCpLoss: e.cpN > 0 ? e.cpSum / e.cpN : null,
+			cpN: e.cpN,
 			blunderRate: e.blunderN > 0 ? e.blunderSum / e.blunderN : null,
+			blunderN: e.blunderN,
 			forcing: e.moves > 0 ? e.forcing / e.moves : 0,
 			capture: e.moves > 0 ? e.capture / e.moves : 0,
 			pawnPlay: e.moves > 0 ? e.pawnPlay / e.moves : 0
 		}));
 
+	// Empirical-Bayes shrinkage toward the lifetime grand mean.
+	//
+	// Rationale: a 3-game month with avgCpLoss = 95 is almost all noise —
+	// the mean of a 3-sample sample has a very wide CI. By shrinking each
+	// month's CP loss toward the user's lifetime mean proportionally to
+	// n / (n + n0), we get a trajectory that ignores low-volume months
+	// without throwing them away. n0 is chosen as the typical monthly
+	// volume for this user (median of nonzero-cpN months), clamped to a
+	// reasonable range so one-off outliers don't dominate the prior.
+	const cpEligible = rawMonths.filter((m) => m.avgCpLoss != null);
+	const blunderEligible = rawMonths.filter((m) => m.blunderRate != null);
+	const grandCp =
+		cpEligible.length > 0
+			? cpEligible.reduce((s, m) => s + (m.avgCpLoss ?? 0) * m.cpN, 0) /
+				Math.max(
+					1,
+					cpEligible.reduce((s, m) => s + m.cpN, 0)
+				)
+			: null;
+	const grandBlunder =
+		blunderEligible.length > 0
+			? blunderEligible.reduce((s, m) => s + (m.blunderRate ?? 0) * m.blunderN, 0) /
+				Math.max(
+					1,
+					blunderEligible.reduce((s, m) => s + m.blunderN, 0)
+				)
+			: null;
+	const medianCpN = cpEligible.length > 0 ? median(cpEligible.map((m) => m.cpN)) : 20;
+	const priorN = Math.max(10, Math.min(50, medianCpN));
+
+	const shrunkCp =
+		grandCp != null
+			? shrinkageMean(
+					rawMonths.map((m) => ({ mean: m.avgCpLoss ?? grandCp, n: m.cpN })),
+					grandCp,
+					priorN
+				)
+			: [];
+	const shrunkBlunder =
+		grandBlunder != null
+			? shrinkageMean(
+					rawMonths.map((m) => ({ mean: m.blunderRate ?? grandBlunder, n: m.blunderN })),
+					grandBlunder,
+					priorN
+				)
+			: [];
+
+	const months: MonthlyPoint[] = rawMonths.map((m, i) => ({
+		monthKey: m.monthKey,
+		label: m.label,
+		games: m.games,
+		wins: m.wins,
+		losses: m.losses,
+		draws: m.draws,
+		winRate: m.winRate,
+		avgRating: m.avgRating,
+		avgCpLoss: m.avgCpLoss,
+		shrunkCpLoss: grandCp != null && m.cpN > 0 ? shrunkCp[i] : null,
+		blunderRate: m.blunderRate,
+		shrunkBlunderRate: grandBlunder != null && m.blunderN > 0 ? shrunkBlunder[i] : null,
+		forcing: m.forcing,
+		capture: m.capture,
+		pawnPlay: m.pawnPlay
+	}));
+
 	const first = months[0];
 	const last = months[months.length - 1];
 	const deltaRating =
 		first?.avgRating != null && last?.avgRating != null ? last.avgRating - first.avgRating : null;
-	const deltaCpLoss =
-		first?.avgCpLoss != null && last?.avgCpLoss != null ? last.avgCpLoss - first.avgCpLoss : null;
+	// Use shrunk CP loss for the headline trend so thin months don't
+	// dominate. Raw delta stays on each point for users who want it.
+	const firstCp = first?.shrunkCpLoss ?? first?.avgCpLoss ?? null;
+	const lastCp = last?.shrunkCpLoss ?? last?.avgCpLoss ?? null;
+	const deltaCpLoss = firstCp != null && lastCp != null ? lastCp - firstCp : null;
 	const deltaWinRate = first && last ? last.winRate - first.winRate : null;
 
 	let direction: ProgressionSummary['direction'] = null;
@@ -141,7 +222,21 @@ export function analyseProgression(
 		else direction = 'stable';
 	}
 
-	return { months, deltaRating, deltaCpLoss, deltaWinRate, direction };
+	return {
+		months,
+		deltaRating,
+		deltaCpLoss,
+		deltaWinRate,
+		direction,
+		shrinkagePriorGames: priorN
+	};
+}
+
+function median(xs: number[]): number {
+	if (xs.length === 0) return 0;
+	const sorted = [...xs].sort((a, b) => a - b);
+	const mid = Math.floor(sorted.length / 2);
+	return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
 function formatMonthLabel(key: string): string {

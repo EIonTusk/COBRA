@@ -129,7 +129,11 @@ const acc = {
 	castledGames: 0,
 	tensioned: 0,
 	released: 0,
-	created: 0
+	created: 0,
+	// Per-game axis samples — one row per peer game. Used to compute
+	// population SD so downstream code can report z-scores against this
+	// bucket instead of naked deltas.
+	perGame: []
 };
 
 for (const user of userPool) {
@@ -159,9 +163,20 @@ const newBucket = {
 		queenside: round(acc.queenside / totalMoves),
 		earlyCastle: round(acc.castledGames / games)
 	},
+	axesSd: {
+		forcing: round(sdOf(acc.perGame.map((r) => r.forcing))),
+		capture: round(sdOf(acc.perGame.map((r) => r.capture))),
+		pawnPlay: round(sdOf(acc.perGame.map((r) => r.pawnPlay))),
+		queenside: round(sdOf(acc.perGame.map((r) => r.queenside))),
+		earlyCastle: round(sdOf(acc.perGame.map((r) => r.earlyCastle)))
+	},
 	tension: {
 		releaseRate: acc.tensioned > 0 ? round(acc.released / acc.tensioned) : 0,
 		creationRate: round(acc.created / totalMoves)
+	},
+	tensionSd: {
+		releaseRate: round(sdOf(acc.perGame.map((r) => r.releaseRate))),
+		creationRate: round(sdOf(acc.perGame.map((r) => r.creationRate)))
 	},
 	computedAt: new Date().toISOString()
 };
@@ -224,6 +239,15 @@ function processGame(game, user, acc) {
 	const pos = startR.value;
 	acc.games += 1;
 	let castledThisGame = false;
+	// Per-game counters — rolled up into `perGame` at end of game.
+	let gForcing = 0;
+	let gCapture = 0;
+	let gPawn = 0;
+	let gQueen = 0;
+	let gMoves = 0;
+	let gTensioned = 0;
+	let gReleased = 0;
+	let gCreated = 0;
 
 	for (const node of parsed[0].moves.mainline()) {
 		const move = parseSan(pos, node.san);
@@ -241,21 +265,62 @@ function processGame(game, user, acc) {
 				const isCheck = after.isCheck();
 				const tAfter = countTension(after);
 				acc.totalMoves += 1;
-				if (isCapture || isCheck) acc.forcing += 1;
-				if (isCapture) acc.capture += 1;
-				if (isPawn) acc.pawnPlay += 1;
-				if ((move.to & 7) <= 3) acc.queenside += 1;
+				gMoves += 1;
+				if (isCapture || isCheck) {
+					acc.forcing += 1;
+					gForcing += 1;
+				}
+				if (isCapture) {
+					acc.capture += 1;
+					gCapture += 1;
+				}
+				if (isPawn) {
+					acc.pawnPlay += 1;
+					gPawn += 1;
+				}
+				if ((move.to & 7) <= 3) {
+					acc.queenside += 1;
+					gQueen += 1;
+				}
 				if (node.san.startsWith('O-O') && pos.fullmoves <= 20) castledThisGame = true;
 				if (tBefore > 0) {
 					acc.tensioned += 1;
-					if (tAfter < tBefore) acc.released += 1;
+					gTensioned += 1;
+					if (tAfter < tBefore) {
+						acc.released += 1;
+						gReleased += 1;
+					}
 				}
-				if (tAfter > tBefore && tBefore === 0) acc.created += 1;
+				if (tAfter > tBefore && tBefore === 0) {
+					acc.created += 1;
+					gCreated += 1;
+				}
 			}
 		}
 		pos.play(move);
 	}
 	if (castledThisGame) acc.castledGames += 1;
+	if (gMoves > 0) {
+		acc.perGame.push({
+			forcing: gForcing / gMoves,
+			capture: gCapture / gMoves,
+			pawnPlay: gPawn / gMoves,
+			queenside: gQueen / gMoves,
+			earlyCastle: castledThisGame ? 1 : 0,
+			releaseRate: gTensioned > 0 ? gReleased / gTensioned : 0,
+			creationRate: gCreated / gMoves
+		});
+	}
+}
+
+function sdOf(xs) {
+	if (xs.length < 2) return 0;
+	let sum = 0;
+	for (const x of xs) sum += x;
+	const mean = sum / xs.length;
+	let sq = 0;
+	for (const x of xs) sq += (x - mean) * (x - mean);
+	return Math.sqrt(sq / xs.length);
 }
 
 function mergeBucket(path, newBucket) {

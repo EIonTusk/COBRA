@@ -108,21 +108,48 @@ export function buildFixFirst(result: DossierScanResult): FixFirstSummary {
 	}
 
 	// 4. Time-pressure leak.
-	const byClock = result.fingerprint.byClock;
-	if (byClock && byClock.low.moves >= 40) {
-		const lowBlunderRate = byClock.low.forcing - byClock.high.forcing; // proxy
-		if (lowBlunderRate > 0.05) {
-			candidates.push({
-				rank: 0,
-				title: 'Time-pressure forcing-move spike',
-				category: 'time-pressure',
-				frequency: byClock.low.moves,
-				avgCpLoss: 0,
-				fixability: 0.6,
-				impact: 0,
-				score: 0,
-				action: `Practise playing quieter moves under 10s — your forcing-move rate jumps under time pressure.`
-			});
+	//
+	// Previously this used a forcing-rate delta between low- and high-clock
+	// buckets as a proxy for blunder rate. That's two removes from the
+	// signal it claimed to measure. Now we compute a real per-bucket
+	// blunder rate from EvalMoveResult and only flag when the low-clock
+	// bucket's rate genuinely exceeds the high-clock bucket's.
+	if (evalMoves) {
+		const clockAcc: Record<
+			'low' | 'mid' | 'high',
+			{ moves: number; blunders: number; cpSum: number }
+		> = {
+			low: { moves: 0, blunders: 0, cpSum: 0 },
+			mid: { moves: 0, blunders: 0, cpSum: 0 },
+			high: { moves: 0, blunders: 0, cpSum: 0 }
+		};
+		for (const m of evalMoves) {
+			if (m.clockBucket === 'none') continue;
+			const a = clockAcc[m.clockBucket];
+			a.moves += 1;
+			a.cpSum += m.cpLoss;
+			if (m.classification === 'blunder') a.blunders += 1;
+		}
+		const low = clockAcc.low;
+		const high = clockAcc.high;
+		if (low.moves >= 40 && high.moves >= 40) {
+			const lowRate = low.blunders / low.moves;
+			const highRate = high.blunders / high.moves;
+			const rateDelta = lowRate - highRate;
+			const avgCpLowBucket = low.cpSum / low.moves;
+			if (rateDelta >= 0.03 && lowRate >= 0.05) {
+				candidates.push({
+					rank: 0,
+					title: 'Time-pressure blunder spike',
+					category: 'time-pressure',
+					frequency: low.blunders,
+					avgCpLoss: avgCpLowBucket,
+					fixability: 0.6,
+					impact: 0,
+					score: 0,
+					action: `Your blunder rate climbs from ${(highRate * 100).toFixed(1)}% at high-clock to ${(lowRate * 100).toFixed(1)}% under 10 seconds — budget time earlier in the game.`
+				});
+			}
 		}
 	}
 

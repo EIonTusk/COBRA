@@ -31,6 +31,14 @@ export interface StoredDossierReport {
 	payload: unknown;
 }
 
+export interface BaselineAxisSd {
+	forcing: number;
+	capture: number;
+	pawnPlay: number;
+	queenside: number;
+	earlyCastle: number;
+}
+
 export interface StoredBaselineBucket {
 	id: string; // composite "${bucket}:${ratingMin}-${ratingMax}"
 	bucket?: string;
@@ -45,7 +53,17 @@ export interface StoredBaselineBucket {
 		queenside: number;
 		earlyCastle: number;
 	};
+	/**
+	 * Per-axis population standard deviations in the peer bucket. Optional
+	 * because older buckets were computed before this field existed — any
+	 * consumer reading z-scores must fall back gracefully.
+	 * Measured per-game (earlyCastle) or per-move (the rest) depending on
+	 * the axis; see calibrate.ts for the specifics.
+	 */
+	axesSd?: BaselineAxisSd;
 	tension: { releaseRate: number; creationRate: number };
+	/** Optional SD of per-game releaseRate / creationRate across the peer sample. */
+	tensionSd?: { releaseRate: number; creationRate: number };
 	computedAt: number;
 	source: 'self-calibrated';
 	seedCount: number;
@@ -65,6 +83,12 @@ export interface StoredBaselineBucket {
 export interface BaselinePhaseStats {
 	moves: number;
 	avgCpLoss: number;
+	/**
+	 * Population SD of per-move CP loss in this phase-colour bucket.
+	 * Optional for backward compatibility with buckets computed before
+	 * the stats refactor. Required for z-score computation downstream.
+	 */
+	avgCpLossSd?: number;
 	blunderRate: number;
 	inaccuracyRate: number;
 }

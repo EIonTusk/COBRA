@@ -53,8 +53,17 @@
 								<span class="font-mono text-xs text-[var(--color-parchment-500)]">#{c.rank}</span>
 								<span class="ml-2 text-[var(--color-parchment-100)]">{c.title}</span>
 							</div>
-							<div class="font-mono text-xs text-[var(--color-parchment-400)]">
-								score {c.score.toFixed(2)}
+							<!--
+								Prior versions exposed an absolute `score` here. It was
+								dimensionless (normalised combination of frequency and CP
+								loss) and implied precision it doesn't have. The rank
+								on the left is what users should read — the score is
+								only meaningful for sorting.
+							-->
+							<div
+								class="font-mono text-[10px] tracking-wider text-[var(--color-parchment-500)] uppercase"
+							>
+								{c.category}
 							</div>
 						</div>
 						<div class="mt-1 text-xs text-[var(--color-parchment-500)]">

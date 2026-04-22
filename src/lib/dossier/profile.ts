@@ -126,52 +126,76 @@ export function buildDossierProfile(
 			});
 		}
 
-		// Critical-moments driven (only with peer rates)
+		// Critical-moments driven. Only award the badge when the user CI
+		// statistically separates from the peer CI — a meaningful delta
+		// alone isn't enough once we have error bars.
 		if (criticalMoments) {
 			const convDelta = deltaOrNull(
 				criticalMoments.conversion.rate,
 				criticalMoments.conversion.peerRate
 			);
 			const defDelta = deltaOrNull(criticalMoments.defense.rate, criticalMoments.defense.peerRate);
+			const convSeparated = criticalMoments.conversion.peerSeparated === true;
+			const defSeparated = criticalMoments.defense.peerSeparated === true;
 
-			if (convDelta != null && convDelta >= 0.1 && criticalMoments.conversion.games >= 5) {
+			if (
+				convDelta != null &&
+				convDelta >= 0.1 &&
+				criticalMoments.conversion.games >= 5 &&
+				convSeparated
+			) {
 				strengths.push({
 					key: 'converter',
 					kind: 'strength',
 					label: 'Converter',
 					tagline: "When you're winning, the game's over.",
-					evidence: `${pct(criticalMoments.conversion.rate)} conversion (peers ${pct(criticalMoments.conversion.peerRate!)})`,
+					evidence: `${pct(criticalMoments.conversion.rate)} conversion (peers ${pct(criticalMoments.conversion.peerRate!)}; user CI ${ciPct(criticalMoments.conversion.ci95)})`,
 					confidence: clamp(convDelta * 3, 0.4, 1)
 				});
 			}
-			if (defDelta != null && defDelta >= 0.1 && criticalMoments.defense.games >= 5) {
+			if (
+				defDelta != null &&
+				defDelta >= 0.1 &&
+				criticalMoments.defense.games >= 5 &&
+				defSeparated
+			) {
 				strengths.push({
 					key: 'counterpuncher',
 					kind: 'strength',
 					label: 'Counterpuncher',
-					tagline: 'You fight back from the brink more often than you should.',
-					evidence: `${pct(criticalMoments.defense.rate)} saves from −1.5 (peers ${pct(criticalMoments.defense.peerRate!)})`,
+					tagline: 'You save materially losing positions more often than peers in your band.',
+					evidence: `${pct(criticalMoments.defense.rate)} saves from −1.5 (peers ${pct(criticalMoments.defense.peerRate!)}; user CI ${ciPct(criticalMoments.defense.ci95)})`,
 					confidence: clamp(defDelta * 3, 0.4, 1)
 				});
 			}
 
-			if (convDelta != null && convDelta <= -0.12 && criticalMoments.conversion.games >= 5) {
+			if (
+				convDelta != null &&
+				convDelta <= -0.12 &&
+				criticalMoments.conversion.games >= 5 &&
+				convSeparated
+			) {
 				weaknesses.push({
 					key: 'poor_converter',
 					kind: 'weakness',
 					label: 'Winning-position wobble',
 					tagline: 'Your wins leak in the last stretch.',
-					evidence: `${pct(criticalMoments.conversion.rate)} conversion vs peers ${pct(criticalMoments.conversion.peerRate!)}`,
+					evidence: `${pct(criticalMoments.conversion.rate)} conversion vs peers ${pct(criticalMoments.conversion.peerRate!)} (user CI ${ciPct(criticalMoments.conversion.ci95)})`,
 					confidence: clamp(-convDelta * 3, 0.4, 1)
 				});
 			}
-			if (defDelta != null && defDelta <= -0.12 && criticalMoments.defense.games >= 5) {
+			if (
+				defDelta != null &&
+				defDelta <= -0.12 &&
+				criticalMoments.defense.games >= 5 &&
+				defSeparated
+			) {
 				weaknesses.push({
 					key: 'fragile_defender',
 					kind: 'weakness',
 					label: 'Fragile defender',
 					tagline: 'When pressed, positions collapse quickly.',
-					evidence: `${pct(criticalMoments.defense.rate)} saves from −1.5 vs peers ${pct(criticalMoments.defense.peerRate!)}`,
+					evidence: `${pct(criticalMoments.defense.rate)} saves from −1.5 vs peers ${pct(criticalMoments.defense.peerRate!)} (user CI ${ciPct(criticalMoments.defense.ci95)})`,
 					confidence: clamp(-defDelta * 3, 0.4, 1)
 				});
 			}
@@ -449,6 +473,10 @@ function buildSummary(primary: DossierBadge | null, dna: DnaTrait[]): string | n
 
 function pct(x: number): string {
 	return `${(x * 100).toFixed(1)}%`;
+}
+
+function ciPct(ci: { lo: number; hi: number }): string {
+	return `[${(ci.lo * 100).toFixed(0)}–${(ci.hi * 100).toFixed(0)}%]`;
 }
 
 function clamp(x: number, lo: number, hi: number): number {

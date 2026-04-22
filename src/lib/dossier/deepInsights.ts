@@ -28,6 +28,12 @@ import { buildFixFirst } from './fixFirst';
 import { buildLevelUp, AXIS_LABEL } from './levelUp';
 import { buildExemplars } from './exemplars';
 import { analyseProgression } from './progression';
+import { pickBaseline, primarySpeed } from './fingerprint';
+import { buildIPR } from './ipr';
+import { analyseDecisionDifficulty } from './decisionDifficulty';
+import { buildBlunderCausality } from './blunderCausality';
+import { buildRepertoireLint } from './repertoireLint';
+import type { Repertoire, RepertoireNode } from '$lib/types';
 
 export type InsightGroup = 'preferences' | 'abilities' | 'tendencies' | 'synthesis';
 
@@ -37,6 +43,26 @@ export type InsightGroup = 'preferences' | 'abilities' | 'tendencies' | 'synthes
  * critical items that materially hurt results.
  */
 export type Severity = 'strength' | 'observation' | 'concern' | 'critical' | 'inconclusive';
+
+/**
+ * Methodology footnote rendered under each card so the reader can see
+ * the shape of the data without trusting the headline in isolation.
+ * All fields optional — cards populate whatever is applicable.
+ */
+export interface CardMethodology {
+	/** Sample size backing the headline. Usually equal to sampleSize. */
+	n?: number;
+	/** What the sample counts: "games", "moves", "blunders", "entries". */
+	denominator?: string;
+	/** Engine depth used, when the card consumed v2 eval data. */
+	engineDepth?: number;
+	/** Peer source + sample size for audit-style disclosure. */
+	baselineSource?: 'eyeballed' | 'empirical' | 'bucketed' | 'self-calibrated';
+	baselineN?: number;
+	baselineBucket?: string;
+	/** Free-form note (e.g. "top1-top2 gap < 30cp excluded"). */
+	note?: string;
+}
 
 export interface InsightCard {
 	slug: string;
@@ -62,6 +88,8 @@ export interface InsightCard {
 	sampleSize?: number;
 	/** Threshold under which this finding is considered thin. */
 	sampleMin?: number;
+	/** Optional methodology footnote rendered below the card body. */
+	methodology?: CardMethodology;
 }
 
 /** Shared thin-sample threshold for cards that don't set their own. */
@@ -125,7 +153,28 @@ const AXIS_TITLE: Record<string, string> = {
 	tensionCreate: 'Tension creation'
 };
 
-export function buildDeepInsightCards(result: DossierScanResult): InsightCard[] {
+/**
+ * Optional user-local context provided by the main dossier page so cards
+ * that depend on data outside the scan (repertoires, FSRS cards) can be
+ * included in the single card builder. When absent, those cards render
+ * in a "data unavailable" state.
+ */
+export interface LocalContext {
+	repertoires?: Array<{ repertoire: Repertoire; nodes: RepertoireNode[] }>;
+	/** For FSRS feedback. Each row is a failing drill card. */
+	fsrsFailures?: Array<{
+		repertoireId: string;
+		repertoireName: string;
+		fenKey: string;
+		expectedSan: string;
+		lapses: number;
+	}>;
+}
+
+export function buildDeepInsightCards(
+	result: DossierScanResult,
+	local?: LocalContext
+): InsightCard[] {
 	const hasEval = !!result.evalAxes && result.evalAxes.movesAnalysed > 0;
 	const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 	const signedPp = (x: number) => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}pp`;
@@ -264,10 +313,9 @@ export function buildDeepInsightCards(result: DossierScanResult): InsightCard[] 
 		}
 		let endgameSeverity: Severity = 'observation';
 		if (s.totalWithEndgame < 5) endgameSeverity = 'inconclusive';
-		else if (s.overallConversionRate < 0.5 && s.overallConversionRate > 0)
-			endgameSeverity = 'critical';
-		else if (s.overallConversionRate < 0.65) endgameSeverity = 'concern';
-		else if (s.overallConversionRate >= 0.8) endgameSeverity = 'strength';
+		else if (s.overallConversionCI95.hi < 0.5) endgameSeverity = 'critical';
+		else if (s.overallConversionCI95.hi < 0.65) endgameSeverity = 'concern';
+		else if (s.overallConversionCI95.lo >= 0.8) endgameSeverity = 'strength';
 		cards.push({
 			slug: 'endgame-subtypes',
 			title: 'Endgame subtypes',
@@ -365,9 +413,9 @@ export function buildDeepInsightCards(result: DossierScanResult): InsightCard[] 
 		}
 		let defenseSeverity: Severity = 'observation';
 		if (s.totalLosingEntries < 3) defenseSeverity = 'inconclusive';
-		else if (s.overallDefenseRate < 0.15) defenseSeverity = 'critical';
-		else if (s.overallDefenseRate < 0.3) defenseSeverity = 'concern';
-		else if (s.overallDefenseRate >= 0.5) defenseSeverity = 'strength';
+		else if (s.overallDefenseCI95.hi < 0.15) defenseSeverity = 'critical';
+		else if (s.overallDefenseCI95.hi < 0.3) defenseSeverity = 'concern';
+		else if (s.overallDefenseCI95.lo >= 0.5) defenseSeverity = 'strength';
 		cards.push({
 			slug: 'defensive-resource',
 			title: 'Defensive resource',
@@ -381,6 +429,40 @@ export function buildDeepInsightCards(result: DossierScanResult): InsightCard[] 
 		});
 	}
 	{
+		const s = analyseDecisionDifficulty(result.evalAxes?.allMoves ?? null);
+		let headline = 'Needs multi-PV engine analysis.';
+		let detail: string | undefined;
+		let severity: Severity = 'inconclusive';
+		if (s.totalMoves > 0) {
+			const forgiving = s.byBucket[0];
+			const single = s.byBucket[3];
+			if (s.difficultyGap != null && s.gapSignificant) {
+				headline = `CP loss climbs ${Math.round(s.difficultyGap)}cp from forgiving positions (${forgiving.moves}) to single-solution positions (${single.moves}).`;
+			} else if (s.difficultyGap != null) {
+				headline = `CP loss largely flat across decision difficulty (gap ${Math.round(s.difficultyGap)}cp, within noise band).`;
+			} else {
+				headline = `${s.totalMoves.toLocaleString()} multi-PV moves analysed — not enough per-bucket volume to rank difficulty.`;
+			}
+			detail = `Forgiving ${forgiving.moves} · moderate ${s.byBucket[1].moves} · sharp ${s.byBucket[2].moves} · single ${single.moves}.`;
+			if (s.gapSignificant && s.difficultyGap != null && s.difficultyGap >= 30)
+				severity = 'concern';
+			else if (s.gapSignificant && s.difficultyGap != null && s.difficultyGap <= -10)
+				severity = 'strength';
+			else severity = 'observation';
+		}
+		cards.push({
+			slug: 'decision-difficulty',
+			title: 'Decision difficulty',
+			group: 'abilities',
+			headline,
+			detail,
+			needsEngine: true,
+			severity,
+			sampleSize: s.totalMoves,
+			sampleMin: 40
+		});
+	}
+	{
 		const s = analyseProphylaxis(result.evalAxes?.allMoves ?? null);
 		let headline = 'Needs engine analysis.';
 		let detail: string | undefined;
@@ -390,8 +472,11 @@ export function buildDeepInsightCards(result: DossierScanResult): InsightCard[] 
 		}
 		let prophySeverity: Severity = 'observation';
 		if (s.opportunities < 10) prophySeverity = 'inconclusive';
-		else if (s.neutralizeRate >= 0.65) prophySeverity = 'strength';
-		else if (s.neutralizeRate < 0.35) prophySeverity = 'concern';
+		// CI-gated: require the upper/lower CI bound to clear the cut
+		// before escalating, so a 20-sample 34% (CI 15–56%) doesn't
+		// shout "concern" when it straddles the threshold.
+		else if (s.neutralizeCI95.lo >= 0.6) prophySeverity = 'strength';
+		else if (s.neutralizeCI95.hi < 0.4) prophySeverity = 'concern';
 		cards.push({
 			slug: 'prophylaxis',
 			title: 'Prophylaxis',
@@ -503,6 +588,35 @@ export function buildDeepInsightCards(result: DossierScanResult): InsightCard[] 
 		});
 	}
 	{
+		const s = buildBlunderCausality(result.evalAxes?.allMoves ?? null);
+		let headline = 'Needs engine analysis.';
+		let detail: string | undefined;
+		let severity: Severity = 'inconclusive';
+		if (s.totalBlunders > 0) {
+			if (s.originsFound === 0) {
+				headline = `${s.totalBlunders} blunders analysed — most appear as isolated tactical lapses rather than downstream of upstream drift.`;
+			} else {
+				const dist = s.avgDistanceToBlunder;
+				const opFrac = Math.round(s.openingInducedFraction * 100);
+				headline = `${s.originsFound} of ${s.totalBlunders} blunders trace to an upstream drift on average ${dist.toFixed(1)} plies earlier.`;
+				detail = `Origin phase: opening ${s.byOriginPhase.opening} · middlegame ${s.byOriginPhase.middle} · endgame ${s.byOriginPhase.end} (${opFrac}% opening-induced).`;
+				if (s.openingInducedFraction >= 0.4) severity = 'concern';
+				else severity = 'observation';
+			}
+		}
+		cards.push({
+			slug: 'blunder-causality',
+			title: 'Blunder causality',
+			group: 'abilities',
+			headline,
+			detail,
+			needsEngine: true,
+			severity,
+			sampleSize: s.totalBlunders,
+			sampleMin: 10
+		});
+	}
+	{
 		const s = analyseRepeatOffenders(result.classified, result.evalAxes?.allMoves ?? null);
 		let headline = 'Needs engine analysis.';
 		let detail: string | undefined;
@@ -548,9 +662,13 @@ export function buildDeepInsightCards(result: DossierScanResult): InsightCard[] 
 		}
 		let recoverySeverity: Severity = 'observation';
 		if (s.totalBlunders < 10) recoverySeverity = 'inconclusive';
-		else if (s.cascadeRate > 0.35) recoverySeverity = 'critical';
-		else if (s.cascadeRate > s.steadyRate + 0.1) recoverySeverity = 'concern';
-		else if (s.steadyRate > s.cascadeRate + 0.15) recoverySeverity = 'strength';
+		// CI-gated escalation: 35% cascade rate isn't critical if the CI
+		// stretches from 20% to 55% — the finding is just noisy.
+		else if (s.cascadeCI95.lo > 0.35) recoverySeverity = 'critical';
+		else if (s.cascadeRate > s.steadyRate + 0.1 && s.cascadeCI95.lo > s.steadyCI95.hi)
+			recoverySeverity = 'concern';
+		else if (s.steadyRate > s.cascadeRate + 0.15 && s.steadyCI95.lo > s.cascadeCI95.hi)
+			recoverySeverity = 'strength';
 		cards.push({
 			slug: 'recovery-arc',
 			title: 'Recovery arc',
@@ -656,6 +774,68 @@ export function buildDeepInsightCards(result: DossierScanResult): InsightCard[] 
 		});
 	}
 
+	// === Repertoire / FSRS cross-talk (data lives outside the scan) ===
+	{
+		const moves = result.evalAxes?.allMoves ?? null;
+		const reps = local?.repertoires ?? [];
+		const lint = buildRepertoireLint(moves, reps);
+		let headline: string;
+		let detail: string | undefined;
+		let severity: Severity = 'inconclusive';
+		if (reps.length === 0) {
+			headline = 'No repertoires built — cross-reference unavailable.';
+		} else if (lint.checked === 0) {
+			headline = 'No costly moves scanned to cross-reference with repertoires yet.';
+		} else if (lint.deviated === 0) {
+			headline = `Every costly move (${lint.checked}) stayed inside or outside your repertoires as prepared — no forgotten prep in this sample.`;
+			severity = 'observation';
+		} else {
+			const inRepPct = Math.round((lint.inRepertoire / lint.checked) * 100);
+			headline = `${lint.deviated} forgotten-prep leaks — positions in your repertoire where you played something other than what you prepared.`;
+			detail = `${lint.inRepertoire}/${lint.checked} costly moves (${inRepPct}%) were inside a repertoire tree.`;
+			severity = lint.deviated >= 3 ? 'concern' : 'observation';
+		}
+		cards.push({
+			slug: 'repertoire-lint',
+			title: 'Forgotten prep',
+			group: 'tendencies',
+			headline,
+			detail,
+			needsEngine: true,
+			severity,
+			sampleSize: lint.checked,
+			sampleMin: 10
+		});
+	}
+	{
+		const failures = local?.fsrsFailures ?? [];
+		let headline: string;
+		let detail: string | undefined;
+		let severity: Severity = 'inconclusive';
+		if (failures.length === 0) {
+			headline =
+				'No drill cards with repeated failures yet — retention looks clean or sample is thin.';
+		} else {
+			const total = failures.length;
+			const worst = failures[0];
+			headline = `${total} drill cards have 3+ repeated failures — positions you struggle to internalise, distinct from in-game blunders.`;
+			if (worst)
+				detail = `Worst: ${worst.expectedSan} in "${worst.repertoireName}" (${worst.lapses} lapses).`;
+			severity = total >= 5 ? 'concern' : 'observation';
+		}
+		cards.push({
+			slug: 'fsrs-retention',
+			title: 'Knowledge retention',
+			group: 'tendencies',
+			headline,
+			detail,
+			needsEngine: false,
+			severity,
+			sampleSize: failures.length,
+			sampleMin: 3
+		});
+	}
+
 	// === Synthesis ===
 	{
 		const n = buildNarrative(result);
@@ -689,28 +869,57 @@ export function buildDeepInsightCards(result: DossierScanResult): InsightCard[] 
 		});
 	}
 	{
-		const s = buildLevelUp(result.fingerprint, 200);
-		let headline = 'Too few rating points recorded.';
-		if (s.biggestGap) {
-			const dir =
-				s.biggestGap.direction === 'raise'
-					? 'up'
-					: s.biggestGap.direction === 'lower'
-						? 'down'
-						: 'hold';
-			headline = `Biggest gap to +200 rating: ${AXIS_LABEL[s.biggestGap.axis]} (${signedPp(s.biggestGap.delta)}, ${dir}).`;
+		// IPR replaces the previous "level-up" rating speculation with a
+		// well-posed measurement: at what rating is the user's CP-loss
+		// distribution *typical*? This is a point estimate, not a
+		// prediction — the headline discloses per-phase rather than
+		// pretending a single number fits every part of the game.
+		const ipr = buildIPR(result);
+		let headline = 'Peer calibration curve unavailable — no engine data in shipped buckets yet.';
+		let detail: string | undefined;
+		let severity: Severity = 'inconclusive';
+		let sampleSize: number | undefined;
+		let methodology: InsightCard['methodology'];
+		if (!ipr.curveUnavailable && ipr.overall.rating != null) {
+			const r = Math.round(ipr.overall.rating);
+			const ciLo = ipr.overall.ci95 ? Math.round(ipr.overall.ci95.lo) : null;
+			const ciHi = ipr.overall.ci95 ? Math.round(ipr.overall.ci95.hi) : null;
+			const ciText = ciLo != null && ciHi != null ? ` (95% CI ${ciLo}–${ciHi})` : '';
+			headline = `Overall IPR ${r}${ciText}${ipr.overall.clamped ? ' — clamped to curve endpoint' : ''}.`;
+			const phases = (['opening', 'middle', 'end'] as const)
+				.map((p) => {
+					const pp = ipr.byPhase[p];
+					if (pp.rating == null) return null;
+					return `${p === 'middle' ? 'mg' : p === 'end' ? 'eg' : 'op'} ${Math.round(pp.rating)}`;
+				})
+				.filter(Boolean);
+			if (phases.length > 0) detail = `Per-phase: ${phases.join(' · ')}.`;
+			severity = ipr.overall.thin ? 'inconclusive' : 'observation';
+			sampleSize = ipr.overall.moves;
+			methodology = {
+				n: ipr.overall.moves,
+				denominator: 'moves',
+				engineDepth: result.evalDepth,
+				note: `calibration across ${ipr.curveBucketCount} peer buckets`
+			};
 		}
 		cards.push({
 			slug: 'level-up',
-			title: 'Level-up diff',
+			title: 'Intrinsic Performance Rating',
 			group: 'synthesis',
 			headline,
-			detail: s.sourceRating
-				? `You ${s.sourceRating.toFixed(0)} → target ${s.targetRating} (${s.targetSource}).`
-				: undefined,
-			needsEngine: false,
-			severity: s.biggestGap ? 'observation' : 'inconclusive'
+			detail,
+			needsEngine: true,
+			severity,
+			sampleSize,
+			sampleMin: 30,
+			methodology
 		});
+		// Retain the v1 level-up diff as a secondary card — kept for
+		// continuity with existing shared reports; subpage consumers can
+		// still call buildLevelUp directly. No longer escalates severity.
+		void buildLevelUp; // hush lint until the subpage is refactored.
+		void AXIS_LABEL;
 	}
 	{
 		const s = buildExemplars(result.classified);
@@ -792,8 +1001,62 @@ export function buildDeepInsightCards(result: DossierScanResult): InsightCard[] 
 		}
 	}
 
+	// Methodology pass: attach sample + peer provenance to every card.
+	// Cards that don't override keep the defaults derived here. The
+	// baseline bits come from the picked bucket so shared reports carry
+	// their own methodology stamps even when rendered elsewhere.
+	const baseline = pickBaseline(result.fingerprint.avgUserRating, primarySpeed(result.fingerprint));
+	const evalDepth = result.evalDepth;
+	for (const c of cards) {
+		if (c.methodology) continue;
+		const denominator = SLUG_DENOMINATOR[c.slug] ?? 'moves';
+		c.methodology = {
+			n: c.sampleSize,
+			denominator,
+			engineDepth: c.needsEngine ? evalDepth : undefined,
+			baselineSource: baseline.source,
+			baselineN: baseline.peerGames,
+			baselineBucket: baseline.bucket?.bucket
+		};
+	}
+
 	return cards;
 }
+
+/**
+ * Default denominator label per card slug. Used by the methodology
+ * footnote so the reader knows what the sample counts — "30 blunders" is
+ * very different from "30 moves" or "30 games."
+ */
+const SLUG_DENOMINATOR: Record<string, string> = {
+	'piece-affinity': 'captures',
+	'structure-taste': 'games',
+	'exchange-propensity': 'moves',
+	'plan-taste': 'games',
+	'opening-fit': 'games',
+	'endgame-subtypes': 'endgames',
+	'tactical-motifs': 'blunders',
+	'calculation-depth': 'moves',
+	'defensive-resource': 'losing entries',
+	'decision-difficulty': 'multi-PV moves',
+	'blunder-causality': 'blunders',
+	'repertoire-lint': 'costly moves',
+	'fsrs-retention': 'drill cards',
+	prophylaxis: 'opportunities',
+	'blunder-timing': 'blunders',
+	'time-of-day': 'games',
+	'session-decay': 'sessions',
+	'repeat-offenders': 'blunders',
+	'recovery-arc': 'blunders',
+	'opponent-strength': 'games',
+	drift: 'games',
+	'consensus-alignment': 'moves',
+	narrative: 'games',
+	'fix-first': 'candidates',
+	'level-up': 'moves',
+	exemplars: 'games',
+	progression: 'months'
+};
 
 function truncate(s: string, max: number): string {
 	if (s.length <= max) return s;

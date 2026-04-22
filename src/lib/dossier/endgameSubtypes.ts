@@ -16,6 +16,8 @@
 
 import type { ClassifiedGame, EndgameFamily } from './classify';
 import type { EvalMoveResult } from './evalAxes';
+import type { BaselineCriticalMomentsJson } from './fingerprint';
+import { wilsonInterval, betaBinomialPosterior, type Interval, type PosteriorRate } from './stats';
 
 const FAMILY_LABELS: Record<EndgameFamily, string> = {
 	'king-pawn': 'King + pawns',
@@ -42,6 +44,7 @@ export interface EndgameBucket {
 	losses: number;
 	draws: number;
 	winRate: number;
+	winRateCI95: Interval;
 	convertedAhead: number;
 	missedAhead: number;
 	heldBehind: number;
@@ -51,19 +54,32 @@ export interface EndgameBucket {
 	enteredBehind: number;
 	enteredEqual: number;
 	conversionRate: number;
+	conversionCI95: Interval;
 	defenseRate: number;
+	defenseCI95: Interval;
+	/**
+	 * Beta-Binomial posterior for conversion rate, using the overall
+	 * peer (or user-wide) conversion rate as a prior. Pulls thin slices
+	 * (e.g. 3 opposite-bishop endings) toward the prior so the reader
+	 * doesn't see a shout finding off a tiny sample.
+	 */
+	conversionPosterior: PosteriorRate | null;
+	defensePosterior: PosteriorRate | null;
 }
 
 export interface EndgameSummary {
 	totalWithEndgame: number;
 	overallConversionRate: number;
+	overallConversionCI95: Interval;
 	overallDefenseRate: number;
+	overallDefenseCI95: Interval;
 	buckets: EndgameBucket[];
 }
 
 export function analyseEndgameSubtypes(
 	games: ClassifiedGame[],
-	evalMoves: EvalMoveResult[] | null
+	evalMoves: EvalMoveResult[] | null,
+	peer?: BaselineCriticalMomentsJson | null
 ): EndgameSummary {
 	const firstEndgameEval = new Map<string, number>(); // gameId -> eval before first endgame move
 	if (evalMoves) {
@@ -94,6 +110,7 @@ export function analyseEndgameSubtypes(
 				losses: 0,
 				draws: 0,
 				winRate: 0,
+				winRateCI95: { lo: 0, hi: 0 },
 				convertedAhead: 0,
 				missedAhead: 0,
 				heldBehind: 0,
@@ -103,7 +120,11 @@ export function analyseEndgameSubtypes(
 				enteredBehind: 0,
 				enteredEqual: 0,
 				conversionRate: 0,
-				defenseRate: 0
+				conversionCI95: { lo: 0, hi: 0 },
+				defenseRate: 0,
+				defenseCI95: { lo: 0, hi: 0 },
+				conversionPosterior: null,
+				defensePosterior: null
 			};
 			bucketMap.set(fam, bucket);
 		}
@@ -111,6 +132,7 @@ export function analyseEndgameSubtypes(
 		if (g.result === 'win') bucket.wins += 1;
 		else if (g.result === 'loss') bucket.losses += 1;
 		else bucket.draws += 1;
+		// (CIs populated after the aggregation loop.)
 
 		const entryEval = firstEndgameEval.get(g.gameId);
 		if (entryEval === undefined) continue;
@@ -141,17 +163,49 @@ export function analyseEndgameSubtypes(
 	}
 
 	const buckets = Array.from(bucketMap.values());
+	// Use peer priors when available; otherwise the user's own overall
+	// rate acts as an empirical prior, which still provides the right
+	// shrinkage behaviour on thin family slices.
+	const overallConversionRate = totalConvDenom > 0 ? totalConv / totalConvDenom : 0;
+	const overallDefenseRate = totalDefDenom > 0 ? totalDef / totalDefDenom : 0;
+	const convPriorMean = peer?.conversionRate ?? overallConversionRate;
+	const defPriorMean = peer?.defenseRate ?? overallDefenseRate;
+	const convPriorWeight = clampPrior(peer?.conversionGames, totalConvDenom);
+	const defPriorWeight = clampPrior(peer?.defenseGames, totalDefDenom);
+
 	for (const b of buckets) {
 		b.winRate = b.games > 0 ? b.wins / b.games : 0;
+		b.winRateCI95 = wilsonInterval(b.wins, b.games);
 		b.conversionRate = b.enteredAhead > 0 ? b.convertedAhead / b.enteredAhead : 0;
-		b.defenseRate = b.enteredBehind > 0 ? (b.heldBehind + b.flippedBehind) / b.enteredBehind : 0;
+		b.conversionCI95 = wilsonInterval(b.convertedAhead, b.enteredAhead);
+		const defenseSaves = b.heldBehind + b.flippedBehind;
+		b.defenseRate = b.enteredBehind > 0 ? defenseSaves / b.enteredBehind : 0;
+		b.defenseCI95 = wilsonInterval(defenseSaves, b.enteredBehind);
+		b.conversionPosterior =
+			b.enteredAhead > 0
+				? betaBinomialPosterior(b.convertedAhead, b.enteredAhead, convPriorMean, convPriorWeight)
+				: null;
+		b.defensePosterior =
+			b.enteredBehind > 0
+				? betaBinomialPosterior(defenseSaves, b.enteredBehind, defPriorMean, defPriorWeight)
+				: null;
 	}
 	buckets.sort((a, b) => b.games - a.games);
 
 	return {
 		totalWithEndgame: totalEndgames,
-		overallConversionRate: totalConvDenom > 0 ? totalConv / totalConvDenom : 0,
-		overallDefenseRate: totalDefDenom > 0 ? totalDef / totalDefDenom : 0,
+		overallConversionRate,
+		overallConversionCI95: wilsonInterval(totalConv, totalConvDenom),
+		overallDefenseRate,
+		overallDefenseCI95: wilsonInterval(totalDef, totalDefDenom),
 		buckets
 	};
+}
+
+function clampPrior(peerN: number | undefined, userN: number): number {
+	// If no peer sample, scale the user's own total as prior weight so
+	// family-level estimates shrink toward the user's global rate. Clamp
+	// so a tiny corpus still gives thin slices a meaningful pull.
+	const base = peerN ?? Math.max(10, userN);
+	return Math.max(10, Math.min(200, base));
 }

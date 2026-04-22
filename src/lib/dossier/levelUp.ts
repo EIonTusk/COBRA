@@ -10,6 +10,7 @@
 
 import type { AxisRates, DossierFingerprint } from './fingerprint';
 import { pickBaseline, primarySpeed } from './fingerprint';
+import { zScore, type ZScore } from './stats';
 
 export interface AxisDiff {
 	axis: keyof AxisRates;
@@ -18,6 +19,13 @@ export interface AxisDiff {
 	delta: number; // target − you
 	magnitude: number;
 	direction: 'raise' | 'lower' | 'hold';
+	/**
+	 * z-score of the *user* against the target-rating peer distribution.
+	 * Positive means the user is further from target in units of the
+	 * target bucket's SD; the magnitude here is what drives sorting when
+	 * available, replacing the raw `magnitude` for ranking purposes.
+	 */
+	userZvsTarget: ZScore | null;
 }
 
 export interface LevelUpSummary {
@@ -39,18 +47,29 @@ export function buildLevelUp(fp: DossierFingerprint, targetOffset = 200): LevelU
 	const diffs: AxisDiff[] = AXES.map((axis) => {
 		const yVal = (you as AxisRates)[axis];
 		const tVal = picked.axes[axis];
+		const sd = picked.axesSd?.[axis];
 		const delta = tVal - yVal;
 		const magnitude = Math.abs(delta);
+		const userZvsTarget = sd != null && sd > 0 ? zScore(yVal, tVal, sd) : null;
 		return {
 			axis,
 			you: yVal,
 			target: tVal,
 			delta,
 			magnitude,
-			direction: Math.abs(delta) < 0.01 ? 'hold' : delta > 0 ? 'raise' : 'lower'
+			direction: Math.abs(delta) < 0.01 ? 'hold' : delta > 0 ? 'raise' : 'lower',
+			userZvsTarget
 		};
 	});
-	diffs.sort((a, b) => b.magnitude - a.magnitude);
+	// Prefer |z| sorting when SDs are available — "furthest from target in
+	// units of peer SD" is a more honest ranking than raw delta, since a
+	// 0.03 gap on forcing (SD ~0.04) is smaller than a 0.03 gap on
+	// creationRate (SD ~0.015).
+	diffs.sort((a, b) => {
+		const za = a.userZvsTarget ? Math.abs(a.userZvsTarget.z) : a.magnitude * 10;
+		const zb = b.userZvsTarget ? Math.abs(b.userZvsTarget.z) : b.magnitude * 10;
+		return zb - za;
+	});
 
 	return {
 		targetRating: target ?? 0,

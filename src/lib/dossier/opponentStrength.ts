@@ -12,6 +12,7 @@
 
 import type { ClassifiedGame } from './classify';
 import type { EvalMoveResult } from './evalAxes';
+import { wilsonInterval, type Interval } from './stats';
 
 export type RatingGap =
 	| 'much-weaker'
@@ -30,6 +31,7 @@ export interface OpponentBucket {
 	draws: number;
 	avgCpLoss: number | null;
 	winRate: number;
+	winRateCI95: Interval;
 }
 
 export interface OpponentStrengthSummary {
@@ -67,7 +69,8 @@ export function analyseOpponentStrength(
 		losses: 0,
 		draws: 0,
 		avgCpLoss: null,
-		winRate: 0
+		winRate: 0,
+		winRateCI95: { lo: 0, hi: 0 }
 	}));
 	const cpAcc = BUCKET_DEFS.map(() => ({ sum: 0, n: 0 }));
 	for (const g of games) {
@@ -91,6 +94,11 @@ export function analyseOpponentStrength(
 	for (let i = 0; i < buckets.length; i += 1) {
 		const b = buckets[i];
 		b.winRate = b.games > 0 ? b.wins / b.games : 0;
+		// Wilson CI on wins + 0.5·draws is messier than it needs to be;
+		// the Wilson interval treats wins alone as the success count,
+		// which matches how the header reports "win rate" (%wins). Draws
+		// still contribute to the denominator so the interval tightens.
+		b.winRateCI95 = wilsonInterval(b.wins, b.games);
 		b.avgCpLoss = cpAcc[i].n > 0 ? cpAcc[i].sum / cpAcc[i].n : null;
 	}
 

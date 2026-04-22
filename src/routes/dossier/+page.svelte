@@ -78,6 +78,9 @@
 	import { buildExemplars } from '$lib/dossier/exemplars';
 	import { analyseProgression } from '$lib/dossier/progression';
 	import { listRepertoires } from '$lib/storage/repertoires';
+	import { listNodes } from '$lib/storage/nodes';
+	import { listCards } from '$lib/storage/cards';
+	import { buildFsrsFailures, type FsrsFailureRow } from '$lib/dossier/fsrsFeedback';
 	import { saveMistakes } from '$lib/storage/mistakes';
 	import type { AppSettings, Repertoire, ScanAccount } from '$lib/types';
 	import type { LeakInstance } from '$lib/dossier/mismatch';
@@ -130,6 +133,15 @@
 	let result = $state<DossierScanResult | null>(null);
 
 	let repertoires = $state<Repertoire[]>([]);
+	/** Per-repertoire FEN-keyed node bundle. Populated alongside listRepertoires
+	 *  so the forgotten-prep card can cross-reference leak FENs against prep. */
+	let repertoiresWithNodes = $state<
+		Array<{ repertoire: Repertoire; nodes: Awaited<ReturnType<typeof listNodes>> }>
+	>([]);
+	/** FSRS retention leaks: drill cards failed N+ times. Distinct from in-game
+	 *  blunders — these are positions the user can't internalise even when
+	 *  drilled in isolation. Surfaces via the "Knowledge retention" card. */
+	let fsrsFailures = $state<FsrsFailureRow[]>([]);
 	let drillRepId = $state<string>('');
 	let savedLeakIds = $state<Set<string>>(new Set());
 	let saveAllStatus = $state<string>('');
@@ -166,6 +178,14 @@
 		accounts = collectAccountsFromSettings(settings);
 		repertoires = await listRepertoires();
 		if (repertoires.length > 0 && !drillRepId) drillRepId = repertoires[0].id;
+		// Fan out nodes for the forgotten-prep cross-reference. Cheap —
+		// each repertoire's nodes live under one index query, and we only
+		// need them for the card's FEN join.
+		repertoiresWithNodes = await Promise.all(
+			repertoires.map(async (r) => ({ repertoire: r, nodes: await listNodes(r.id) }))
+		);
+		const allCards = (await Promise.all(repertoires.map((r) => listCards(r.id)))).flat();
+		fsrsFailures = buildFsrsFailures(allCards, repertoires);
 		// Load any user-calibrated baselines and inject them into the
 		// runtime cache so pickBaseline() picks them on first render.
 		storedBaselines = await listStoredBaselines();
@@ -214,6 +234,29 @@
 
 	function leakRowId(l: LeakInstance): string {
 		return `${l.gameId}:${l.ply}`;
+	}
+
+	/**
+	 * Render a card's methodology footnote as a single pre-joined string.
+	 * Lives in the script to avoid the thicket of inline Svelte mustaches
+	 * the template version needed.
+	 */
+	function formatMethodology(m: InsightCard['methodology']): string {
+		if (!m) return '';
+		const parts: string[] = [];
+		if (m.n != null) {
+			const label = m.denominator
+				? `${m.n.toLocaleString()} ${m.denominator}`
+				: m.n.toLocaleString();
+			parts.push(`n = ${label}`);
+		}
+		if (m.engineDepth != null) parts.push(`Stockfish d${m.engineDepth}`);
+		if (m.baselineN != null && m.baselineSource) {
+			const bucket = m.baselineBucket ? ` (${m.baselineBucket})` : '';
+			parts.push(`peer ${m.baselineSource}${bucket} n=${m.baselineN.toLocaleString()}`);
+		}
+		if (m.note) parts.push(m.note);
+		return parts.join(' · ');
 	}
 
 	/**
@@ -653,7 +696,14 @@
 	});
 
 	const auditSummary = $derived(result ? buildAuditSummary(result) : null);
-	const deepInsightCards = $derived(result ? buildDeepInsightCards(result) : []);
+	const deepInsightCards = $derived(
+		result
+			? buildDeepInsightCards(result, {
+					repertoires: repertoiresWithNodes,
+					fsrsFailures
+				})
+			: []
+	);
 	const findingGroups = $derived(
 		(() => {
 			const order: InsightGroup[] = ['preferences', 'abilities', 'tendencies', 'synthesis'];
@@ -787,6 +837,38 @@
 		if (winRate >= 0.3) return 'bg-amber-500/45';
 		return 'bg-amber-500/70';
 	}
+
+	/** Slugs that have a dedicated /dossier/<slug> detail page. Findings
+	 * whose slug is not in this set render inline-only with no broken link. */
+	const DETAIL_ROUTES = new Set<string>([
+		'blunder-causality',
+		'blunder-timing',
+		'calculation-depth',
+		'consensus-alignment',
+		'decision-difficulty',
+		'defensive-resource',
+		'drift',
+		'endgame-subtypes',
+		'exchange-propensity',
+		'exemplars',
+		'fix-first',
+		'fsrs-retention',
+		'level-up',
+		'narrative',
+		'opening-fit',
+		'opponent-strength',
+		'piece-affinity',
+		'plan-taste',
+		'progression',
+		'prophylaxis',
+		'recovery-arc',
+		'repeat-offenders',
+		'repertoire-lint',
+		'session-decay',
+		'structure-taste',
+		'tactical-motifs',
+		'time-of-day'
+	]);
 
 	function exhibitCaption(slug: string): string {
 		switch (slug) {
@@ -1148,29 +1230,46 @@
 		</p>
 	{/if}
 	{#if !result}
-		<p class="mt-3 text-xs text-[var(--color-parchment-500)]">
-			Baseline source: <span class="font-mono">{BASELINE_META.source}</span>
-			{#if BASELINE_META.bucketCount > 0}
-				· {BASELINE_META.bucketCount} rating bucket{BASELINE_META.bucketCount === 1 ? '' : 's'}
-			{:else if BASELINE_META.source === 'empirical'}
-				· {BASELINE_META.games} games from {BASELINE_META.sampledFrom?.length ?? 0} players
-			{:else}
-				· calibrate one from
-				<a
-					href={resolve('/settings')}
-					class="underline decoration-[var(--color-parchment-500)]/60 underline-offset-2 hover:text-[var(--color-parchment-200)]"
-					>Settings → Dossier baseline</a
-				>
-				to replace with numbers measured from your own opponents
-			{/if}
-			{#if activeBaseline?.bucket}
-				· active: <span class="font-mono"
-					>{activeBaseline.source} · {activeBaseline.bucket.bucket ?? 'any'}
-					{activeBaseline.bucket.ratingMin}–{activeBaseline.bucket.ratingMax}</span
-				>
-				({activeBaseline.bucket.games} games)
-			{/if}
-		</p>
+		{#if BASELINE_META.bucketCount === 0 && BASELINE_META.source !== 'empirical'}
+			<div
+				class="mt-4 flex flex-wrap items-start gap-3 rounded border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-[var(--color-parchment-100)]"
+				role="note"
+			>
+				<span
+					class="mt-0.5 inline-block size-1.5 shrink-0 rounded-full bg-amber-400"
+					aria-hidden="true"
+				></span>
+				<div class="min-w-0 flex-1">
+					<div class="font-medium">No peer baseline calibrated yet.</div>
+					<p class="mt-1 text-xs text-[var(--color-parchment-300)]">
+						Findings will compare against eyeballed defaults rather than numbers measured from real
+						players at your rating. Calibrate once from
+						<a
+							href={resolve('/settings#dossier-baseline')}
+							class="underline decoration-amber-300/60 underline-offset-2 hover:text-[var(--color-parchment-50)]"
+							>Settings → Dossier baseline</a
+						>
+						for a more faithful report.
+					</p>
+				</div>
+			</div>
+		{:else}
+			<p class="mt-3 text-xs text-[var(--color-parchment-500)]">
+				Baseline source: <span class="font-mono">{BASELINE_META.source}</span>
+				{#if BASELINE_META.bucketCount > 0}
+					· {BASELINE_META.bucketCount} rating bucket{BASELINE_META.bucketCount === 1 ? '' : 's'}
+				{:else if BASELINE_META.source === 'empirical'}
+					· {BASELINE_META.games} games from {BASELINE_META.sampledFrom?.length ?? 0} players
+				{/if}
+				{#if activeBaseline?.bucket}
+					· active: <span class="font-mono"
+						>{activeBaseline.source} · {activeBaseline.bucket.bucket ?? 'any'}
+						{activeBaseline.bucket.ratingMin}–{activeBaseline.bucket.ratingMax}</span
+					>
+					({activeBaseline.bucket.games} games)
+				{/if}
+			</p>
+		{/if}
 	{/if}
 
 	{#if result}
@@ -2111,7 +2210,16 @@
 										{/if}
 									</p>
 
-									{#if exhibits}
+									{#if c.methodology && (c.methodology.n != null || c.methodology.baselineN != null || c.methodology.engineDepth != null)}
+										<p
+											class="mt-2 font-mono text-[10px] tracking-wide text-[var(--color-parchment-500)] uppercase"
+											title="Methodology — sample and peer-baseline provenance for this finding"
+										>
+											{formatMethodology(c.methodology)}
+										</p>
+									{/if}
+
+									{#if exhibits && exhibitCaption(c.slug)}
 										<figure
 											class="mt-4 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-950)] px-4 py-3"
 										>
@@ -3088,14 +3196,16 @@
 										</figure>
 									{/if}
 
-									<!-- eslint-disable svelte/no-navigation-without-resolve -->
-									<a
-										class="mt-3 inline-block text-xs text-[var(--color-brass-300)] hover:underline"
-										href="{base}/dossier/{c.slug}"
-									>
-										<!-- eslint-enable svelte/no-navigation-without-resolve -->
-										Open the {c.title.toLowerCase()} detail →
-									</a>
+									{#if DETAIL_ROUTES.has(c.slug)}
+										<!-- eslint-disable svelte/no-navigation-without-resolve -->
+										<a
+											class="mt-3 inline-block text-xs text-[var(--color-brass-300)] hover:underline"
+											href="{base}/dossier/{c.slug}"
+										>
+											<!-- eslint-enable svelte/no-navigation-without-resolve -->
+											Open the {c.title.toLowerCase()} detail →
+										</a>
+									{/if}
 								</div>
 							</article>
 						{/each}
@@ -3272,8 +3382,7 @@
 										{r.action}
 									</p>
 									<p class="mt-1 text-[10px] text-[var(--color-parchment-500)]">
-										{r.frequency} occurrences · avg {r.avgCpLoss.toFixed(0)}cp · score
-										{r.score.toFixed(2)}
+										{r.frequency} occurrences · avg {r.avgCpLoss.toFixed(0)}cp
 									</p>
 								</div>
 							</li>
@@ -4176,8 +4285,21 @@
 		</section>
 
 		<details class="mt-6 text-xs text-[var(--color-parchment-500)]">
-			<summary class="cursor-pointer">Baseline used</summary>
-			<pre class="mt-2 whitespace-pre-wrap">{JSON.stringify(DOSSIER_BASELINE, null, 2)}</pre>
+			<summary class="cursor-pointer">
+				Baseline used
+				{#if activeBaseline}
+					<span class="ml-1 text-[var(--color-parchment-400)]">
+						· {activeBaseline.source}{activeBaseline.bucket
+							? ` · ${activeBaseline.bucket.bucket ?? 'any'} ${activeBaseline.bucket.ratingMin}–${activeBaseline.bucket.ratingMax} (${activeBaseline.bucket.games} games)`
+							: ''}
+					</span>
+				{/if}
+			</summary>
+			<pre class="mt-2 whitespace-pre-wrap">{JSON.stringify(
+					activeBaseline ?? DOSSIER_BASELINE,
+					null,
+					2
+				)}</pre>
 		</details>
 	{/if}
 </div>

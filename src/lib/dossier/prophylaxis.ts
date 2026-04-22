@@ -19,12 +19,15 @@
 
 import type { EvalMoveResult } from './evalAxes';
 import { cpToWinProb } from './sota';
+import { wilsonInterval, type Interval } from './stats';
 
 export interface ProphylaxisRow {
 	phase: 'opening' | 'middle' | 'end';
 	opportunities: number;
 	neutralized: number;
 	compounded: number;
+	/** Wilson 95% CI for this phase's neutralize rate. */
+	neutralizeCI95: Interval;
 }
 
 export interface ProphylaxisSummary {
@@ -32,6 +35,8 @@ export interface ProphylaxisSummary {
 	neutralized: number;
 	compounded: number;
 	neutralizeRate: number;
+	/** Wilson 95% CI for the overall neutralize rate. */
+	neutralizeCI95: Interval;
 	byPhase: ProphylaxisRow[];
 	examples: { gameId: string; ply: number; san: string; delta: number; fenBefore: string }[];
 }
@@ -45,6 +50,7 @@ export function analyseProphylaxis(
 			neutralized: 0,
 			compounded: 0,
 			neutralizeRate: 0,
+			neutralizeCI95: { lo: 0, hi: 0 },
 			byPhase: [],
 			examples: []
 		};
@@ -58,9 +64,27 @@ export function analyseProphylaxis(
 	for (const arr of byGame.values()) arr.sort((a, b) => a.ply - b.ply);
 
 	const rows: Record<'opening' | 'middle' | 'end', ProphylaxisRow> = {
-		opening: { phase: 'opening', opportunities: 0, neutralized: 0, compounded: 0 },
-		middle: { phase: 'middle', opportunities: 0, neutralized: 0, compounded: 0 },
-		end: { phase: 'end', opportunities: 0, neutralized: 0, compounded: 0 }
+		opening: {
+			phase: 'opening',
+			opportunities: 0,
+			neutralized: 0,
+			compounded: 0,
+			neutralizeCI95: { lo: 0, hi: 0 }
+		},
+		middle: {
+			phase: 'middle',
+			opportunities: 0,
+			neutralized: 0,
+			compounded: 0,
+			neutralizeCI95: { lo: 0, hi: 0 }
+		},
+		end: {
+			phase: 'end',
+			opportunities: 0,
+			neutralized: 0,
+			compounded: 0,
+			neutralizeCI95: { lo: 0, hi: 0 }
+		}
 	};
 
 	const examples: ProphylaxisSummary['examples'] = [];
@@ -106,11 +130,17 @@ export function analyseProphylaxis(
 		}
 	}
 
+	// Populate phase-level CIs once rows are complete.
+	for (const row of [rows.opening, rows.middle, rows.end]) {
+		row.neutralizeCI95 = wilsonInterval(row.neutralized, row.opportunities);
+	}
+
 	return {
 		opportunities,
 		neutralized,
 		compounded,
 		neutralizeRate: opportunities > 0 ? neutralized / opportunities : 0,
+		neutralizeCI95: wilsonInterval(neutralized, opportunities),
 		byPhase: [rows.opening, rows.middle, rows.end],
 		examples
 	};
