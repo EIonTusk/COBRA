@@ -421,6 +421,29 @@
 						Plays the line into the drill position before you answer, so you arrive with context.
 					</p>
 				</div>
+
+				<label
+					class="mt-4 flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
+				>
+					<input
+						type="checkbox"
+						checked={settings.openAtStartingPosition !== false}
+						onchange={(e) =>
+							(settings!.openAtStartingPosition = (e.currentTarget as HTMLInputElement).checked)}
+						class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
+					/>
+					<div class="min-w-0 flex-1">
+						<span class="font-serif text-sm text-[var(--color-parchment-100)]">
+							Open at the starting position
+						</span>
+						<p
+							class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+						>
+							Skips the forced prefix when you open the builder or start a drill. Per repertoire —
+							set the starting position with the bookmark icon on the Line strip.
+						</p>
+					</div>
+				</label>
 			</section>
 
 			<Separator />
@@ -927,15 +950,37 @@
 					COBRA is free and local-first. If it's useful to you, a coffee helps fuel the next
 					feature.
 				</p>
-				<a
-					href="https://www.buymeacoffee.com/EIonTusk"
-					target="_blank"
-					rel="noopener"
-					class="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-4 text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-brass-300)]/50 hover:bg-[var(--color-ink-850)]"
-				>
-					<span aria-hidden="true">☕</span>
-					<span>Buy me a coffee</span>
-				</a>
+				<div class="flex flex-wrap items-center gap-2">
+					<a
+						href="https://www.buymeacoffee.com/EIonTusk"
+						target="_blank"
+						rel="noopener"
+						class="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-4 text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-brass-300)]/50 hover:bg-[var(--color-ink-850)]"
+					>
+						<span aria-hidden="true">☕</span>
+						<span>Buy me a coffee</span>
+					</a>
+					<a
+						href="https://github.com/EIonTusk/COBRA/issues/new?labels=enhancement&template=feature_request.md"
+						target="_blank"
+						rel="noopener"
+						class="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-4 text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-brass-300)]/50 hover:bg-[var(--color-ink-850)]"
+					>
+						<span aria-hidden="true">💡</span>
+						<span>Request a feature</span>
+						<ExternalLink class="size-3 text-[var(--color-parchment-500)]" strokeWidth={1.75} />
+					</a>
+					<a
+						href="https://github.com/EIonTusk/COBRA/issues/new?labels=bug"
+						target="_blank"
+						rel="noopener"
+						class="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-4 text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-brass-300)]/50 hover:bg-[var(--color-ink-850)]"
+					>
+						<AlertTriangle class="size-3.5 text-[var(--color-parchment-400)]" />
+						<span>Report a bug</span>
+						<ExternalLink class="size-3 text-[var(--color-parchment-500)]" strokeWidth={1.75} />
+					</a>
+				</div>
 			</section>
 		</div>
 	{/if}

@@ -13,7 +13,7 @@
 	} from 'lucide-svelte';
 
 	import { getRepertoire } from '$lib/storage/repertoires';
-	import { listMistakes, dismissMistake } from '$lib/storage/mistakes';
+	import { listMistakes, dismissMistake, filterActiveMistakes } from '$lib/storage/mistakes';
 	import { Button, cn } from '$lib/ui';
 	import type { Repertoire, StoredMistake } from '$lib/types';
 
@@ -35,7 +35,8 @@
 			loading = false;
 			return;
 		}
-		all = await listMistakes({ repertoireId: rep.id });
+		const listed = await listMistakes({ repertoireId: rep.id });
+		all = await filterActiveMistakes(listed);
 		loading = false;
 	});
 

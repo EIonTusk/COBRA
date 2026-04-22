@@ -33,3 +33,38 @@ export function pathToFenKey(
 
 	return null;
 }
+
+/**
+ * Auto-detected starting position for game analysis: walk the trunk
+ * down from the root while each node has exactly one child, stopping
+ * at the first node that branches (2+ children) or dead-ends (leaf).
+ * That stopping node is the furthest point on the linear trunk —
+ * where the repertoire's first real choice appears, or where the
+ * trunk simply runs out.
+ *
+ * Examples:
+ *  - A rep whose mainline is 1.e4 e5 2.Nf3 {Nc6,Nf6,d6}: walks
+ *    root→e4→e5→Nf3 and returns "after 2.Nf3" (branching).
+ *  - A rep built around 1.e4 and 1.d4 at the root: root itself
+ *    branches, returns root.
+ *  - A rep with a single linear line: returns the leaf.
+ *
+ * Guards against cycles (three-fold repetition can create loops).
+ */
+export function furthestNonBranchingFenKey(
+	nodes: Map<string, RepertoireNode>,
+	rootKey: string
+): string {
+	const visited = new Set<string>();
+	let current = rootKey;
+	while (!visited.has(current)) {
+		visited.add(current);
+		const node = nodes.get(current);
+		// Stop at the first node whose children count isn't 1 — either
+		// a leaf (0) or a branching node (2+). That *is* the furthest
+		// trunk position: you can't make a single-child step past it.
+		if (!node || node.children.length !== 1) return current;
+		current = node.children[0].toFenKey;
+	}
+	return current;
+}

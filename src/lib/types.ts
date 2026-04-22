@@ -31,6 +31,20 @@ export interface Repertoire {
 	 * next push can delete+replace it rather than leaving stale chapters.
 	 */
 	lichessStudy?: LichessStudyLink | null;
+	/**
+	 * Starting position for game analysis, as an EPD fenKey. When the user
+	 * plays a game, mistake/gap analysis against this repertoire only kicks
+	 * in once this position is reached — games that never transpose here
+	 * are skipped for this rep entirely. When `undefined` the analyzer
+	 * falls back to the *nearest branching node* (walk down from the root
+	 * following the unique child until 0 or 2+ children), so a rep that
+	 * starts "1.e4 e5 2.Nf3 Nc6 …" auto-activates once 2.Nf3 Nc6 is on the
+	 * board even without the user configuring anything. `null` means the
+	 * user explicitly opted into the repertoire's rootFenKey (rare — only
+	 * useful for reps whose root already has multiple children but the
+	 * user wants to gate at the root anyway).
+	 */
+	startingFenKey?: string | null;
 }
 
 export interface LichessStudyLink {
@@ -166,6 +180,17 @@ export interface AppSettings {
 	 * Master volume multiplier for UI sounds, 0–1. Defaults to 1.
 	 */
 	soundsVolume?: number;
+	/**
+	 * When true, opening the builder and starting a drill session jump
+	 * straight to the repertoire's starting position instead of the rep
+	 * root. Pairs with the per-rep `startingFenKey` (or its auto-detected
+	 * nearest-branching-node fallback) — reps with a deep starting
+	 * position skip the forced prefix entirely, so the user lands on the
+	 * first position where there's a real choice. Defaults to enabled; the
+	 * builder honours it only on a fresh open (no `?jump=` deep-link, no
+	 * prep walk-through), so existing flows aren't hijacked.
+	 */
+	openAtStartingPosition?: boolean;
 }
 
 export interface StoredMistake {

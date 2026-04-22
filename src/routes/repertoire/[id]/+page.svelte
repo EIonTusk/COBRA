@@ -5,6 +5,7 @@
 	import {
 		AlertTriangle,
 		BookOpen,
+		Bookmark,
 		Bot,
 		Gauge,
 		Pencil,
@@ -25,8 +26,12 @@
 		deleteRepertoire,
 		renameRepertoire,
 		setCoverageGoal,
-		saveCoverageSnapshot
+		saveCoverageSnapshot,
+		setStartingPosition
 	} from '$lib/storage/repertoires';
+	import { furthestNonBranchingFenKey, pathToFenKey } from '$lib/tree/traversal';
+	import Board from '$lib/chess/Board.svelte';
+	import type { RepertoireNode } from '$lib/types';
 	import { countCards, countDue, countMistakeCards, listCards } from '$lib/storage/cards';
 	import { countDueIdeaCards } from '$lib/storage/ideaCards';
 	import { nodesMap } from '$lib/storage/nodes';
@@ -64,6 +69,13 @@
 	let masteredPct = $state<number | null>(null);
 	let hasStyleScan = $state(false);
 
+	// Analysis-gate state for the starting-position panel. `repNodes` is
+	// the full node map — only used to (a) resolve the auto-detected
+	// furthest-non-branching position and (b) build the SAN label for
+	// whichever gate is active. Re-fetched on every page visit alongside
+	// `nodeCount`.
+	let repNodes = $state<Map<string, RepertoireNode>>(new Map());
+
 	$effect(() => {
 		const id = page.params.id;
 		if (!id) return;
@@ -77,6 +89,7 @@
 				mistakes = await countMistakeCards(id);
 				const nodes = await nodesMap(id);
 				nodeCount = nodes.size;
+				repNodes = nodes;
 				// Retention-tile headline: share of cards that have graduated
 				// past the learning phase (same tiering rule as the full
 				// /retention view). Null when the rep has no cards yet — the
@@ -206,6 +219,60 @@
 		} finally {
 			computing = false;
 		}
+	}
+
+	// Effective analysis gate for this rep. Auto mode → furthest
+	// non-branching node from the root (updates automatically as the
+	// tree grows). Pinned → the fenKey the user chose in the builder.
+	const effectiveStartingFenKey = $derived.by<string>(() => {
+		if (!rep) return '';
+		if (rep.startingFenKey) return rep.startingFenKey;
+		if (repNodes.size === 0) return rep.rootFenKey;
+		return furthestNonBranchingFenKey(repNodes, rep.rootFenKey);
+	});
+	const startingIsPinned = $derived(!!rep?.startingFenKey);
+	const startingIsRoot = $derived(!!rep && effectiveStartingFenKey === rep.rootFenKey);
+	/**
+	 * Human-readable move sequence from root to the gate position —
+	 * "1.e4 e5 2.Nf3" style. Falls back to "opening position" when
+	 * the gate is the root (auto mode on a rep with no trunk, or a
+	 * rep whose root already branches).
+	 */
+	const startingLineLabel = $derived.by<string>(() => {
+		if (!rep || !effectiveStartingFenKey) return '';
+		if (startingIsRoot) return 'opening position';
+		const edges = pathToFenKey(repNodes, rep.rootFenKey, effectiveStartingFenKey);
+		if (!edges || edges.length === 0) return 'opening position';
+		const parts: string[] = [];
+		for (let i = 0; i < edges.length; i++) {
+			const san = edges[i].san;
+			if (i % 2 === 0) parts.push(`${Math.floor(i / 2) + 1}.${san}`);
+			else parts[parts.length - 1] += ` ${san}`;
+		}
+		return parts.join(' ');
+	});
+
+	/**
+	 * EPD fenKeys drop halfmove/fullmove counters, but chessground (via
+	 * the Board component) expects a full 6-field FEN. Tack on "0 1" so
+	 * the preview board renders without warnings; the counters don't
+	 * affect piece placement or side-to-move.
+	 */
+	function fenFromKey(key: string): string {
+		const parts = key.split(' ');
+		return parts.length === 4 ? `${key} 0 1` : key;
+	}
+
+	const startingPreviewFen = $derived.by<string>(() => {
+		if (!rep || !effectiveStartingFenKey) return '';
+		if (effectiveStartingFenKey === rep.rootFenKey) return rep.rootFen;
+		return fenFromKey(effectiveStartingFenKey);
+	});
+
+	async function switchStartingToAuto() {
+		if (!rep) return;
+		await setStartingPosition(rep.id, undefined);
+		rep = { ...rep, startingFenKey: undefined };
 	}
 
 	function coverageLabel(snap: CoverageSnapshot | null | undefined): string {
@@ -708,6 +775,85 @@
 					</span>
 				</div>
 			{/if}
+		</section>
+
+		<!--
+			Analysis starting position. Auto mode picks the furthest
+			non-branching node from the root (last forced ply before the
+			tree opens up), so a rep with a fixed opening sequence
+			auto-gates at the first real choice. Pinning overrides —
+			done from the builder's Line strip via the bookmark icon
+			next to any trunk ply. Read-only here: this page is the
+			repertoire overview, not an editor.
+		-->
+		<section class="ink-panel mt-6 p-4" style:--i="2">
+			<div class="mb-3 flex items-center gap-3">
+				<Bookmark
+					class="size-4 text-[var(--color-brass-300)]"
+					fill={startingIsPinned ? 'currentColor' : 'none'}
+					strokeWidth={1.75}
+				/>
+				<h2 class="eyebrow">Analysis starts from</h2>
+				<span
+					class="ml-auto rounded-full border px-2 py-0.5 font-mono text-[10px] tracking-wider uppercase tabular-nums"
+					class:border-[var(--color-brass-400)]={startingIsPinned}
+					class:text-[var(--color-brass-200)]={startingIsPinned}
+					class:border-[var(--color-ink-700)]={!startingIsPinned}
+					class:text-[var(--color-parchment-400)]={!startingIsPinned}
+				>
+					{startingIsPinned ? 'Pinned' : 'Auto'}
+				</span>
+			</div>
+
+			<!--
+				Preview grid: the board sits on the left, the line + copy
+				+ actions stack on the right. On narrow viewports the
+				board sinks below the text so it doesn't crowd the chip
+				row.
+			-->
+			<div class="flex flex-col gap-4 sm:flex-row sm:items-start">
+				{#if startingPreviewFen}
+					<div
+						class="order-2 w-[180px] shrink-0 self-center sm:order-1 sm:self-start"
+						aria-label="Starting position preview"
+					>
+						<Board fen={startingPreviewFen} orientation={rep.color} viewOnly coordinates={false} />
+					</div>
+				{/if}
+				<div class="order-1 min-w-0 flex-1 sm:order-2">
+					<p class="mb-2 font-mono text-[13px] break-all text-[var(--color-parchment-100)]">
+						{startingLineLabel}
+					</p>
+					<p class="mb-3 font-serif text-sm text-[var(--color-parchment-400)] italic">
+						Games only contribute mistakes and gaps once they reach this position.
+						{#if !startingIsPinned}
+							<span class="text-[var(--color-parchment-500)]">
+								Auto-detected — updates as the tree grows.
+							</span>
+						{/if}
+					</p>
+					<div class="flex flex-wrap items-center gap-2">
+						{#if startingIsPinned}
+							<Button
+								size="sm"
+								variant="secondary"
+								onclick={switchStartingToAuto}
+								title="Switch back to auto mode (furthest non-branching position from the root)."
+							>
+								Switch to auto
+							</Button>
+						{/if}
+						<Button
+							size="sm"
+							variant="secondary"
+							href={resolve(`/repertoire/${rep.id}/edit`)}
+							title="Pin a different starting position in the builder (next to the Spar button)."
+						>
+							{startingIsPinned ? 'Change in builder' : 'Pin in builder'}
+						</Button>
+					</div>
+				</div>
+			</div>
 		</section>
 
 		<!--

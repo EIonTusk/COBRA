@@ -7,6 +7,7 @@
 	import { createEmptyCard } from 'ts-fsrs';
 	import {
 		ArrowLeft,
+		Bookmark,
 		Bot,
 		ChevronDown,
 		ChevronFirst,
@@ -31,7 +32,7 @@
 	import Explorer from '$lib/explorer/Explorer.svelte';
 	import { listGapsForRepertoire } from '$lib/storage/empiricalGaps';
 	import { listPositionWdlAtFenKey, type PositionWdlRow } from '$lib/storage/positionWdl';
-	import { getRepertoire, touchRepertoire } from '$lib/storage/repertoires';
+	import { getRepertoire, touchRepertoire, setStartingPosition } from '$lib/storage/repertoires';
 	import { nodesMap, addEdge, removeEdge, setNodeComment } from '$lib/storage/nodes';
 	import {
 		deleteIdeaCard,
@@ -50,7 +51,7 @@
 		sanAtFen
 	} from '$lib/chess/position';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
-	import { pathToFenKey } from '$lib/tree/traversal';
+	import { pathToFenKey, furthestNonBranchingFenKey } from '$lib/tree/traversal';
 	import {
 		collectMissingMoves,
 		collectSaveableLeaves,
@@ -696,8 +697,20 @@
 		// Used by the Opponent-prep page to drop you straight at the
 		// position whose reply you need to add.
 		const jumpKey = page.url.searchParams.get('jump');
+		const isPrepWalk = page.url.searchParams.get('prep') === 'walk';
 		if (jumpKey && nodes.has(jumpKey)) {
 			jumpToFenKey(jumpKey);
+		} else if (!isPrepWalk && settings?.openAtStartingPosition !== false && nodes.size > 0) {
+			// Per-user default: open the builder straight at the rep's
+			// starting position (explicit pin, else nearest branching
+			// node) so the user doesn't have to click through the forced
+			// prefix every time. Skipped when a deep-link target, a prep
+			// walk-through, or the starting position resolves to the
+			// root (nothing to skip).
+			const startKey = rep.startingFenKey ?? furthestNonBranchingFenKey(nodes, rep.rootFenKey);
+			if (startKey && startKey !== rep.rootFenKey && nodes.has(startKey)) {
+				jumpToFenKey(startKey);
+			}
 		}
 		// Walk-through from the Opponent-prep page. Loads the queued list of
 		// gaps from sessionStorage, jumps to the first one, and surfaces a
@@ -985,6 +998,30 @@
 		}
 		history = next;
 		currentFen = fen;
+	}
+
+	const startingIsPinned = $derived(!!rep?.startingFenKey);
+	// "Pin start" button state: allowed anywhere the current fenKey is
+	// actually in the tree. Branching positions are permitted — auto
+	// mode can also land on a branching node (first real choice in the
+	// line), so pinning there is symmetric with letting auto do so.
+	// When the current position is already the pinned gate the button
+	// flips to an unpin affordance.
+	const currentIsPinnable = $derived(!!currentNode);
+	const currentIsPinnedGate = $derived(
+		startingIsPinned && !!rep?.startingFenKey && rep.startingFenKey === currentFenKey
+	);
+
+	/**
+	 * Pin the current board position as the analysis gate, or unpin if
+	 * the current position is already the pinned gate.
+	 */
+	async function togglePinAtCurrent() {
+		if (!rep || !currentFenKey) return;
+		const nextKey = currentIsPinnedGate ? undefined : currentFenKey;
+		if (nextKey && !currentIsPinnable) return;
+		await setStartingPosition(rep.id, nextKey);
+		rep = { ...rep, startingFenKey: nextKey };
 	}
 
 	function jumpTopEmpiricalGap() {
@@ -1606,6 +1643,32 @@
 						</button>
 						<button
 							type="button"
+							role="menuitem"
+							disabled={!currentIsPinnedGate && !currentIsPinnable}
+							onclick={() => {
+								findMissingOpen = false;
+								void togglePinAtCurrent();
+							}}
+							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
+						>
+							<Bookmark
+								class="size-3.5 text-[var(--color-parchment-400)]"
+								fill={currentIsPinnedGate ? 'currentColor' : 'none'}
+								strokeWidth={1.75}
+							/>
+							<span>
+								{currentIsPinnedGate ? 'Unpin start' : 'Pin start'}
+								<span class="text-[var(--color-parchment-500)]">
+									· {currentIsPinnedGate
+										? 'revert to auto'
+										: currentIsPinnable
+											? 'analysis gate'
+											: 'not in tree'}
+								</span>
+							</span>
+						</button>
+						<button
+							type="button"
 							role="menuitemcheckbox"
 							aria-checked={boardHintsEnabled}
 							onclick={() => {
@@ -1739,6 +1802,25 @@
 				>
 					<Bot class="size-3.5" />
 					<span>Spar</span>
+				</Button>
+				<Button
+					class="hidden lg:inline-flex"
+					variant="secondary"
+					size="sm"
+					onclick={togglePinAtCurrent}
+					disabled={!currentIsPinnedGate && !currentIsPinnable}
+					title={currentIsPinnedGate
+						? 'Unpin this position — analysis gate reverts to auto'
+						: currentIsPinnable
+							? 'Pin this position as the analysis starting point'
+							: 'Navigate to a tree position to pin'}
+				>
+					<Bookmark
+						class="size-3.5"
+						fill={currentIsPinnedGate ? 'currentColor' : 'none'}
+						strokeWidth={1.75}
+					/>
+					<span>{currentIsPinnedGate ? 'Unpin start' : 'Pin start'}</span>
 				</Button>
 				{#if topGap}
 					<Button

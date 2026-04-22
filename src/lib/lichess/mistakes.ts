@@ -36,6 +36,16 @@ export interface CandidateRep {
 	color: Color;
 	rootFenKey: string;
 	nodes: Map<string, RepertoireNode>;
+	/**
+	 * Analysis only starts once this fenKey appears in the game. Games that
+	 * never transpose into it are skipped (no mistake, no gap, no WDL hits
+	 * recorded against this rep). When unset, the analyzer effectively
+	 * treats the rep's rootFenKey as the gate — callers that want the
+	 * "nearest branching node" default should resolve it before building
+	 * the CandidateRep so the stored starting position and the scanner's
+	 * view agree.
+	 */
+	startingFenKey?: string;
 }
 
 export interface GapRecord {
@@ -142,11 +152,20 @@ function detectInternal(
 		let fenKey = makeFen(pos.toSetup(), { epd: true });
 		let fen = makeFen(pos.toSetup());
 		let ply = 0;
+		// Gate: analysis only activates once the game has visited
+		// `rep.startingFenKey` (falls back to the rep's root when unset —
+		// callers should resolve "nearest branching node" before building
+		// the CandidateRep). Until the gate opens we just play moves
+		// forward without comparing to the tree or recording WDL hits, so
+		// games that never transpose into the rep's coverage are skipped
+		// cleanly.
+		const gateKey = rep.startingFenKey ?? rep.rootFenKey;
+		let gateOpen = fenKey === gateKey;
 		// Most recent fenKey (with full FEN) we traversed that exists as a node
 		// in this rep's tree. When opponent eventually drives us out of the
 		// tree, this is the position the user should be brought back to in the
 		// builder to patch the hole.
-		let lastInTreeFenKey: string | null = rep.nodes.has(fenKey) ? fenKey : null;
+		let lastInTreeFenKey: string | null = gateOpen && rep.nodes.has(fenKey) ? fenKey : null;
 		let lastInTreeFen: string | null = lastInTreeFenKey ? fen : null;
 		let outcome: PerRep | null = null;
 		let pgnError = false;
@@ -158,7 +177,7 @@ function detectInternal(
 				break;
 			}
 			const userTurn = colorToMove(fenKey) === userColor;
-			if (userTurn) {
+			if (gateOpen && userTurn) {
 				const treeNode = rep.nodes.get(fenKey);
 				if (!treeNode || treeNode.children.length === 0) {
 					// Prep ran out on us. Prefer the current user-side fenKey
@@ -225,7 +244,8 @@ function detectInternal(
 			makeSanAndPlay(pos, move);
 			fenKey = makeFen(pos.toSetup(), { epd: true });
 			fen = makeFen(pos.toSetup());
-			if (rep.nodes.has(fenKey)) {
+			if (!gateOpen && fenKey === gateKey) gateOpen = true;
+			if (gateOpen && rep.nodes.has(fenKey)) {
 				lastInTreeFenKey = fenKey;
 				lastInTreeFen = fen;
 			}
@@ -233,6 +253,10 @@ function detectInternal(
 		}
 
 		if (pgnError) continue;
+		// Gate never opened — the game never visited this rep's starting
+		// position, so it's not evidence for or against this rep. Skip it
+		// (don't count as a follow, don't emit any WDL hits collected below).
+		if (!gateOpen) continue;
 		if (!outcome) {
 			// Fell out of the mainline loop without a mistake or gap — the user
 			// followed this rep cleanly for the full game.
