@@ -112,7 +112,7 @@
 
 	const firstTryClean = $derived(wrongAttempts === 0 && hintLevel === 0);
 	const isFirstEverCard = $derived(!!currentCard && !currentCard.lastReview);
-	const AUTO_ADVANCE_QUICK_MS = 400;
+	const AUTO_ADVANCE_QUICK_MS = 120;
 	const AUTO_ADVANCE_SLOW_MS = 1400;
 	const currentAutoAdvanceMs = $derived(
 		firstTryClean ? AUTO_ADVANCE_QUICK_MS : AUTO_ADVANCE_SLOW_MS
@@ -683,12 +683,15 @@
 					>{sessionDone}</span
 				> cards across your library.
 			</p>
+			<p class="mt-2 font-serif text-sm text-[var(--color-parchment-400)] italic">
+				Continue studying, or head back to the library?
+			</p>
 			<div class="mt-3 flex flex-wrap justify-center gap-2">
 				<Button onclick={reloadSession} variant="primary" size="md">
 					<RotateCcw class="size-3.5" />
-					<span>Again</span>
+					<span>Continue studying</span>
 				</Button>
-				<Button href="{base}/" variant="outline" size="md">Dashboard</Button>
+				<Button href="{base}/library" variant="outline" size="md">Back to library</Button>
 			</div>
 		</div>
 	{:else if currentEntry}

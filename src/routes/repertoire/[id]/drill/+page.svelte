@@ -385,7 +385,7 @@
 	// Pause lengths for the 'correct' phase. A clean first-try answer barely
 	// pauses — the user knew it. Answers that needed retries or hints linger
 	// so the user can absorb the right line before the next card loads.
-	const AUTO_ADVANCE_QUICK_MS = 400;
+	const AUTO_ADVANCE_QUICK_MS = 120;
 	const AUTO_ADVANCE_SLOW_MS = 1400;
 
 	const firstTryClean = $derived(wrongAttempts === 0 && hintLevel === 0);
@@ -1037,15 +1037,18 @@
 					>{sessionDone}</span
 				> cards.
 			</p>
+			<p class="mt-2 font-serif text-sm text-[var(--color-parchment-400)] italic">
+				Continue studying, or head back to the library?
+			</p>
 			<div class="mt-3 flex flex-wrap justify-center gap-2">
 				<Button onclick={trainFurther} variant="primary" size="md">
 					<RotateCcw class="size-3.5" />
-					<span>Train further</span>
+					<span>Continue studying</span>
 				</Button>
 				<Button onclick={retrain} variant="secondary" size="md" disabled={retrainBusy}>
 					<span>{retrainBusy ? 'Resetting…' : 'Retrain from scratch'}</span>
 				</Button>
-				<Button href={rep ? `/repertoire/${rep.id}` : '/'} variant="outline" size="md">Back</Button>
+				<Button href="{base}/library" variant="outline" size="md">Back to library</Button>
 			</div>
 		</div>
 	{:else if (phase === 'idea-prompt' || phase === 'idea-reveal') && currentIdea}
