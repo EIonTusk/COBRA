@@ -43,7 +43,8 @@ players actually prepare.
 12. [Settings & shortcuts](#settings--shortcuts)
 13. [Troubleshooting](#troubleshooting)
 14. [Running it yourself (developer notes)](#running-it-yourself)
-15. [License](#license)
+15. [Contributing](#contributing)
+16. [License](#license)
 
 ---
 
@@ -680,6 +681,52 @@ accidentally duplicate-drill them.
 IndexedDB stores: `repertoires`, `nodes`, `cards`, `idea_cards`,
 `settings`, `explorer_stats`, `mistakes`, `empirical_gaps`, `baselines`,
 `style_reports`. Schema is at v12; migrations are additive.
+
+---
+
+## Contributing
+
+PRs, bug reports, and corrections are very welcome — this is a hobby
+project and every extra pair of eyes helps.
+
+### Before you open a PR
+
+Run the full local gate. CI runs the same checks, so catching failures
+here saves a round-trip:
+
+```bash
+npm run check:versions   # verifies package.json / tauri / manifest versions align
+npm run check            # svelte-kit sync + svelte-check (type-check)
+npm run lint             # prettier --check + eslint
+npm run test:unit -- --run
+npm run test:e2e         # Playwright — only if your change touches UI flows
+```
+
+If `npm run lint` flags formatting, `npm run format` rewrites the
+offending files with Prettier. Don't hand-edit around it.
+
+### Commit and PR guidelines
+
+- **One logical change per PR.** Refactors, feature work, and unrelated
+  cleanups belong in separate PRs — it keeps review tractable.
+- **Conventional-ish commit messages.** Look at `git log` for the house
+  style (`fix(ci): …`, `feat(drill): …`). Nothing strict, just readable.
+- **Describe the user-visible change** in the PR body, plus anything a
+  reviewer would otherwise have to dig for (why the approach, what you
+  considered and rejected, test plan).
+- **Don't commit generated artifacts** (`build/`, `static/stockfish/`,
+  dossier baseline rebuilds unless that's the point of the PR).
+- **Target `main`.** There are no long-lived branches.
+
+### What's especially welcome
+
+- Reproductions and fixes for "this drill behaviour looks wrong"
+  reports.
+- Dossier subpage improvements — the analytics heuristics are rough and
+  calibration data is limited.
+- Accessibility and keyboard-navigation fixes.
+- Docs corrections. If something in this README is wrong or stale,
+  please fix it in the same PR as the code change that made it stale.
 
 ---
 
