@@ -1,4 +1,7 @@
 import { getDB } from './db';
+import { getRepertoire } from './repertoires';
+import { nodesMap } from './nodes';
+import { furthestNonBranchingFenKey, pathToFenKey } from '$lib/tree/traversal';
 import type { StoredMistake } from '$lib/types';
 import type { MistakeRecord } from '$lib/lichess/mistakes';
 
@@ -69,6 +72,56 @@ export async function listMistakes(
 export async function countPendingMistakes(): Promise<number> {
 	const db = await getDB();
 	return db.countFromIndex('mistakes', 'by-status', 'pending');
+}
+
+/**
+ * Drop mistakes that no longer sit beyond their repertoire's current
+ * analysis gate — i.e. whose fenKey isn't reachable from the rep's
+ * effective starting fenKey in the *current* tree. Happens when:
+ *  - the user pins a deeper starting position after a scan
+ *  - the user deletes/reworks the prefix so an old mistake's fenKey
+ *    is no longer reachable from the gate
+ *  - the tree evolved such that the furthest non-branching node moved
+ * Filtering is done at read time rather than by deleting stored rows
+ * because pins are reversible — unpinning should bring the hidden
+ * mistakes back without a rescan.
+ *
+ * Repertoires + node maps are loaded once per repId encountered, so
+ * this is O(N mistakes + K reps) per call.
+ */
+export async function filterActiveMistakes(mistakes: StoredMistake[]): Promise<StoredMistake[]> {
+	if (mistakes.length === 0) return mistakes;
+	const repIds = new Set<string>();
+	for (const m of mistakes) repIds.add(m.repertoireId);
+	const gates = new Map<
+		string,
+		{ startKey: string; nodes: Awaited<ReturnType<typeof nodesMap>> } | null
+	>();
+	for (const id of repIds) {
+		const rep = await getRepertoire(id);
+		if (!rep) {
+			gates.set(id, null);
+			continue;
+		}
+		const nodes = await nodesMap(id);
+		const startKey =
+			rep.startingFenKey === null
+				? rep.rootFenKey
+				: (rep.startingFenKey ?? furthestNonBranchingFenKey(nodes, rep.rootFenKey));
+		gates.set(id, { startKey, nodes });
+	}
+	return mistakes.filter((m) => {
+		const gate = gates.get(m.repertoireId);
+		// Repertoire is gone — hide orphaned mistakes. A separate cleanup
+		// would ideally drop them from IDB, but the UI shouldn't surface
+		// them either way.
+		if (!gate) return false;
+		// Mistake is at or past the gate → reachable from gate via tree
+		// edges. pathToFenKey returns [] when start === target, [...edges]
+		// when reachable, null when unreachable.
+		if (m.fenKey === gate.startKey) return true;
+		return pathToFenKey(gate.nodes, gate.startKey, m.fenKey) !== null;
+	});
 }
 
 export async function markMistakeCorrected(id: string): Promise<void> {

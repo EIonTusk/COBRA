@@ -7,7 +7,7 @@
 	import { listRepertoires } from '$lib/storage/repertoires';
 	import { countDue, countCards } from '$lib/storage/cards';
 	import { countDueIdeaCards } from '$lib/storage/ideaCards';
-	import { listMistakes } from '$lib/storage/mistakes';
+	import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 	import { nodesMap } from '$lib/storage/nodes';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
 	import { Button, Badge } from '$lib/ui';
@@ -33,7 +33,7 @@
 		}
 		totalDue = due;
 		totalCards = cards;
-		pending = await listMistakes({ status: 'pending' });
+		pending = await filterActiveMistakes(await listMistakes({ status: 'pending' }));
 		loaded = true;
 
 		// Kick off the walkthrough recommendation async — not required for the
@@ -78,7 +78,7 @@
 			};
 			await saveSettings(JSON.parse(JSON.stringify(next)));
 			if (result.totalNewlyAdded > 0) {
-				pending = await listMistakes({ status: 'pending' });
+				pending = await filterActiveMistakes(await listMistakes({ status: 'pending' }));
 			}
 		} catch {
 			/* silent — don't nag the user on the dashboard */

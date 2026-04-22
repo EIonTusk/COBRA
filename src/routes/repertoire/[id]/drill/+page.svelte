@@ -10,7 +10,7 @@
 	import { getRepertoire } from '$lib/storage/repertoires';
 	import { dueCards, getCard, mistakeCards, resetAllFsrs, upsertCard } from '$lib/storage/cards';
 	import { dueIdeaCards, upsertIdeaCard } from '$lib/storage/ideaCards';
-	import { listMistakes, markMistakeByPosition } from '$lib/storage/mistakes';
+	import { filterActiveMistakes, listMistakes, markMistakeByPosition } from '$lib/storage/mistakes';
 	import { createFreshCard } from '$lib/fsrs/scheduler';
 	import { getSettings } from '$lib/storage/settings';
 	import { nodesMap } from '$lib/storage/nodes';
@@ -871,11 +871,13 @@
 		}
 		if (mode === 'retrain') {
 			// Build a queue from pending Lichess-game mistakes in this repertoire.
-			const pending = await listMistakes({
-				status: 'pending',
-				repertoireId: rep.id,
-				limit: settings.drillSessionCap
-			});
+			const pending = await filterActiveMistakes(
+				await listMistakes({
+					status: 'pending',
+					repertoireId: rep.id,
+					limit: settings.drillSessionCap
+				})
+			);
 			const queue: Card[] = [];
 			for (const m of pending) {
 				const existing = await getCard(rep.id, m.fenKey);

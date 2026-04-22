@@ -5,7 +5,7 @@
 	import { ExternalLink, RotateCcw, Trash2, X } from 'lucide-svelte';
 
 	import { scanMistakes, type MistakeSource } from '$lib/lichess/mistakeScan';
-	import { dismissMistake, listMistakes } from '$lib/storage/mistakes';
+	import { dismissMistake, filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 	import { getSettings, effectiveLichessToken, saveSettings } from '$lib/storage/settings';
 	import { Button, DashboardBacklink, Input, Label, SourceUsernameInput, cn } from '$lib/ui';
 	import type { AppSettings, StoredMistake } from '$lib/types';
@@ -43,7 +43,8 @@
 	const _pendingCount = $derived(stored.filter((m) => m.status === 'pending').length);
 
 	async function refresh() {
-		stored = await listMistakes({});
+		const all = await listMistakes({});
+		stored = await filterActiveMistakes(all);
 	}
 
 	onMount(async () => {
