@@ -1000,27 +1000,28 @@
 		currentFen = fen;
 	}
 
-	// Effective starting position for game analysis: the user-pinned
-	// `startingFenKey` when set, otherwise the nearest branching node
-	// from the rep's root. The bookmark icon on the Line strip renders
-	// at whichever ply matches this fenKey; clicking toggles the pin.
-	const effectiveStartingFenKey = $derived.by<string>(() => {
-		if (!rep) return '';
-		if (rep.startingFenKey) return rep.startingFenKey;
-		return furthestNonBranchingFenKey(nodes, rep.rootFenKey);
-	});
 	const startingIsPinned = $derived(!!rep?.startingFenKey);
+	// "Pin start" button state: allowed when the current board position
+	// is a real node in the tree and isn't itself branching (≤1 child).
+	// The gate is a trunk concept, so pinning on a branching position
+	// would be ambiguous (which branch does analysis apply to?). When
+	// the current position is already the pinned gate the button becomes
+	// an unpin affordance.
+	const currentIsBranching = $derived((currentNode?.children.length ?? 0) > 1);
+	const currentIsPinnable = $derived(!!currentNode && !currentIsBranching);
+	const currentIsPinnedGate = $derived(
+		startingIsPinned && !!rep?.startingFenKey && rep.startingFenKey === currentFenKey
+	);
 
 	/**
-	 * Toggle the analysis gate at the given fenKey. Pins if unpinned (or
-	 * pinned elsewhere); unpins if this ply is already the pinned gate,
-	 * reverting to auto-detection. Called from the inline bookmark icon
-	 * on each ply in the Line strip — the icon is only shown on
-	 * non-branching positions, so callers don't need to re-validate.
+	 * Pin the current board position as the analysis gate, or unpin if
+	 * the current position is already the pinned gate. No-op on
+	 * branching positions — see `currentIsPinnable`.
 	 */
-	async function toggleGateAtPly(fenKey: string) {
-		if (!rep || !fenKey) return;
-		const nextKey = rep.startingFenKey && rep.startingFenKey === fenKey ? undefined : fenKey;
+	async function togglePinAtCurrent() {
+		if (!rep || !currentFenKey) return;
+		const nextKey = currentIsPinnedGate ? undefined : currentFenKey;
+		if (nextKey && !currentIsPinnable) return;
 		await setStartingPosition(rep.id, nextKey);
 		rep = { ...rep, startingFenKey: nextKey };
 	}
@@ -1644,6 +1645,32 @@
 						</button>
 						<button
 							type="button"
+							role="menuitem"
+							disabled={!currentIsPinnedGate && !currentIsPinnable}
+							onclick={() => {
+								findMissingOpen = false;
+								void togglePinAtCurrent();
+							}}
+							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
+						>
+							<Bookmark
+								class="size-3.5 text-[var(--color-parchment-400)]"
+								fill={currentIsPinnedGate ? 'currentColor' : 'none'}
+								strokeWidth={1.75}
+							/>
+							<span>
+								{currentIsPinnedGate ? 'Unpin start' : 'Pin start'}
+								<span class="text-[var(--color-parchment-500)]">
+									· {currentIsPinnedGate
+										? 'revert to auto'
+										: currentIsPinnable
+											? 'analysis gate'
+											: 'branching — not pinnable'}
+								</span>
+							</span>
+						</button>
+						<button
+							type="button"
 							role="menuitemcheckbox"
 							aria-checked={boardHintsEnabled}
 							onclick={() => {
@@ -1777,6 +1804,25 @@
 				>
 					<Bot class="size-3.5" />
 					<span>Spar</span>
+				</Button>
+				<Button
+					class="hidden lg:inline-flex"
+					variant="secondary"
+					size="sm"
+					onclick={togglePinAtCurrent}
+					disabled={!currentIsPinnedGate && !currentIsPinnable}
+					title={currentIsPinnedGate
+						? 'Unpin this position — analysis gate reverts to auto'
+						: currentIsPinnable
+							? 'Pin this position as the analysis starting point'
+							: 'Pick a non-branching position to pin'}
+				>
+					<Bookmark
+						class="size-3.5"
+						fill={currentIsPinnedGate ? 'currentColor' : 'none'}
+						strokeWidth={1.75}
+					/>
+					<span>{currentIsPinnedGate ? 'Unpin start' : 'Pin start'}</span>
 				</Button>
 				{#if topGap}
 					<Button
@@ -2010,14 +2056,10 @@
 							{#each history as step, i (i)}
 								{@const prefix = moveNumberPrefix(i)}
 								{@const sibs = siblingsAt(i)}
-								{@const plyNode = nodes.get(step.fenKey)}
-								{@const plyBranching = (plyNode?.children.length ?? 0) > 1}
-								{@const plyIsGate = step.fenKey === effectiveStartingFenKey}
-								{@const plyBookmarkable = !plyBranching && !!plyNode}
 								{#if prefix}
 									<span class="text-[var(--color-parchment-500)]">{prefix}</span>
 								{/if}
-								<span class="group/ply inline-flex items-center gap-1">
+								<span class="inline-flex items-center gap-1">
 									<button
 										type="button"
 										onclick={() => goToPly(i)}
@@ -2026,31 +2068,6 @@
 									>
 										{step.san}
 									</button>
-									{#if plyIsGate || plyBookmarkable}
-										{@const gateClasses = plyIsGate
-											? startingIsPinned
-												? 'text-[var(--color-brass-300)] hover:text-[var(--color-brass-200)]'
-												: 'text-[var(--color-parchment-500)] hover:text-[var(--color-brass-300)]'
-											: 'text-[var(--color-parchment-500)] opacity-0 group-hover/ply:opacity-60 hover:!opacity-100 hover:text-[var(--color-brass-300)]'}
-										<button
-											type="button"
-											onclick={() => toggleGateAtPly(step.fenKey)}
-											disabled={!plyBookmarkable}
-											title={plyIsGate
-												? startingIsPinned
-													? 'Analysis starts here — click to unpin (revert to auto)'
-													: 'Auto-detected analysis start — click to pin explicitly'
-												: 'Pin analysis to start from this position'}
-											aria-label="Analysis starting position marker"
-											class="inline-flex size-4 items-center justify-center rounded-[2px] transition-colors {gateClasses}"
-										>
-											<Bookmark
-												class="size-3"
-												strokeWidth={1.75}
-												fill={plyIsGate && startingIsPinned ? 'currentColor' : 'none'}
-											/>
-										</button>
-									{/if}
 								</span>
 								{#if sibs.length > 0}
 									<span class="text-[var(--color-parchment-600)]">(</span>
