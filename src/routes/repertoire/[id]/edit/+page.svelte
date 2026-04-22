@@ -30,6 +30,7 @@
 	import Board from '$lib/chess/Board.svelte';
 	import Explorer from '$lib/explorer/Explorer.svelte';
 	import { listGapsForRepertoire } from '$lib/storage/empiricalGaps';
+	import { listPositionWdlAtFenKey, type PositionWdlRow } from '$lib/storage/positionWdl';
 	import { getRepertoire, touchRepertoire } from '$lib/storage/repertoires';
 	import { nodesMap, addEdge, removeEdge, setNodeComment } from '$lib/storage/nodes';
 	import {
@@ -38,7 +39,6 @@
 		getIdeaCard,
 		upsertIdeaCard
 	} from '$lib/storage/ideaCards';
-	import { computeMistakeHeatmap, type Heatmap } from '$lib/tree/heatmap';
 	import { upsertCard, getCard, deleteCard } from '$lib/storage/cards';
 	import { colorToMove } from '$lib/chess/fen';
 	import {
@@ -153,10 +153,11 @@
 	let missingCacheLoading = $state(false);
 	let missingCacheToken = 0;
 	let empiricalGaps = $state<EmpiricalGap[]>([]);
-	// Mistake heatmap, recomputed on mount and after a save. Keyed by
-	// fenKey; `own` is mistakes-at-this-position, `subtree` sums them
-	// across descendants so branch-wide bleeding is visible at a glance.
-	let heatmap = $state<Heatmap>(new Map());
+	// User-performance aggregate at the current position, keyed by played
+	// SAN. Reloaded whenever the current fenKey changes. Drives the
+	// "underperforming vs DB" indicator on saved Candidate rows.
+	let userWdlAtCurrent = $state<Map<string, PositionWdlRow>>(new SvelteMap());
+	let userWdlToken = 0;
 	// Engine is always on (auto-started on every position). The toggle
 	// below only controls whether its suggestions are painted on the
 	// board as arrows; the inline eval readout and explorer cp column
@@ -189,6 +190,32 @@
 	const knownChildSans = $derived<Set<string>>(
 		new Set((currentNode?.children ?? []).map((e) => e.san))
 	);
+
+	// Load per-SAN user WDL for the current position whenever rep or
+	// fenKey changes. Scoped to this repertoire's side only — the store
+	// keys by `color`, so we filter to rows matching the builder's colour.
+	// Token-guarded against stale async settles if the user steps through
+	// positions quickly.
+	$effect(() => {
+		const repId = rep?.id;
+		const key = currentFenKey;
+		const color = rep?.color;
+		if (!repId || !key || !color) {
+			userWdlAtCurrent = new SvelteMap();
+			return;
+		}
+		const myToken = ++userWdlToken;
+		void (async () => {
+			const rows = await listPositionWdlAtFenKey(repId, key);
+			if (myToken !== userWdlToken) return;
+			const next = new SvelteMap<string, PositionWdlRow>();
+			for (const r of rows) {
+				if (r.color !== color) continue;
+				next.set(r.playedSan, r);
+			}
+			userWdlAtCurrent = next;
+		})();
+	});
 
 	// Unified eval view: one entry per UCI move, keeping whichever source
 	// (local Stockfish's iterative deepening or Lichess cloud eval) has
@@ -663,7 +690,6 @@
 		nodes = await nodesMap(rep.id);
 		settings = await getSettings();
 		empiricalGaps = await listGapsForRepertoire(rep.id);
-		heatmap = await computeMistakeHeatmap(rep.id, nodes);
 		currentFen = rep.rootFen;
 		loading = false;
 		// Deep-link support: `?jump=<fenKey>` lands the board at that node.
@@ -863,9 +889,6 @@
 		// Save has closed some gaps and may have opened deeper ones; kick
 		// off a background refresh so subsequent clicks stay instant.
 		void refreshMissingCache();
-		// Refresh the heatmap so a newly-covered fenKey no longer shows
-		// its old "bleeding" intensity on the Line card.
-		void computeMistakeHeatmap(rep.id, nodes).then((m) => (heatmap = m));
 	}
 
 	function handleMove(orig: Key, dest: Key, _metadata: MoveMetadata) {
@@ -1295,32 +1318,6 @@
 
 	function moveNumberPrefix(i: number): string | null {
 		return i % 2 === 0 ? `${Math.floor(i / 2) + 1}.` : null;
-	}
-
-	interface HeatStyle {
-		style: string;
-		title: string;
-	}
-
-	/**
-	 * Small oxblood dot left of a move's SAN when real-game mistakes sit on
-	 * or below that position. Opacity is log-scaled on `subtree` so a
-	 * branch with 16+ mistakes is saturated and a single-leaf 1-mistake
-	 * node is a faint ghost.
-	 */
-	function heatStyle(fenKey: string): HeatStyle | null {
-		const entry = heatmap.get(fenKey);
-		if (!entry || entry.subtree === 0) return null;
-		const n = entry.subtree;
-		const alpha = Math.min(0.95, 0.25 + Math.log2(n + 1) * 0.18);
-		const title =
-			entry.own > 0
-				? `${entry.own} mistake${entry.own === 1 ? '' : 's'} at this position · ${n} in subtree`
-				: `${n} mistake${n === 1 ? '' : 's'} in this subtree`;
-		return {
-			style: `background-color: rgba(172, 51, 50, ${alpha.toFixed(2)});`,
-			title
-		};
 	}
 
 	// "Save line" tracks how many moves the user has added since the last
@@ -1928,6 +1925,7 @@
 					buildingColor={rep.color}
 					fingerprint={settings?.styleAdviceEnabled ? styleFingerprint : null}
 					openingFit={settings?.styleAdviceEnabled ? styleOpeningFit : null}
+					userWdlBySan={userWdlAtCurrent}
 					headerRight={engineInline}
 				/>
 			</div>
@@ -1974,19 +1972,10 @@
 							{#each history as step, i (i)}
 								{@const prefix = moveNumberPrefix(i)}
 								{@const sibs = siblingsAt(i)}
-								{@const heat = heatStyle(step.fenKey)}
 								{#if prefix}
 									<span class="text-[var(--color-parchment-500)]">{prefix}</span>
 								{/if}
 								<span class="inline-flex items-center gap-1">
-									{#if heat}
-										<span
-											class="inline-block size-1.5 rounded-full"
-											style={heat.style}
-											title={heat.title}
-											aria-label={heat.title}
-										></span>
-									{/if}
 									<button
 										type="button"
 										onclick={() => goToPly(i)}

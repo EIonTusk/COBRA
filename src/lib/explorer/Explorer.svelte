@@ -10,7 +10,8 @@
 		Swords,
 		Shuffle,
 		AlertTriangle,
-		UserCheck
+		UserCheck,
+		HelpCircle
 	} from 'lucide-svelte';
 	import type { ComponentType, Snippet } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
@@ -90,6 +91,14 @@
 		 * where the standalone engine row is hidden to save vertical space.
 		 */
 		headerRight?: Snippet;
+		/**
+		 * Per-SAN aggregate of the user's own games at this exact fenKey,
+		 * populated from the `position_wdl` IDB store. When present, we
+		 * compare the user's score to the Lichess DB score and mark
+		 * substantially-underperforming rows (sample-size gated) with a
+		 * `?` next to the saved-bookmark glyph.
+		 */
+		userWdlBySan?: Map<string, { white: number; draws: number; black: number; games: number }>;
 	}
 	let {
 		fen,
@@ -102,7 +111,8 @@
 		ondelete,
 		fingerprint = null,
 		openingFit = null,
-		headerRight
+		headerRight,
+		userWdlBySan
 	}: Props = $props();
 
 	// Right-click context menu for moves already in the tree.
@@ -440,6 +450,57 @@
 		}
 	}
 
+	/**
+	 * Required gap between DB and user score scales down with sample size.
+	 * At the minimum sample size we demand a large gap to overcome noise;
+	 * with many games a small gap is enough. Concretely:
+	 *
+	 *   needed = max(FLOOR, BASE × sqrt(MIN_GAMES / games))
+	 *
+	 *   games=5  → 0.10   games=20 → 0.05   games=50 → 0.04 (floor)
+	 *
+	 * The sqrt-scaling approximates the standard error of a proportion,
+	 * which shrinks as 1/sqrt(N). Floor prevents the indicator from
+	 * firing on trivially-small deltas at very large samples.
+	 */
+	const UNDERPERFORM_MIN_GAMES = 5;
+	const UNDERPERFORM_BASE_DELTA = 0.1;
+	const UNDERPERFORM_FLOOR_DELTA = 0.04;
+
+	interface UnderperformInfo {
+		userScore: number;
+		dbScore: number;
+		games: number;
+	}
+
+	function requiredDelta(games: number): number {
+		const scaled = UNDERPERFORM_BASE_DELTA * Math.sqrt(UNDERPERFORM_MIN_GAMES / games);
+		return Math.max(UNDERPERFORM_FLOOR_DELTA, scaled);
+	}
+
+	function underperformInfo(m: ExplorerMove): UnderperformInfo | null {
+		if (!userWdlBySan) return null;
+		// Only meaningful on our turn — "you underperform here" is advice
+		// about a move *we* pick, not a reply the opponent plays at us.
+		if (!isOurTurn) return null;
+		const row = userWdlBySan.get(m.san);
+		if (!row || row.games < UNDERPERFORM_MIN_GAMES) return null;
+		const wins = sideToMove === 'white' ? row.white : row.black;
+		const userScore = (wins + row.draws / 2) / row.games;
+		const dbTotal = totalGames(m);
+		if (dbTotal === 0) return null;
+		const dbWins = sideToMove === 'white' ? m.white : m.black;
+		const dbScore = (dbWins + m.draws / 2) / dbTotal;
+		if (dbScore - userScore < requiredDelta(row.games)) return null;
+		return { userScore, dbScore, games: row.games };
+	}
+
+	function underperformTitle(info: UnderperformInfo): string {
+		const user = Math.round(info.userScore * 100);
+		const db = Math.round(info.dbScore * 100);
+		return `You score ${user}% here vs ${db}% expected (${info.games} game${info.games === 1 ? '' : 's'}).`;
+	}
+
 	function probePending(m: ExplorerMove): boolean {
 		// Show a subtle placeholder while we're still probing candidates.
 		const candidates = result?.moves ?? [];
@@ -565,6 +626,7 @@
 					{@const ts = tagsFor(m)}
 					{@const pending = probePending(m)}
 					{@const advice = adviceByUci.get(m.uci)}
+					{@const underperform = underperformInfo(m)}
 					<li>
 						<button
 							type="button"
@@ -599,6 +661,21 @@
 											>
 												<title>Already in your tree</title>
 											</Bookmark>
+											{#if underperform}
+												<!-- Shown only on saved rows per the design: a
+													 question mark to the left of the bookmark
+													 flagging that this move underperforms the
+													 Lichess DB baseline in the user's own
+													 games. Absolute-positioned to clear the
+													 bookmark's ~10px width + margin. -->
+												<HelpCircle
+													class="absolute right-full bottom-0 mr-3.5 size-2.5 text-[var(--color-oxblood-300)]"
+													strokeWidth={2}
+													aria-label={underperformTitle(underperform)}
+												>
+													<title>{underperformTitle(underperform)}</title>
+												</HelpCircle>
+											{/if}
 										{/if}
 										{m.san}
 									</span>

@@ -13,6 +13,7 @@ import { listRepertoires } from '$lib/storage/repertoires';
 import { nodesMap } from '$lib/storage/nodes';
 import { saveMistakes, toStored } from '$lib/storage/mistakes';
 import { recordGapHits, type GapHit } from '$lib/storage/empiricalGaps';
+import { recordPositionWdlHits, type PositionWdlHit } from '$lib/storage/positionWdl';
 import { effectiveLichessToken } from '$lib/storage/settings';
 import type { AppSettings, ScanAccount, StoredMistake } from '$lib/types';
 
@@ -38,6 +39,8 @@ export interface ScanResult {
 	newlyAdded: number;
 	/** Number of gap rows (repertoire × position) touched this scan. */
 	gapsUpdated: number;
+	/** Number of position-WDL rows touched this scan. */
+	wdlRowsUpdated: number;
 	/** Timestamp of the newest game scanned, or 0 if none. */
 	latestGameAt: number;
 }
@@ -57,11 +60,20 @@ export async function scanMistakes(opts: ScanOpts): Promise<ScanResult> {
 		});
 	}
 	if (candidates.length === 0)
-		return { seen: 0, records: [], saved: [], newlyAdded: 0, gapsUpdated: 0, latestGameAt: 0 };
+		return {
+			seen: 0,
+			records: [],
+			saved: [],
+			newlyAdded: 0,
+			gapsUpdated: 0,
+			wdlRowsUpdated: 0,
+			latestGameAt: 0
+		};
 
 	const records: MistakeRecord[] = [];
 	const saved: StoredMistake[] = [];
 	const gapHits: GapHit[] = [];
+	const wdlHits: PositionWdlHit[] = [];
 	let seen = 0;
 
 	let latestGameAt = 0;
@@ -102,12 +114,24 @@ export async function scanMistakes(opts: ScanOpts): Promise<ScanResult> {
 				playedAt: analyzed.gap.playedAt
 			});
 		}
+		if (analyzed.wdlHits) {
+			for (const h of analyzed.wdlHits) wdlHits.push(h);
+		}
 		opts.onProgress?.(seen, records.length);
 	}
 
 	const newlyAdded = saved.length > 0 ? await saveMistakes(saved) : 0;
 	const gapsUpdated = await recordGapHits(gapHits);
-	return { seen, records, saved, newlyAdded, gapsUpdated, latestGameAt };
+	const wdlRowsUpdated = await recordPositionWdlHits(wdlHits);
+	return {
+		seen,
+		records,
+		saved,
+		newlyAdded,
+		gapsUpdated,
+		wdlRowsUpdated,
+		latestGameAt
+	};
 }
 
 export interface MultiAccountOpts {
@@ -122,6 +146,7 @@ export interface MultiAccountResult {
 	totalSeen: number;
 	totalNewlyAdded: number;
 	totalGapsUpdated: number;
+	totalWdlRowsUpdated: number;
 	perAccount: Array<{ account: ScanAccount; result: ScanResult | null; error?: string }>;
 }
 
@@ -164,6 +189,7 @@ export async function scanAllAccounts(
 		totalSeen: 0,
 		totalNewlyAdded: 0,
 		totalGapsUpdated: 0,
+		totalWdlRowsUpdated: 0,
 		perAccount: []
 	};
 	for (const account of accounts) {
@@ -189,6 +215,7 @@ export async function scanAllAccounts(
 			out.totalSeen += result.seen;
 			out.totalNewlyAdded += result.newlyAdded;
 			out.totalGapsUpdated += result.gapsUpdated;
+			out.totalWdlRowsUpdated += result.wdlRowsUpdated;
 			out.perAccount.push({ account, result });
 		} catch (e) {
 			out.perAccount.push({

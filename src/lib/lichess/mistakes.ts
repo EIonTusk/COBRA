@@ -48,9 +48,28 @@ export interface GapRecord {
 	plyOffTree: number;
 }
 
+/**
+ * One row per (repertoire, fenKey, SAN) the user actually played *within*
+ * their prep — i.e. on-tree moves, before any divergence. Together with
+ * the game's final result this powers the builder's "you underperform
+ * here vs the DB" indicator.
+ */
+export interface WdlHit {
+	repertoireId: string;
+	fenKey: string;
+	playedSan: string;
+	color: Color;
+	/** Final game outcome from White's POV; 'draws' when no winner. */
+	result: 'white' | 'draws' | 'black';
+	gameId: string;
+	playedAt: number;
+}
+
 export interface AnalyzedGame {
 	mistake?: MistakeRecord;
 	gap?: GapRecord;
+	/** On-tree user moves — emitted regardless of mistake/gap outcome. */
+	wdlHits?: WdlHit[];
 }
 
 /**
@@ -68,6 +87,12 @@ export function analyzeGame(
 	const res = detectInternal(game, username, reps);
 	if (!res) return {};
 	return res;
+}
+
+function gameResult(game: LichessGameMeta): 'white' | 'draws' | 'black' {
+	if (game.winner === 'white') return 'white';
+	if (game.winner === 'black') return 'black';
+	return 'draws';
 }
 
 export function detectMistake(
@@ -109,6 +134,8 @@ function detectInternal(
 		| { kind: 'gap'; rep: CandidateRep; record: GapRecord; ply: number };
 
 	const results: PerRep[] = [];
+	const wdlHits: WdlHit[] = [];
+	const result = gameResult(game);
 
 	for (const rep of candidates) {
 		const pos = startPos.clone();
@@ -181,6 +208,19 @@ function detectInternal(
 					};
 					break;
 				}
+				// On-tree user move — credit this (rep, fenKey, SAN) with the
+				// game's final result. Emitted for every in-prep move, not
+				// just the final one, so the Candidates indicator can read
+				// user performance at any position in the tree.
+				wdlHits.push({
+					repertoireId: rep.id,
+					fenKey,
+					playedSan: node.san,
+					color: userColor,
+					result,
+					gameId: game.id,
+					playedAt: game.createdAt
+				});
 			}
 			makeSanAndPlay(pos, move);
 			fenKey = makeFen(pos.toSetup(), { epd: true });
@@ -203,8 +243,11 @@ function detectInternal(
 	}
 
 	if (results.length === 0) return null;
-	// If *any* rep was followed to the end, this game isn't a deviation.
-	if (results.some((r) => r.kind === 'followed')) return null;
+	// If *any* rep was followed to the end, this game isn't a deviation —
+	// but we still want its on-tree user moves for the WDL aggregate.
+	if (results.some((r) => r.kind === 'followed')) {
+		return wdlHits.length > 0 ? { wdlHits } : null;
+	}
 
 	type Divergent = Extract<PerRep, { ply: number }>;
 	let best: Divergent | null = null;
@@ -213,6 +256,7 @@ function detectInternal(
 		if (!best || r.ply > best.ply) best = r;
 	}
 	if (!best) return null;
-	if (best.kind === 'mistake') return { mistake: best.record };
-	return { gap: best.record };
+	const hits = wdlHits.length > 0 ? wdlHits : undefined;
+	if (best.kind === 'mistake') return { mistake: best.record, wdlHits: hits };
+	return { gap: best.record, wdlHits: hits };
 }

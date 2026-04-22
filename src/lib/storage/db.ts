@@ -17,6 +17,29 @@ export interface ExplorerStatRow {
 }
 
 /**
+ * Per-move WDL aggregate for the user's own games. Keyed by the composite
+ * `${repertoireId}:${fenKey}:${playedSan}:${color}` so the same position
+ * across multiple repertoires stays separated, and rows accumulate over
+ * time as fresh scans land. Results are always stored from the side-
+ * to-move's perspective (white/draws/black) to align with the Lichess
+ * DB shape — downstream code picks the right term for the user's colour.
+ */
+export interface PositionWdlRow {
+	id: string;
+	repertoireId: string;
+	fenKey: string;
+	playedSan: string;
+	color: 'white' | 'black';
+	white: number;
+	draws: number;
+	black: number;
+	games: number;
+	/** Set of gameIds already counted so re-scans are idempotent. */
+	countedGameIds: string[];
+	lastSeenAt: number;
+}
+
+/**
  * Single-row object store holding the most recent Dossier scan so the
  * /dossier page can re-render its diagnostic sections immediately on
  * navigation without forcing another full scan + engine pass. The
@@ -192,13 +215,21 @@ export interface OpeningTrainerDB extends DBSchema {
 			'by-startedAt': number;
 		};
 	};
+	position_wdl: {
+		key: string;
+		value: PositionWdlRow;
+		indexes: {
+			'by-repertoire': string;
+			'by-repertoire-fenKey': [string, string];
+		};
+	};
 }
 
 // IDB name kept as 'openingtrainer' (pre-COBRA-rename) so existing users'
 // repertoires and cards survive the rebrand. Renaming would create a
 // fresh empty DB and orphan their data.
 const DB_NAME = 'openingtrainer';
-const DB_VERSION = 13;
+const DB_VERSION = 14;
 const REQUIRED_STORES = [
 	'repertoires',
 	'nodes',
@@ -210,7 +241,8 @@ const REQUIRED_STORES = [
 	'idea_cards',
 	'baselines',
 	'style_reports',
-	'spar_games'
+	'spar_games',
+	'position_wdl'
 ] as const;
 
 let dbPromise: Promise<IDBPDatabase<OpeningTrainerDB>> | null = null;
@@ -278,6 +310,11 @@ function ensureAllStores(db: IDBPDatabase<OpeningTrainerDB>) {
 		sg.createIndex('by-repertoire', 'repertoireId');
 		sg.createIndex('by-status', 'status');
 		sg.createIndex('by-startedAt', 'startedAt');
+	}
+	if (!has('position_wdl')) {
+		const pw = db.createObjectStore('position_wdl', { keyPath: 'id' });
+		pw.createIndex('by-repertoire', 'repertoireId');
+		pw.createIndex('by-repertoire-fenKey', ['repertoireId', 'fenKey']);
 	}
 }
 
