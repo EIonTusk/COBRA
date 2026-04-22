@@ -11,7 +11,7 @@ import { analyzeGame, type CandidateRep, type MistakeRecord } from './mistakes';
 import { streamChesscomGames } from '$lib/chesscom/games';
 import { listRepertoires } from '$lib/storage/repertoires';
 import { nodesMap } from '$lib/storage/nodes';
-import { nearestBranchingFenKey } from '$lib/tree/traversal';
+import { furthestNonBranchingFenKey } from '$lib/tree/traversal';
 import { saveMistakes, toStored } from '$lib/storage/mistakes';
 import { recordGapHits, type GapHit } from '$lib/storage/empiricalGaps';
 import { recordPositionWdlHits, type PositionWdlHit } from '$lib/storage/positionWdl';
@@ -54,16 +54,15 @@ export async function scanMistakes(opts: ScanOpts): Promise<ScanResult> {
 	for (const r of reps) {
 		const nodes = await nodesMap(r.id);
 		// Resolve the effective starting position: explicit `startingFenKey`
-		// when the user has pinned one, otherwise the nearest branching
-		// node from the rep's root. The user-facing rule: analysis only
-		// applies once the game reaches that position. Reps whose tree is
-		// a straight line with no branches degrade to "gate at the final
-		// leaf" — rare in practice and harmless (no mistakes to flag past
-		// a leaf anyway).
+		// when the user has pinned one, otherwise the furthest non-branching
+		// position from the rep's root (last trunk ply before real choice).
+		// The user-facing rule: analysis only applies once the game reaches
+		// that position. Reps whose tree is entirely linear degrade to
+		// "gate at the final leaf" — harmless (nothing to flag past a leaf).
 		const startingFenKey =
 			r.startingFenKey === null
 				? r.rootFenKey
-				: (r.startingFenKey ?? nearestBranchingFenKey(nodes, r.rootFenKey));
+				: (r.startingFenKey ?? furthestNonBranchingFenKey(nodes, r.rootFenKey));
 		candidates.push({
 			id: r.id,
 			name: r.name,

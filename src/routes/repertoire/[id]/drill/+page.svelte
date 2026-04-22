@@ -24,7 +24,7 @@
 		isPromotionMove
 	} from '$lib/chess/position';
 	import { colorToMove, fenKeyFromFen } from '$lib/chess/fen';
-	import { pathToFenKey, nearestBranchingFenKey } from '$lib/tree/traversal';
+	import { pathToFenKey, furthestNonBranchingFenKey } from '$lib/tree/traversal';
 	import { Button, confirmDialog } from '$lib/ui';
 	import { playCorrect, playIncorrect } from '$lib/ui/sounds';
 	import { DRILL_INTRO_MS } from '$lib/types';
@@ -283,7 +283,7 @@
 		let skippedFen: string | null = null;
 		let skippedLastMove: [Key, Key] | undefined;
 		if (startIdx === 0 && settings?.openAtStartingPosition !== false) {
-			const startKey = rep.startingFenKey ?? nearestBranchingFenKey(nodes, rep.rootFenKey);
+			const startKey = rep.startingFenKey ?? furthestNonBranchingFenKey(nodes, rep.rootFenKey);
 			if (startKey && startKey !== rep.rootFenKey && startKey !== card.fenKey) {
 				let walkFen = rep.rootFen;
 				for (let i = 0; i < pathFromRoot.length; i++) {

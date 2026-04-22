@@ -51,7 +51,7 @@
 		sanAtFen
 	} from '$lib/chess/position';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
-	import { pathToFenKey, nearestBranchingFenKey } from '$lib/tree/traversal';
+	import { pathToFenKey, furthestNonBranchingFenKey } from '$lib/tree/traversal';
 	import {
 		collectMissingMoves,
 		collectSaveableLeaves,
@@ -707,7 +707,7 @@
 			// prefix every time. Skipped when a deep-link target, a prep
 			// walk-through, or the starting position resolves to the
 			// root (nothing to skip).
-			const startKey = rep.startingFenKey ?? nearestBranchingFenKey(nodes, rep.rootFenKey);
+			const startKey = rep.startingFenKey ?? furthestNonBranchingFenKey(nodes, rep.rootFenKey);
 			if (startKey && startKey !== rep.rootFenKey && nodes.has(startKey)) {
 				jumpToFenKey(startKey);
 			}
@@ -1007,7 +1007,7 @@
 	const effectiveStartingFenKey = $derived.by<string>(() => {
 		if (!rep) return '';
 		if (rep.startingFenKey) return rep.startingFenKey;
-		return nearestBranchingFenKey(nodes, rep.rootFenKey);
+		return furthestNonBranchingFenKey(nodes, rep.rootFenKey);
 	});
 	const startingIsPinned = $derived(!!rep?.startingFenKey);
 

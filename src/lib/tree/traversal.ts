@@ -35,28 +35,40 @@ export function pathToFenKey(
 }
 
 /**
- * Walk down from `rootKey` following the unique child as long as exactly one
- * child exists, stopping at the first branching (or leaf) node encountered.
- * Used as the default "starting position" for game analysis: a repertoire
- * whose opening moves are a fixed sequence (e.g. 1.e4 e5 2.Nf3 Nc6 …) should
- * only start flagging mistakes once that prefix is on the board, so games
- * starting from a different opening don't get spurious "off-book" flags.
+ * Furthest position from the root that is *not* itself a branching point:
+ * walk down the unique-child chain and stop one step before the first
+ * branching node. Used as the auto-detected "starting position" for
+ * game analysis — a rep whose opening is a fixed sequence (e.g.
+ * 1.e4 e5 2.Nf3 Nc6) has its gate auto-placed at the last trunk ply
+ * before real choice appears.
  *
- * Guards against cycles (three-fold repetition positions can create loops).
- * If the root itself already branches (0 or 2+ children) it is returned
- * unchanged.
+ * Rules:
+ *  - If the root itself has 0 or 2+ children, return the root (there's
+ *    no trunk to walk).
+ *  - If the trunk reaches a leaf without branching, return the leaf
+ *    (entire tree is linear — the furthest node is the end of it).
+ *  - Otherwise return the last node whose single child is non-branching.
+ *
+ * Guards against cycles (three-fold repetition can create loops).
  */
-export function nearestBranchingFenKey(
+export function furthestNonBranchingFenKey(
 	nodes: Map<string, RepertoireNode>,
 	rootKey: string
 ): string {
 	const visited = new Set<string>();
-	let key = rootKey;
-	while (!visited.has(key)) {
-		visited.add(key);
-		const node = nodes.get(key);
-		if (!node || node.children.length !== 1) return key;
-		key = node.children[0].toFenKey;
+	let current = rootKey;
+	while (!visited.has(current)) {
+		visited.add(current);
+		const node = nodes.get(current);
+		if (!node) return current;
+		// Not on a single-child trunk — either a leaf or already branching.
+		if (node.children.length !== 1) return current;
+		const nextKey = node.children[0].toFenKey;
+		const nextNode = nodes.get(nextKey);
+		// Stop before crossing into a branching node; leaves and further
+		// single-child nodes are fine to walk into.
+		if (nextNode && nextNode.children.length >= 2) return current;
+		current = nextKey;
 	}
-	return key;
+	return current;
 }
