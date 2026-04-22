@@ -35,19 +35,19 @@ export function pathToFenKey(
 }
 
 /**
- * Furthest position from the root that is *not* itself a branching point:
- * walk down the unique-child chain and stop one step before the first
- * branching node. Used as the auto-detected "starting position" for
- * game analysis — a rep whose opening is a fixed sequence (e.g.
- * 1.e4 e5 2.Nf3 Nc6) has its gate auto-placed at the last trunk ply
- * before real choice appears.
+ * Auto-detected starting position for game analysis: walk the trunk
+ * down from the root while each node has exactly one child, stopping
+ * at the first node that branches (2+ children) or dead-ends (leaf).
+ * That stopping node is the furthest point on the linear trunk —
+ * where the repertoire's first real choice appears, or where the
+ * trunk simply runs out.
  *
- * Rules:
- *  - If the root itself has 0 or 2+ children, return the root (there's
- *    no trunk to walk).
- *  - If the trunk reaches a leaf without branching, return the leaf
- *    (entire tree is linear — the furthest node is the end of it).
- *  - Otherwise return the last node whose single child is non-branching.
+ * Examples:
+ *  - A rep whose mainline is 1.e4 e5 2.Nf3 {Nc6,Nf6,d6}: walks
+ *    root→e4→e5→Nf3 and returns "after 2.Nf3" (branching).
+ *  - A rep built around 1.e4 and 1.d4 at the root: root itself
+ *    branches, returns root.
+ *  - A rep with a single linear line: returns the leaf.
  *
  * Guards against cycles (three-fold repetition can create loops).
  */
@@ -60,15 +60,11 @@ export function furthestNonBranchingFenKey(
 	while (!visited.has(current)) {
 		visited.add(current);
 		const node = nodes.get(current);
-		if (!node) return current;
-		// Not on a single-child trunk — either a leaf or already branching.
-		if (node.children.length !== 1) return current;
-		const nextKey = node.children[0].toFenKey;
-		const nextNode = nodes.get(nextKey);
-		// Stop before crossing into a branching node; leaves and further
-		// single-child nodes are fine to walk into.
-		if (nextNode && nextNode.children.length >= 2) return current;
-		current = nextKey;
+		// Stop at the first node whose children count isn't 1 — either
+		// a leaf (0) or a branching node (2+). That *is* the furthest
+		// trunk position: you can't make a single-child step past it.
+		if (!node || node.children.length !== 1) return current;
+		current = node.children[0].toFenKey;
 	}
 	return current;
 }

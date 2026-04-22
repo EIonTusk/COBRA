@@ -1001,22 +1001,20 @@
 	}
 
 	const startingIsPinned = $derived(!!rep?.startingFenKey);
-	// "Pin start" button state: allowed when the current board position
-	// is a real node in the tree and isn't itself branching (≤1 child).
-	// The gate is a trunk concept, so pinning on a branching position
-	// would be ambiguous (which branch does analysis apply to?). When
-	// the current position is already the pinned gate the button becomes
-	// an unpin affordance.
-	const currentIsBranching = $derived((currentNode?.children.length ?? 0) > 1);
-	const currentIsPinnable = $derived(!!currentNode && !currentIsBranching);
+	// "Pin start" button state: allowed anywhere the current fenKey is
+	// actually in the tree. Branching positions are permitted — auto
+	// mode can also land on a branching node (first real choice in the
+	// line), so pinning there is symmetric with letting auto do so.
+	// When the current position is already the pinned gate the button
+	// flips to an unpin affordance.
+	const currentIsPinnable = $derived(!!currentNode);
 	const currentIsPinnedGate = $derived(
 		startingIsPinned && !!rep?.startingFenKey && rep.startingFenKey === currentFenKey
 	);
 
 	/**
 	 * Pin the current board position as the analysis gate, or unpin if
-	 * the current position is already the pinned gate. No-op on
-	 * branching positions — see `currentIsPinnable`.
+	 * the current position is already the pinned gate.
 	 */
 	async function togglePinAtCurrent() {
 		if (!rep || !currentFenKey) return;
@@ -1665,7 +1663,7 @@
 										? 'revert to auto'
 										: currentIsPinnable
 											? 'analysis gate'
-											: 'branching — not pinnable'}
+											: 'not in tree'}
 								</span>
 							</span>
 						</button>
@@ -1815,7 +1813,7 @@
 						? 'Unpin this position — analysis gate reverts to auto'
 						: currentIsPinnable
 							? 'Pin this position as the analysis starting point'
-							: 'Pick a non-branching position to pin'}
+							: 'Navigate to a tree position to pin'}
 				>
 					<Bookmark
 						class="size-3.5"

@@ -61,16 +61,17 @@ describe('pathToFenKey', () => {
 		expect(pathToFenKey(m, 'r', 'z')).toBeNull();
 	});
 
-	it('furthestNonBranchingFenKey returns the last trunk node before branching', () => {
+	it('furthestNonBranchingFenKey returns the first branching node on the trunk', () => {
 		const m = new Map<string, RepertoireNode>();
 		// r -e4-> a -e5-> b, then b branches into Nf3 and d4.
-		// Furthest non-branching is `a` — `b` itself is the branching node.
+		// Trunk ends at `b`; that's the furthest step you can reach via
+		// a single-child walk from the root.
 		m.set('r', node('r', [edge('e4', 'a')]));
 		m.set('a', node('a', [edge('e5', 'b')]));
 		m.set('b', node('b', [edge('Nf3', 'c'), edge('d4', 'd')]));
 		m.set('c', node('c', []));
 		m.set('d', node('d', []));
-		expect(furthestNonBranchingFenKey(m, 'r')).toBe('a');
+		expect(furthestNonBranchingFenKey(m, 'r')).toBe('b');
 	});
 
 	it('furthestNonBranchingFenKey returns root unchanged when root itself branches', () => {
