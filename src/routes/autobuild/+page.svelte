@@ -8,12 +8,13 @@
 	import Board from '$lib/chess/Board.svelte';
 	import { buildFromMasters, startFenAfterPrefix } from '$lib/lichess/mastersBuild';
 	import { buildFromBroadcasts, type BroadcastBuildProgress } from '$lib/lichess/broadcastBuild';
+	import { buildFromChesscom, type ChesscomBuildProgress } from '$lib/chesscom/chesscomBuild';
 	import { searchFidePlayers, type FidePlayer } from '$lib/lichess/broadcasts';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
 	import { createRepertoire } from '$lib/storage/repertoires';
 	import { colorToMove, STARTPOS_FEN } from '$lib/chess/fen';
 	import { edgeFromUci, fenAfterMove, isPromotionMove, legalDests } from '$lib/chess/position';
-	import { Button, Input, Label, cn } from '$lib/ui';
+	import { Button, Input, Label, SourceUsernameInput, type Source, cn } from '$lib/ui';
 	import type { AppSettings, Color } from '$lib/types';
 	import { loadDossierReport } from '$lib/storage/dossierReport';
 
@@ -21,6 +22,10 @@
 	type PrefixInputMode = 'san' | 'board';
 
 	let mode = $state<Mode>('lichess');
+	// Which platform to pull the user's games from in player mode. Lichess
+	// goes through the /player explorer (fast, aggregated); chess.com streams
+	// the user's own PGNs and aggregates client-side.
+	let source = $state<Source>('lichess');
 
 	// FIDE player picker for broadcast mode. `broadcastPlayerQuery` drives the
 	// debounced search; `broadcastPlayerResults` populates the select;
@@ -50,8 +55,12 @@
 	let controller: AbortController | null = null;
 	let createdRepId = $state<string | null>(null);
 
-	// Lichess-mode: the username whose /player data we walk.
+	// Player-mode: the username whose games we walk. Interpretation depends
+	// on `source` — Lichess handle or chess.com handle.
 	let username = $state('');
+	// Chess.com-only knob: how many recent games to stream for client-side
+	// aggregation. Lichess gets unlimited via its explorer.
+	let chesscomMaxGames = $state(100);
 
 	// Starting moves (shared by both modes).
 	let prefixInput = $state('');
@@ -270,8 +279,13 @@
 	});
 
 	const tokenConfigured = $derived(!!settings && !!effectiveLichessToken(settings));
+	// Chess.com uses a public, unauthenticated API, so the player mode only
+	// needs a Lichess token when the source is set to Lichess. Masters and
+	// broadcasts still go through Lichess and require a token.
+	const tokenNeeded = $derived(mode !== 'lichess' || source === 'lichess');
 	const canRun = $derived.by(() => {
-		if (!tokenConfigured || running) return false;
+		if (running) return false;
+		if (tokenNeeded && !tokenConfigured) return false;
 		if (mode === 'lichess') return !!username.trim();
 		if (mode === 'broadcasts') return !!broadcastSelectedPlayer;
 		return true; // masters
@@ -297,7 +311,7 @@
 		e.preventDefault();
 		if (!settings || !canRun) return;
 		const token = effectiveLichessToken(settings);
-		if (!token) {
+		if (tokenNeeded && !token) {
 			error = 'Connect Lichess or paste a token in Settings first.';
 			return;
 		}
@@ -321,11 +335,13 @@
 		stats.gamesMatched = 0;
 		stats.currentTournament = '';
 
-		const lichessHandle = mode === 'lichess' ? username.trim() : '';
+		const playerHandle = mode === 'lichess' ? username.trim() : '';
 		const sans = prefixSansForName();
 		const sourceLabel =
 			mode === 'lichess'
-				? lichessHandle
+				? source === 'chesscom'
+					? `${playerHandle} (chess.com)`
+					: playerHandle
 				: mode === 'broadcasts'
 					? `OTB / ${broadcastSelectedPlayer?.name ?? 'player'}`
 					: 'Masters';
@@ -367,6 +383,29 @@
 				stats.edgesAdded = result.edgesAdded;
 				stats.cardsAdded = result.cardsAdded;
 				stats.gamesMatched = result.gamesMatched;
+			} else if (mode === 'lichess' && source === 'chesscom') {
+				const result = await buildFromChesscom({
+					repId: rep.id,
+					color,
+					startFen,
+					depth,
+					username: playerHandle,
+					maxGames: chesscomMaxGames,
+					opponentFanout,
+					signal: controller.signal,
+					onProgress: (p: ChesscomBuildProgress) => {
+						stats.gamesScanned = p.gamesScanned;
+						stats.gamesMatched = p.gamesMatched;
+						stats.probed = p.probed;
+						stats.edgesAdded = p.edgesAdded;
+						stats.cardsAdded = p.cardsAdded;
+					}
+				});
+				stats.edgesAdded = result.edgesAdded;
+				stats.cardsAdded = result.cardsAdded;
+				stats.probed = result.probed;
+				stats.gamesScanned = result.gamesScanned;
+				stats.gamesMatched = result.gamesMatched;
 			} else {
 				const result = await buildFromMasters({
 					repId: rep.id,
@@ -376,7 +415,7 @@
 					token,
 					signal: controller.signal,
 					opponentFanout,
-					imitatePlayer: lichessHandle || undefined,
+					imitatePlayer: playerHandle || undefined,
 					onProgress: (probed, edges) => {
 						stats.probed = probed;
 						stats.edgesAdded = edges;
@@ -438,7 +477,7 @@
 			onclick={() => (mode = 'lichess')}
 			disabled={running}
 		>
-			<div class="font-serif text-lg leading-none">Lichess player</div>
+			<div class="font-serif text-lg leading-none">Player games</div>
 			<div
 				class={cn(
 					'mt-1.5 font-mono text-[11px] tracking-wider uppercase',
@@ -447,7 +486,7 @@
 						: 'text-[var(--color-parchment-500)]'
 				)}
 			>
-				Any Lichess handle
+				Lichess or chess.com
 			</div>
 		</button>
 		<button
@@ -500,8 +539,13 @@
 
 	<p class="mt-5 max-w-md text-[var(--color-parchment-400)]" style:--i="4">
 		{#if mode === 'lichess'}
-			Walks the chosen player's Lichess games recursively. Picks their top move at your-side
-			positions; fans out to common replies at opponent-side positions.
+			{#if source === 'chesscom'}
+				Streams the user's recent chess.com games, aggregates them client-side, and walks the tree:
+				their top move at your-side positions, common replies fanned out at opponent-side positions.
+			{:else}
+				Walks the chosen player's Lichess games recursively. Picks their top move at your-side
+				positions; fans out to common replies at opponent-side positions.
+			{/if}
 		{:else if mode === 'masters'}
 			Walks the Lichess master-games database recursively. Canonical theory at your-side positions,
 			top replies fanned out at opponent-side positions.
@@ -512,7 +556,7 @@
 		{/if}
 	</p>
 
-	{#if !tokenConfigured}
+	{#if tokenNeeded && !tokenConfigured}
 		<div
 			class="mt-6 rounded border border-[var(--color-brass-400)]/30 bg-[var(--color-brass-500)]/10 p-4 text-sm"
 		>
@@ -523,7 +567,7 @@
 					class="text-[var(--color-brass-300)] underline underline-offset-2"
 				>
 					Connect in Settings
-				</a>.
+				</a>{#if mode === 'lichess'}, or switch to chess.com below (public API, no token needed){/if}.
 			</p>
 		</div>
 	{/if}
@@ -531,15 +575,14 @@
 	<form onsubmit={run} class="mt-10 space-y-6" style:--i="5">
 		{#if mode === 'lichess'}
 			<div>
-				<Label for="user">Lichess username</Label>
-				<Input
+				<Label for="user">Username</Label>
+				<SourceUsernameInput
 					id="user"
-					list="popular-lichess-users"
-					bind:value={username}
+					list={source === 'lichess' ? 'popular-lichess-users' : undefined}
+					bind:source
+					bind:username
 					required
 					disabled={running}
-					placeholder="DrNykterstein"
-					class="font-mono"
 				/>
 				<datalist id="popular-lichess-users">
 					{#each POPULAR_LICHESS_USERNAMES as p (p)}
@@ -547,8 +590,30 @@
 					{/each}
 				</datalist>
 				<p class="mt-1.5 font-serif text-xs text-[var(--color-parchment-500)] italic">
-					Any Lichess handle. Suggestions are popular titled players.
+					{#if source === 'chesscom'}
+						Any chess.com handle. Public API — no login required.
+					{:else}
+						Any Lichess handle. Suggestions are popular titled players.
+					{/if}
 				</p>
+				{#if source === 'chesscom'}
+					<div class="mt-3">
+						<Label for="cc-max">Games to scan</Label>
+						<Input
+							id="cc-max"
+							type="number"
+							min={10}
+							max={500}
+							bind:value={chesscomMaxGames}
+							disabled={running}
+							class="font-mono"
+						/>
+						<p class="mt-1.5 font-serif text-xs text-[var(--color-parchment-500)] italic">
+							Newest games first. chess.com has no aggregate explorer, so the tree's quality scales
+							with this cap.
+						</p>
+					</div>
+				{/if}
 			</div>
 		{:else if mode === 'masters'}
 			<div
@@ -906,7 +971,7 @@
 		</div>
 	</form>
 
-	{#if running || done || stats.probed > 0 || stats.tournamentsScanned > 0}
+	{#if running || done || stats.probed > 0 || stats.tournamentsScanned > 0 || stats.gamesScanned > 0}
 		<div class="ink-panel mt-10 p-4">
 			<div class="eyebrow mb-3">Progress</div>
 			<div class="grid grid-cols-4 gap-3 text-center">
@@ -923,6 +988,33 @@
 						<div class="eyebrow">Games matched</div>
 						<div class="mt-1 font-serif text-2xl text-[var(--color-parchment-50)] tabular-nums">
 							{stats.gamesMatched}
+						</div>
+					</div>
+					<div>
+						<div class="eyebrow">Edges</div>
+						<div class="mt-1 font-serif text-2xl text-[var(--color-parchment-50)] tabular-nums">
+							{stats.edgesAdded}
+						</div>
+					</div>
+					<div>
+						<div class="eyebrow">Cards</div>
+						<div class="mt-1 font-serif text-2xl text-[var(--color-parchment-50)] tabular-nums">
+							{stats.cardsAdded}
+						</div>
+					</div>
+				{:else if mode === 'lichess' && source === 'chesscom'}
+					<div>
+						<div class="eyebrow">Games</div>
+						<div class="mt-1 font-serif text-2xl text-[var(--color-parchment-50)] tabular-nums">
+							{stats.gamesMatched}<span class="text-[var(--color-parchment-500)]"
+								>/{stats.gamesScanned}</span
+							>
+						</div>
+					</div>
+					<div>
+						<div class="eyebrow">Positions</div>
+						<div class="mt-1 font-serif text-2xl text-[var(--color-parchment-50)] tabular-nums">
+							{stats.probed}
 						</div>
 					</div>
 					<div>
