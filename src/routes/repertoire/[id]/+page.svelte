@@ -30,6 +30,7 @@
 		setStartingPosition
 	} from '$lib/storage/repertoires';
 	import { furthestNonBranchingFenKey, pathToFenKey } from '$lib/tree/traversal';
+	import Board from '$lib/chess/Board.svelte';
 	import type { RepertoireNode } from '$lib/types';
 	import { countCards, countDue, countMistakeCards, listCards } from '$lib/storage/cards';
 	import { countDueIdeaCards } from '$lib/storage/ideaCards';
@@ -249,6 +250,23 @@
 			else parts[parts.length - 1] += ` ${san}`;
 		}
 		return parts.join(' ');
+	});
+
+	/**
+	 * EPD fenKeys drop halfmove/fullmove counters, but chessground (via
+	 * the Board component) expects a full 6-field FEN. Tack on "0 1" so
+	 * the preview board renders without warnings; the counters don't
+	 * affect piece placement or side-to-move.
+	 */
+	function fenFromKey(key: string): string {
+		const parts = key.split(' ');
+		return parts.length === 4 ? `${key} 0 1` : key;
+	}
+
+	const startingPreviewFen = $derived.by<string>(() => {
+		if (!rep || !effectiveStartingFenKey) return '';
+		if (effectiveStartingFenKey === rep.rootFenKey) return rep.rootFen;
+		return fenFromKey(effectiveStartingFenKey);
 	});
 
 	async function switchStartingToAuto() {
@@ -786,36 +804,55 @@
 					{startingIsPinned ? 'Pinned' : 'Auto'}
 				</span>
 			</div>
-			<p class="mb-3 font-serif text-sm text-[var(--color-parchment-400)] italic">
-				Games only contribute mistakes and gaps once they reach
-				<span class="font-mono text-[13px] text-[var(--color-parchment-100)] not-italic">
-					{startingLineLabel}
-				</span>.
-				{#if !startingIsPinned}
-					<span class="text-[var(--color-parchment-500)]">
-						Auto-detected — updates as the tree grows.
-					</span>
-				{/if}
-			</p>
-			<div class="flex flex-wrap items-center gap-2">
-				{#if startingIsPinned}
-					<Button
-						size="sm"
-						variant="secondary"
-						onclick={switchStartingToAuto}
-						title="Switch back to auto mode (furthest non-branching position from the root)."
+
+			<!--
+				Preview grid: the board sits on the left, the line + copy
+				+ actions stack on the right. On narrow viewports the
+				board sinks below the text so it doesn't crowd the chip
+				row.
+			-->
+			<div class="flex flex-col gap-4 sm:flex-row sm:items-start">
+				{#if startingPreviewFen}
+					<div
+						class="order-2 w-[180px] shrink-0 self-center sm:order-1 sm:self-start"
+						aria-label="Starting position preview"
 					>
-						Switch to auto
-					</Button>
+						<Board fen={startingPreviewFen} orientation={rep.color} viewOnly coordinates={false} />
+					</div>
 				{/if}
-				<Button
-					size="sm"
-					variant="secondary"
-					href={resolve(`/repertoire/${rep.id}/edit`)}
-					title="Pick a different starting position in the builder (bookmark icon on the Line strip)."
-				>
-					{startingIsPinned ? 'Change in builder' : 'Pin in builder'}
-				</Button>
+				<div class="order-1 min-w-0 flex-1 sm:order-2">
+					<p class="mb-2 font-mono text-[13px] break-all text-[var(--color-parchment-100)]">
+						{startingLineLabel}
+					</p>
+					<p class="mb-3 font-serif text-sm text-[var(--color-parchment-400)] italic">
+						Games only contribute mistakes and gaps once they reach this position.
+						{#if !startingIsPinned}
+							<span class="text-[var(--color-parchment-500)]">
+								Auto-detected — updates as the tree grows.
+							</span>
+						{/if}
+					</p>
+					<div class="flex flex-wrap items-center gap-2">
+						{#if startingIsPinned}
+							<Button
+								size="sm"
+								variant="secondary"
+								onclick={switchStartingToAuto}
+								title="Switch back to auto mode (furthest non-branching position from the root)."
+							>
+								Switch to auto
+							</Button>
+						{/if}
+						<Button
+							size="sm"
+							variant="secondary"
+							href={resolve(`/repertoire/${rep.id}/edit`)}
+							title="Pin a different starting position in the builder (next to the Spar button)."
+						>
+							{startingIsPinned ? 'Change in builder' : 'Pin in builder'}
+						</Button>
+					</div>
+				</div>
 			</div>
 		</section>
 
