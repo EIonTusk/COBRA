@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Bump version across package.json / tauri.conf.json / Cargo.toml, commit, tag, push.
-// Usage: npm run release -- <version>   (e.g. npm run release -- 0.2.0)
+// Usage: npm run release -- <version> [--skip-checks]
+//   --skip-checks  bypass the pre-commit hook (for CI where gates already ran)
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
@@ -8,10 +9,12 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const version = process.argv[2];
+const args = process.argv.slice(2);
+const skipChecks = args.includes('--skip-checks');
+const version = args.find((a) => !a.startsWith('--'));
 
 if (!version) {
-	console.error('Usage: npm run release -- <version>   (e.g. 0.2.0)');
+	console.error('Usage: npm run release -- <version> [--skip-checks]');
 	process.exit(1);
 }
 if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
@@ -87,7 +90,7 @@ bumpCargo('src-tauri/Cargo.toml', version);
 
 sh('node scripts/check-versions.mjs');
 sh('git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml');
-sh(`git commit -m "release ${version}"`);
+sh(`git commit ${skipChecks ? '--no-verify ' : ''}-m "release ${version}"`);
 sh(`git tag -a ${tag} -m "release ${version}"`);
 sh('git push origin HEAD');
 sh(`git push origin ${tag}`);
