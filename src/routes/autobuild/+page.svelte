@@ -702,7 +702,6 @@
 						id="bcast-count"
 						type="number"
 						min={1}
-						max={50}
 						bind:value={broadcastMaxTournaments}
 						disabled={running}
 						class="font-mono"
