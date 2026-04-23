@@ -774,13 +774,13 @@
 	 * user-to-move position where their reply goes — same UX as
 	 * `jumpToMissing`.
 	 */
-	function landOnGap(gap: WalkGap) {
+	async function landOnGap(gap: WalkGap) {
 		if (!rep) return;
 		if (!nodes.has(gap.fromFenKey)) {
-			jumpToFenKey(rep.rootFenKey);
+			await jumpToFenKey(rep.rootFenKey);
 			return;
 		}
-		jumpToFenKey(gap.fromFenKey);
+		await jumpToFenKey(gap.fromFenKey);
 		const edge = edgeFromSan(currentFen, gap.san);
 		if (!edge) return;
 		const newFen = fenAfterMove(currentFen, edge);
@@ -847,6 +847,7 @@
 
 	async function commitMove(edge: Edge) {
 		if (!rep) return;
+		cancelJumpAnim();
 		// "Saved" pill is a one-shot confirmation. The moment the user
 		// plays a new move we're measuring a new line, so the stale
 		// checkmark doesn't belong on screen anymore — a fresh "+N" pill
@@ -965,30 +966,50 @@
 
 	function goBack() {
 		if (history.length === 0) return;
+		cancelJumpAnim();
 		untrackDroppedSteps(history.length - 1);
 		history = history.slice(0, -1);
 		currentFen = history.at(-1)?.fen ?? rep!.rootFen;
+	}
+
+	// Cancellation token for the staged "build from branching point" animation.
+	// Every call to jumpToFenKey bumps this so an in-flight replay aborts
+	// before clobbering a newer navigation. `cancelJumpAnim` also lets direct
+	// history mutations (goBack, commitMove, goToPly, jumpToSibling, …) abort
+	// a running replay before applying their own update.
+	let jumpAnimToken = 0;
+	const JUMP_BUILD_STEP_MS = 180;
+	function cancelJumpAnim() {
+		jumpAnimToken++;
 	}
 
 	/**
 	 * Walk the tree from the root to `targetKey` using BFS (pathToFenKey),
 	 * and rebuild `history` so the board shows the full line. Quietly skips
 	 * if the path can't be resolved.
+	 *
+	 * When the target lies on the current line (one path is a prefix of the
+	 * other) the update is applied in one shot — the board just slides along
+	 * a line it's already showing. When the target branches off mid-line we
+	 * first snap to the branching point (the last shared ancestor) and then
+	 * append the divergent moves one ply at a time, so chessground animates
+	 * each move individually instead of teleporting every piece at once.
 	 */
-	function jumpToFenKey(targetKey: string) {
+	async function jumpToFenKey(targetKey: string): Promise<void> {
 		if (!rep) return;
 		const edges = pathToFenKey(nodes, rep.rootFenKey, targetKey);
 		if (!edges) return;
+		const token = ++jumpAnimToken;
 		if (edges.length === 0) {
 			history = [];
 			currentFen = rep.rootFen;
 			return;
 		}
 		let fen = rep.rootFen;
-		const next: HistoryStep[] = [];
+		const fullPath: HistoryStep[] = [];
 		for (const edge of edges) {
 			const newFen = fenAfterMove(fen, edge);
-			next.push({
+			fullPath.push({
 				fen: newFen,
 				fenKey: edge.toFenKey,
 				san: edge.san,
@@ -996,8 +1017,34 @@
 			});
 			fen = newFen;
 		}
-		history = next;
-		currentFen = fen;
+
+		// Longest common prefix between the current line and the target path.
+		// If one is a prefix of the other, we're still on a linear extension
+		// of a former point — a single-shot update is fine.
+		let shared = 0;
+		const limit = Math.min(history.length, fullPath.length);
+		while (shared < limit && history[shared].fenKey === fullPath[shared].fenKey) {
+			shared++;
+		}
+		const linear = shared === history.length || shared === fullPath.length;
+
+		if (linear) {
+			history = fullPath;
+			currentFen = fen;
+			return;
+		}
+
+		// Branching case: snap to the divergence point, then play the
+		// remaining moves forward one at a time so the board animates each
+		// move instead of teleporting every piece simultaneously.
+		history = fullPath.slice(0, shared);
+		currentFen = shared === 0 ? rep.rootFen : fullPath[shared - 1].fen;
+		for (let i = shared; i < fullPath.length; i++) {
+			await new Promise((r) => setTimeout(r, JUMP_BUILD_STEP_MS));
+			if (token !== jumpAnimToken) return;
+			history = fullPath.slice(0, i + 1);
+			currentFen = fullPath[i].fen;
+		}
 	}
 
 	const startingIsPinned = $derived(!!rep?.startingFenKey);
@@ -1039,8 +1086,8 @@
 	 * The target after the missing move isn't in `nodes` — that's fine,
 	 * history only tracks the board state.
 	 */
-	function jumpToMissing(missing: MissingMove) {
-		jumpToFenKey(missing.fromFenKey);
+	async function jumpToMissing(missing: MissingMove) {
+		await jumpToFenKey(missing.fromFenKey);
 		const edge: Edge = {
 			san: missing.san,
 			uci: missing.uci,
@@ -1269,6 +1316,7 @@
 	}
 
 	function goStart() {
+		cancelJumpAnim();
 		untrackDroppedSteps(0);
 		history = [];
 		currentFen = rep!.rootFen;
@@ -1280,6 +1328,7 @@
 			return;
 		}
 		if (index >= history.length - 1) return;
+		cancelJumpAnim();
 		untrackDroppedSteps(index + 1);
 		history = history.slice(0, index + 1);
 		currentFen = history[index].fen;
@@ -1314,6 +1363,7 @@
 	 */
 	function jumpToSibling(i: number, edge: Edge) {
 		if (!rep) return;
+		cancelJumpAnim();
 		untrackDroppedSteps(i);
 		const trimmed = history.slice(0, i);
 		const parentFen = i === 0 ? rep.rootFen : trimmed[trimmed.length - 1].fen;

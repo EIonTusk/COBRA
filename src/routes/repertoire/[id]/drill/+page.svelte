@@ -8,7 +8,14 @@
 
 	import Board from '$lib/chess/Board.svelte';
 	import { getRepertoire } from '$lib/storage/repertoires';
-	import { dueCards, getCard, mistakeCards, resetAllFsrs, upsertCard } from '$lib/storage/cards';
+	import {
+		dueCards,
+		getCard,
+		listCards,
+		mistakeCards,
+		resetAllFsrs,
+		upsertCard
+	} from '$lib/storage/cards';
 	import { dueIdeaCards, upsertIdeaCard } from '$lib/storage/ideaCards';
 	import { filterActiveMistakes, listMistakes, markMistakeByPosition } from '$lib/storage/mistakes';
 	import { createFreshCard } from '$lib/fsrs/scheduler';
@@ -59,6 +66,11 @@
 	let userLastMove = $state<[Key, Key] | undefined>(undefined);
 	let userPlayedSan = $state<string | null>(null);
 	let correctEdge = $state<Edge | null>(null);
+	// When the position has more than one recorded user move (e.g. both Bb5
+	// and Bc4 are prepped), every child is an equally-valid answer. The hint
+	// paints all of them so the drill can't accidentally bias recall toward
+	// whichever SAN happens to be stored as expectedSan.
+	let correctEdges = $state<Edge[]>([]);
 	let sessionDone = $state(0);
 	let nodes: Map<string, RepertoireNode> = new Map();
 
@@ -188,7 +200,8 @@
 			if (skipNextIntro) {
 				skipNextIntro = false;
 				userPlayedSan = null;
-				correctEdge = edgeFromSan(currentFen, card.expectedSan);
+				correctEdges = acceptedEdgesFor(card, currentFen);
+				correctEdge = correctEdges[0] ?? null;
 				phase = 'pending';
 				return;
 			}
@@ -225,11 +238,24 @@
 			});
 		}
 
-		if (phase === 'pending' && correctEdge && hintLevel > 0) {
-			const orig = correctEdge.uci.slice(0, 2) as Key;
-			const dest = correctEdge.uci.slice(2, 4) as Key;
-			if (hintLevel === 1) shapes.push({ orig, brush: 'paleGreen' });
-			else shapes.push({ orig, dest, brush: 'green' });
+		if (phase === 'pending' && hintLevel > 0) {
+			const hints = correctEdges.length > 0 ? correctEdges : correctEdge ? [correctEdge] : [];
+			const firstEver = !!currentCard && !currentCard.lastReview;
+			const multiMove = hints.length > 1;
+			// Multi-answer positions are a teaching moment on the first-ever
+			// encounter: paint an arrow per accepted edge so the user sees
+			// every recorded reply is acceptable. On a subsequent review we
+			// withhold all arrows — the user has already been introduced to
+			// the options and should pick one from memory.
+			const showArrows = !multiMove || firstEver;
+			if (showArrows) {
+				for (const edge of hints) {
+					const orig = edge.uci.slice(0, 2) as Key;
+					const dest = edge.uci.slice(2, 4) as Key;
+					if (hintLevel === 1) shapes.push({ orig, brush: 'paleGreen' });
+					else shapes.push({ orig, dest, brush: 'green' });
+				}
+			}
 		}
 
 		return shapes;
@@ -245,7 +271,8 @@
 		if (stepMs === 0 || rep.rootFenKey === card.fenKey) {
 			currentFen = targetFen;
 			userLastMove = undefined;
-			correctEdge = edgeFromSan(currentFen, card.expectedSan);
+			correctEdges = acceptedEdgesFor(card, currentFen);
+			correctEdge = correctEdges[0] ?? null;
 			phase = 'pending';
 			return;
 		}
@@ -254,7 +281,8 @@
 		if (!pathFromRoot || pathFromRoot.length === 0) {
 			currentFen = targetFen;
 			userLastMove = undefined;
-			correctEdge = edgeFromSan(currentFen, card.expectedSan);
+			correctEdges = acceptedEdgesFor(card, currentFen);
+			correctEdge = correctEdges[0] ?? null;
 			phase = 'pending';
 			return;
 		}
@@ -323,7 +351,8 @@
 		}
 
 		if (token.cancelled) return;
-		correctEdge = edgeFromSan(currentFen, card.expectedSan);
+		correctEdges = acceptedEdgesFor(card, currentFen);
+		correctEdge = correctEdges[0] ?? null;
 		phase = 'pending';
 	}
 
@@ -379,6 +408,25 @@
 		return parts.length === 4 ? `${key} 0 1` : key;
 	}
 
+	/**
+	 * All recorded user-side replies at the card's position, resolved to
+	 * Edge objects valid at `fen`. When the tree has no node for this fenKey
+	 * (orphaned card), fall back to the card's stored `expectedSan` so the
+	 * hint still draws something. Returns an empty list only when even the
+	 * fallback can't be parsed.
+	 */
+	function acceptedEdgesFor(card: Card, fen: string): Edge[] {
+		const node = nodes.get(card.fenKey);
+		const childSans = node?.children.map((e) => e.san) ?? [];
+		const sans = childSans.length > 0 ? childSans : [card.expectedSan];
+		const out: Edge[] = [];
+		for (const san of sans) {
+			const edge = edgeFromSan(fen, san);
+			if (edge) out.push(edge);
+		}
+		return out;
+	}
+
 	function handleMove(orig: Key, dest: Key, _m: MoveMetadata) {
 		if (!currentCard || phase !== 'pending') return;
 		const promo = isPromotionMove(currentFen, orig, dest) ? 'q' : undefined;
@@ -419,6 +467,11 @@
 
 	const firstTryClean = $derived(wrongAttempts === 0 && hintLevel === 0);
 	const isFirstEverCard = $derived(!!currentCard && !currentCard.lastReview);
+	// Hint button is live unless the card would refuse to render any arrows
+	// — a multi-move position on a subsequent review deliberately withholds
+	// hints, so bumping hintLevel would penalise the user for a click that
+	// drew nothing.
+	const hintSuppressed = $derived(correctEdges.length > 1 && !isFirstEverCard);
 	const currentAutoAdvanceMs = $derived(
 		// Mistake-focused sessions always use the slow pause so the "corrected"
 		// feedback actually registers before the next card loads.
@@ -595,6 +648,10 @@
 
 	function showHint() {
 		if (phase !== 'pending') return;
+		// Multi-move review cards deliberately withhold arrows — bumping
+		// hintLevel here would just saddle the user with a 'peeked' grade
+		// for a click that drew nothing.
+		if (hintSuppressed) return;
 		// Brand-new cards (never reviewed) skip the piece-highlight step and
 		// jump straight to the full answer arrow — there's nothing to "nudge"
 		// recall of yet.
@@ -610,6 +667,12 @@
 	//   any hint used            → 'peeked'  (Hard)
 	//   first-try clean          → 'correct' (Good)
 	// 'easy' can still be triggered explicitly from the keyboard.
+	//
+	// First-ever cards auto-reveal the answer as a teaching cue, so they
+	// always end with hintLevel > 0 and correctly grade as 'peeked' — the
+	// user never actually *recalled* the move, the drill showed it. The
+	// in-session re-queue in rateAndAdvance gives the user a second,
+	// unaided pass to demonstrate real recall.
 	function deriveOutcome(): DrillOutcome {
 		if (wrongAttempts > 0) return 'wrong';
 		if (hintLevel > 0) return 'peeked';
@@ -622,11 +685,23 @@
 		const updated = reviewCard(ratedCard, outcomeToRating(outcome), settings.fsrsParams);
 		await upsertCard(updated);
 		sessionDone += 1;
-		// Mark this position as drilled only on a clean pass — a wrong
-		// answer gets re-queued at the tail and must remain visible to
-		// advanceQueue, which uses drilledKeys to skip already-finished
-		// cards.
-		if (outcome !== 'wrong') drilledKeys.add(ratedCard.fenKey);
+		// Cards still in the FSRS Learning / Relearning phase (and brand-
+		// new cards that haven't been reviewed at all) haven't really been
+		// proved yet — they graduate to Review state only after a clean
+		// recall. Any non-clean outcome on these gets an extra in-session
+		// pass: wrong answers keep the existing re-queue, and hint-aided
+		// solves get a second unaided try so the drill measures actual
+		// recall instead of copying the arrow.
+		const preFsrs = ratedCard.fsrs;
+		const wasLearning =
+			!ratedCard.lastReview ||
+			(!!preFsrs && (preFsrs.state === 0 || preFsrs.state === 1 || preFsrs.state === 3));
+		const requeuePeeked = wasLearning && outcome === 'peeked';
+		const requeuing = outcome === 'wrong' || requeuePeeked;
+		// Mark this position as drilled only on a clean pass — re-queued
+		// cards must stay visible to advanceQueue, which uses drilledKeys
+		// to skip already-finished cards.
+		if (!requeuing) drilledKeys.add(ratedCard.fenKey);
 		// Mark stored Lichess-game mistakes at this position as corrected
 		// when we're in retrain mode and the user answered correctly.
 		if (mode === 'retrain' && (outcome === 'correct' || outcome === 'easy') && rep) {
@@ -643,11 +718,16 @@
 		if (outcome === 'wrong' && mode !== 'retrain') {
 			pruneDeeperInLine(ratedCard.fenKey);
 		}
-		// Always re-queue a failed card at the tail so the user gets a second
-		// pass at it before the session ends. FSRS still schedules it for a
-		// later day; this is an in-session repeat on top of that.
 		if (outcome === 'wrong') {
+			// Wrong-answer re-queue uses the *pre-review* card so the retry
+			// auto-reveals the hint again (its lastReview is still unset for
+			// a first-ever card) — the user just failed, they need the cue.
 			queue = [...queue, ratedCard];
+		} else if (requeuePeeked) {
+			// Peeked + still-learning re-queue uses the *updated* card so
+			// the retry won't auto-reveal: lastReview is now set and the
+			// intro effect keeps hintLevel at 0 for a real recall test.
+			queue = [...queue, updated];
 		}
 
 		// On a successful answer, try to continue the line: play the opponent's
@@ -821,17 +901,17 @@
 	}
 
 	/**
-	 * Reorder a drill queue as a DFS preorder of the repertoire tree.
-	 * You drill one branch end-to-end — root → deepest card in its
-	 * mainline → back up to that branch's sidelines → then move to the
-	 * next sibling branch — instead of ping-ponging between openings by
-	 * depth (BFS) or by FSRS dueAt.
+	 * Reorder a drill queue as a BFS (level-order) walk of the repertoire
+	 * tree: every card at ply N gets drilled before any card at ply N+1.
+	 * Shallower moves are what deeper positions rest on, so the user learns
+	 * the trunk before they're asked to recall a sideline six plies in.
 	 *
-	 * Pure dueAt sorting felt inside-out (deep cards with low stability
-	 * surfaced before their own root moves). Depth-first (breadth-first
-	 * really) surveyed every opening one ply at a time. DFS preorder
-	 * matches how a human thinks about "drilling the Italian" — walk
-	 * the line like you're playing a game.
+	 * Previously this did a DFS preorder ("drill one branch end-to-end,
+	 * then the next"), which surfaced deep sideline cards before the
+	 * shallow move that leads into a sibling opening — e.g. a 6th-move
+	 * Italian position was drilled before the user had even seen their
+	 * 1.d4 card. BFS removes that inversion while still walking tree
+	 * order within each level, so siblings stay clustered.
 	 *
 	 * Cards that aren't reachable from the root (shouldn't happen for a
 	 * healthy rep, but e.g. after a PGN import with broken links) fall
@@ -842,21 +922,24 @@
 		const root = rep.rootFenKey;
 		const byKey = new Map(cards.map((c) => [c.fenKey, c]));
 		const remaining = new SvelteSet(byKey.keys());
-		const visited = new SvelteSet<string>();
+		const visited = new SvelteSet<string>([root]);
 		const out: Card[] = [];
-		function walk(fenKey: string) {
-			if (visited.has(fenKey)) return;
-			visited.add(fenKey);
+		const queue: string[] = [root];
+		while (queue.length > 0) {
+			const fenKey = queue.shift()!;
 			const card = byKey.get(fenKey);
 			if (card) {
 				out.push(card);
 				remaining.delete(fenKey);
 			}
 			const node = nodes.get(fenKey);
-			if (!node) return;
-			for (const edge of node.children) walk(edge.toFenKey);
+			if (!node) continue;
+			for (const edge of node.children) {
+				if (visited.has(edge.toFenKey)) continue;
+				visited.add(edge.toFenKey);
+				queue.push(edge.toFenKey);
+			}
 		}
-		walk(root);
 		if (remaining.size > 0) {
 			const orphans = [...remaining].map((k) => byKey.get(k)!).sort((a, b) => a.dueAt - b.dueAt);
 			out.push(...orphans);
@@ -888,6 +971,59 @@
 		return dueCards(rep.id, Date.now(), settings.drillSessionCap);
 	}
 
+	/**
+	 * "Leaf" cards in the tree: user-turn cards whose expected move leads
+	 * (via the opponent's first reply) to a position with no further card
+	 * — i.e. the deepest rung of each line. A repertoire is never really
+	 * "done"; once the due queue drains in `due` mode we cycle the leaves
+	 * back in so the user keeps practicing the end of every line. Any
+	 * intermediate card that fails along the way still gets re-queued
+	 * through the normal wrong-answer path.
+	 */
+	async function collectLeafCards(): Promise<Card[]> {
+		if (!rep) return [];
+		const all = await listCards(rep.id);
+		const byKey = new Map(all.map((c) => [c.fenKey, c]));
+		const leaves: Card[] = [];
+		for (const card of all) {
+			const node = nodes.get(card.fenKey);
+			if (!node || node.children.length === 0) {
+				leaves.push(card);
+				continue;
+			}
+			let hasDeeperCard = false;
+			outer: for (const userEdge of node.children) {
+				const oppNode = nodes.get(userEdge.toFenKey);
+				if (!oppNode) continue;
+				for (const oppEdge of oppNode.children) {
+					if (byKey.has(oppEdge.toFenKey)) {
+						hasDeeperCard = true;
+						break outer;
+					}
+				}
+			}
+			if (!hasDeeperCard) leaves.push(card);
+		}
+		return leaves;
+	}
+
+	/**
+	 * Re-queue the leaves at the tail so the session keeps going. Also
+	 * clears `drilledKeys` scoped to what we're about to enqueue: a leaf
+	 * that was already completed earlier in the session must be drillable
+	 * again on this lap, otherwise `advanceQueue` would immediately skip
+	 * past it.
+	 */
+	async function extendQueueWithLeaves(): Promise<number> {
+		if (!rep || mode !== 'due') return 0;
+		const leaves = await collectLeafCards();
+		if (leaves.length === 0) return 0;
+		const sorted = sortByLineOrder(leaves);
+		for (const c of sorted) drilledKeys.delete(c.fenKey);
+		queue = [...queue, ...sorted];
+		return sorted.length;
+	}
+
 	function advanceQueue() {
 		let next = idx + 1;
 		while (next < queue.length && drilledKeys.has(queue[next].fenKey)) {
@@ -895,11 +1031,23 @@
 		}
 		if (next >= queue.length) {
 			// Move queue is done. If idea cards are queued, flip into the
-			// self-rated prompt phase; otherwise go to the done screen.
-			// Hold briefly so the final green glyph registers first.
-			setTimeout(() => {
-				if (ideaQueue.length > 0) startIdeaPhase();
-				else phase = 'done';
+			// self-rated prompt phase. Otherwise (in due mode) cycle leaves
+			// back in so the drill never declares the rep "fully learned"
+			// — the user can keep practicing forever. Hold briefly so the
+			// final green glyph registers before anything else moves.
+			setTimeout(async () => {
+				if (ideaQueue.length > 0) {
+					startIdeaPhase();
+					return;
+				}
+				const added = await extendQueueWithLeaves();
+				if (added > 0) {
+					chainedCard = null;
+					idx = next;
+					phase = 'pending';
+					return;
+				}
+				phase = 'done';
 			}, DONE_HOLD_MS);
 		} else {
 			chainedCard = null;
@@ -923,6 +1071,7 @@
 		currentFen = fenFromKey(currentIdea.fenKey);
 		userLastMove = undefined;
 		correctEdge = null;
+		correctEdges = [];
 		moveQuality = null;
 		gradedSquare = null;
 		phase = 'idea-prompt';
@@ -1207,7 +1356,12 @@
 						{/if}
 					</div>
 					<div class="flex gap-2">
-						<Button variant="ghost" size="sm" onclick={showHint} disabled={hintLevel >= 2}>
+						<Button
+							variant="ghost"
+							size="sm"
+							onclick={showHint}
+							disabled={hintLevel >= 2 || hintSuppressed}
+						>
 							<Keyboard class="size-3" />
 							<span>
 								{hintLevel === 0
