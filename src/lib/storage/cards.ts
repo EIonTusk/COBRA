@@ -26,6 +26,41 @@ export async function dueCards(
 	return db.getAllFromIndex('cards', 'by-repertoire-due', range, limit);
 }
 
+/**
+ * Split a due-card pool into review-first, new-capped.
+ *
+ * "New" = never reviewed (`lastReview` is undefined). A freshly-imported
+ * repertoire otherwise produces sessions that are 100% new cards and starves
+ * relearning of positions the user is already struggling with.
+ *
+ *  - Reviews come first, in the order `cards` was handed in (callers should
+ *    pass a dueAt-asc pool so the most-overdue reviews surface first).
+ *  - New cards fill the remaining slots up to `newCap`.
+ *  - If reviews ran out before the session cap, leftover slots are filled
+ *    with more new cards so a brand-new repertoire still drills at capacity
+ *    instead of stalling at `newCap`.
+ *
+ * Pure helper: no DB access. Callers fetch the pool with `dueCards` at a
+ * larger limit (≈ sessionCap * 5 is plenty) so this function has enough
+ * reviews to pick from when new cards would otherwise dominate by dueAt.
+ */
+export function pickBalancedDueCards(cards: Card[], sessionCap: number, newCap: number): Card[] {
+	const newCards: Card[] = [];
+	const reviewCards: Card[] = [];
+	for (const c of cards) {
+		if (c.lastReview) reviewCards.push(c);
+		else newCards.push(c);
+	}
+
+	const cap = Math.max(0, sessionCap);
+	const newBudget = Math.min(newCards.length, Math.max(0, newCap), cap);
+	const reviewBudget = Math.min(reviewCards.length, cap - newBudget);
+	const leftover = cap - newBudget - reviewBudget;
+	const extraNew = Math.min(newCards.length - newBudget, Math.max(0, leftover));
+
+	return [...reviewCards.slice(0, reviewBudget), ...newCards.slice(0, newBudget + extraNew)];
+}
+
 export async function countDue(repertoireId: string, now: number = Date.now()): Promise<number> {
 	const db = await getDB();
 	const range = IDBKeyRange.bound([repertoireId, 0], [repertoireId, now]);

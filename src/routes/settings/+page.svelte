@@ -359,7 +359,7 @@
 				</div>
 				<div class="grid gap-5 sm:grid-cols-2">
 					<div>
-						<Label for="newcap">New cards per day</Label>
+						<Label for="newcap">New cards per session</Label>
 						<Input
 							id="newcap"
 							name="newcap"
