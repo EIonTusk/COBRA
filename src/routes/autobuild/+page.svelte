@@ -604,7 +604,6 @@
 							id="cc-max"
 							type="number"
 							min={10}
-							max={500}
 							bind:value={chesscomMaxGames}
 							disabled={running}
 							class="font-mono"
@@ -702,7 +701,6 @@
 						id="bcast-count"
 						type="number"
 						min={1}
-						max={50}
 						bind:value={broadcastMaxTournaments}
 						disabled={running}
 						class="font-mono"
@@ -871,7 +869,6 @@
 							id="fanout"
 							type="number"
 							min={1}
-							max={4}
 							bind:value={opponentFanout}
 							disabled={running}
 							class="font-mono"
@@ -887,7 +884,6 @@
 						id="depth"
 						type="number"
 						min={4}
-						max={40}
 						bind:value={depth}
 						disabled={running}
 						class="font-mono"
