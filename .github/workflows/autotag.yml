@@ -21,6 +21,10 @@ on:
 
 permissions:
   contents: write
+  # actions: write lets us fall back to dispatching release.yml via the
+  # workflow_dispatch trigger when the tag push was made with the default
+  # GITHUB_TOKEN (which, by design, can't trigger follow-on workflows).
+  actions: write
 
 concurrency:
   group: autotag
@@ -89,3 +93,17 @@ jobs:
       - name: Release
         if: steps.v.outputs.next
         run: npm run release -- ${{ steps.v.outputs.next }} --skip-checks
+
+      # When RELEASE_PAT isn't configured the release script's tag push ran
+      # with GITHUB_TOKEN, which GitHub silently refuses to let chain into
+      # another workflow — so release.yml's `push: tags: v*` trigger never
+      # fires. Dispatch it explicitly via workflow_dispatch (which works
+      # with GITHUB_TOKEN as long as the job has actions: write) so the
+      # desktop/iOS/Android build pipeline always runs after a tag.
+      - name: Trigger release workflow
+        if: steps.v.outputs.next
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.v.outputs.next }}"
+          gh workflow run release.yml --ref "$TAG" -f tag="$TAG"
