@@ -82,6 +82,9 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
+          # workflow_run checkout is detached at head_sha; attach to main so
+          # release.mjs's `git push origin HEAD` resolves to the right branch.
+          git checkout -B main
 
       - name: Release
         if: steps.v.outputs.next
