@@ -1,9 +1,9 @@
 name: Auto-tag
 
-# On push to main, bump the version based on the commit subject prefix and
-# run scripts/release.mjs (which updates package.json / tauri.conf.json /
-# Cargo.toml, commits, tags, and pushes). The tag push then triggers
-# release.yml to build artifacts.
+# Waits for CI to succeed on a push to main, then bumps the version based on
+# the commit subject prefix and runs scripts/release.mjs (which updates
+# package.json / tauri.conf.json / Cargo.toml, commits, tags, and pushes).
+# The tag push triggers release.yml to build artifacts.
 #
 #   feat / feat(scope) / feat!  -> minor bump (x.y+1.0)
 #   fix  / fix(scope)           -> patch bump (x.y.z+1)
@@ -14,7 +14,9 @@ name: Auto-tag
 # workflow (release.yml) from its tag push.
 
 on:
-  push:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
     branches: [main]
 
 permissions:
@@ -26,11 +28,15 @@ concurrency:
 
 jobs:
   tag:
-    if: "!startsWith(github.event.head_commit.message, 'release ')"
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      !startsWith(github.event.workflow_run.head_commit.message, 'release ')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
 
@@ -46,17 +52,25 @@ jobs:
 
       - name: Compute next version
         id: v
+        env:
+          MSG: ${{ github.event.workflow_run.head_commit.message }}
         run: |
-          MSG=$(git log -1 --pretty=%s)
+          SUBJECT=$(printf '%s\n' "$MSG" | head -n1)
+          # GitHub merge-commit subject is "Merge pull request #N from …".
+          # The PR title lives on the first non-blank body line — use that instead.
+          if [[ "$SUBJECT" == Merge\ pull\ request\ * ]]; then
+            BODY_LINE=$(printf '%s\n' "$MSG" | awk 'NR>1 && NF {print; exit}')
+            [ -n "$BODY_LINE" ] && SUBJECT="$BODY_LINE"
+          fi
+          echo "Parsed subject: $SUBJECT"
           CUR=$(node -p "require('./package.json').version")
           IFS=. read -r X Y Z <<< "$CUR"
-          case "$MSG" in
+          case "$SUBJECT" in
             feat\!:*|feat\(*\)\!:*) NEXT="$X.$((Y+1)).0" ;;
             feat:*|feat\(*\):*)     NEXT="$X.$((Y+1)).0" ;;
             fix:*|fix\(*\):*)       NEXT="$X.$Y.$((Z+1))" ;;
             *)
-              echo "No feat/fix prefix in: $MSG"
-              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "No feat/fix prefix in: $SUBJECT"
               exit 0
               ;;
           esac
@@ -71,4 +85,4 @@ jobs:
 
       - name: Release
         if: steps.v.outputs.next
-        run: npm run release -- ${{ steps.v.outputs.next }}
+        run: npm run release -- ${{ steps.v.outputs.next }} --skip-checks
