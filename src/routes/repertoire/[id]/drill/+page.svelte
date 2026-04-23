@@ -72,6 +72,11 @@
 	let userLastMove = $state<[Key, Key] | undefined>(undefined);
 	let userPlayedSan = $state<string | null>(null);
 	let correctEdge = $state<Edge | null>(null);
+	// When the position has more than one recorded user move (e.g. both Bb5
+	// and Bc4 are prepped), every child is an equally-valid answer. The hint
+	// paints all of them so the drill can't accidentally bias recall toward
+	// whichever SAN happens to be stored as expectedSan.
+	let correctEdges = $state<Edge[]>([]);
 	let sessionDone = $state(0);
 	let nodes: Map<string, RepertoireNode> = new Map();
 
@@ -211,7 +216,8 @@
 			if (skipNextIntro) {
 				skipNextIntro = false;
 				userPlayedSan = null;
-				correctEdge = edgeFromSan(currentFen, card.expectedSan);
+				correctEdges = acceptedEdgesFor(card, currentFen);
+				correctEdge = correctEdges[0] ?? null;
 				phase = 'pending';
 				return;
 			}
@@ -248,11 +254,24 @@
 			});
 		}
 
-		if (phase === 'pending' && correctEdge && hintLevel > 0) {
-			const orig = correctEdge.uci.slice(0, 2) as Key;
-			const dest = correctEdge.uci.slice(2, 4) as Key;
-			if (hintLevel === 1) shapes.push({ orig, brush: 'paleGreen' });
-			else shapes.push({ orig, dest, brush: 'green' });
+		if (phase === 'pending' && hintLevel > 0) {
+			const hints = correctEdges.length > 0 ? correctEdges : correctEdge ? [correctEdge] : [];
+			const firstEver = !!currentCard && !currentCard.lastReview;
+			const multiMove = hints.length > 1;
+			// Multi-answer positions are a teaching moment on the first-ever
+			// encounter: paint an arrow per accepted edge so the user sees
+			// every recorded reply is acceptable. On a subsequent review we
+			// withhold all arrows — the user has already been introduced to
+			// the options and should pick one from memory.
+			const showArrows = !multiMove || firstEver;
+			if (showArrows) {
+				for (const edge of hints) {
+					const orig = edge.uci.slice(0, 2) as Key;
+					const dest = edge.uci.slice(2, 4) as Key;
+					if (hintLevel === 1) shapes.push({ orig, brush: 'paleGreen' });
+					else shapes.push({ orig, dest, brush: 'green' });
+				}
+			}
 		}
 
 		return shapes;
@@ -268,7 +287,8 @@
 		if (stepMs === 0 || rep.rootFenKey === card.fenKey) {
 			currentFen = targetFen;
 			userLastMove = undefined;
-			correctEdge = edgeFromSan(currentFen, card.expectedSan);
+			correctEdges = acceptedEdgesFor(card, currentFen);
+			correctEdge = correctEdges[0] ?? null;
 			phase = 'pending';
 			return;
 		}
@@ -277,7 +297,8 @@
 		if (!pathFromRoot || pathFromRoot.length === 0) {
 			currentFen = targetFen;
 			userLastMove = undefined;
-			correctEdge = edgeFromSan(currentFen, card.expectedSan);
+			correctEdges = acceptedEdgesFor(card, currentFen);
+			correctEdge = correctEdges[0] ?? null;
 			phase = 'pending';
 			return;
 		}
@@ -346,7 +367,8 @@
 		}
 
 		if (token.cancelled) return;
-		correctEdge = edgeFromSan(currentFen, card.expectedSan);
+		correctEdges = acceptedEdgesFor(card, currentFen);
+		correctEdge = correctEdges[0] ?? null;
 		phase = 'pending';
 	}
 
@@ -400,6 +422,25 @@
 	function fenFromKey(key: string): string {
 		const parts = key.split(' ');
 		return parts.length === 4 ? `${key} 0 1` : key;
+	}
+
+	/**
+	 * All recorded user-side replies at the card's position, resolved to
+	 * Edge objects valid at `fen`. When the tree has no node for this fenKey
+	 * (orphaned card), fall back to the card's stored `expectedSan` so the
+	 * hint still draws something. Returns an empty list only when even the
+	 * fallback can't be parsed.
+	 */
+	function acceptedEdgesFor(card: Card, fen: string): Edge[] {
+		const node = nodes.get(card.fenKey);
+		const childSans = node?.children.map((e) => e.san) ?? [];
+		const sans = childSans.length > 0 ? childSans : [card.expectedSan];
+		const out: Edge[] = [];
+		for (const san of sans) {
+			const edge = edgeFromSan(fen, san);
+			if (edge) out.push(edge);
+		}
+		return out;
 	}
 
 	function handleMove(orig: Key, dest: Key, _m: MoveMetadata) {
@@ -620,6 +661,10 @@
 
 	function showHint() {
 		if (phase !== 'pending') return;
+		// Multi-move review cards deliberately withhold arrows — bumping
+		// hintLevel here would just saddle the user with a 'peeked' grade
+		// for a click that drew nothing.
+		if (hintSuppressed) return;
 		// Brand-new cards (never reviewed) skip the piece-highlight step and
 		// jump straight to the full answer arrow — there's nothing to "nudge"
 		// recall of yet.
@@ -695,6 +740,11 @@
 		// don't add the same card twice.
 		if (outcome === 'wrong' && !isIntroductionPass) {
 			queue = [...queue, ratedCard];
+		} else if (requeuePeeked) {
+			// Peeked + still-learning re-queue uses the *updated* card so
+			// the retry won't auto-reveal: lastReview is now set and the
+			// intro effect keeps hintLevel at 0 for a real recall test.
+			queue = [...queue, updated];
 		}
 
 		// On a successful answer, try to continue the line: play the opponent's
@@ -928,6 +978,59 @@
 		return pickBalancedDueCards(pool, settings.drillSessionCap, settings.dailyNewCardCap);
 	}
 
+	/**
+	 * "Leaf" cards in the tree: user-turn cards whose expected move leads
+	 * (via the opponent's first reply) to a position with no further card
+	 * — i.e. the deepest rung of each line. A repertoire is never really
+	 * "done"; once the due queue drains in `due` mode we cycle the leaves
+	 * back in so the user keeps practicing the end of every line. Any
+	 * intermediate card that fails along the way still gets re-queued
+	 * through the normal wrong-answer path.
+	 */
+	async function collectLeafCards(): Promise<Card[]> {
+		if (!rep) return [];
+		const all = await listCards(rep.id);
+		const byKey = new Map(all.map((c) => [c.fenKey, c]));
+		const leaves: Card[] = [];
+		for (const card of all) {
+			const node = nodes.get(card.fenKey);
+			if (!node || node.children.length === 0) {
+				leaves.push(card);
+				continue;
+			}
+			let hasDeeperCard = false;
+			outer: for (const userEdge of node.children) {
+				const oppNode = nodes.get(userEdge.toFenKey);
+				if (!oppNode) continue;
+				for (const oppEdge of oppNode.children) {
+					if (byKey.has(oppEdge.toFenKey)) {
+						hasDeeperCard = true;
+						break outer;
+					}
+				}
+			}
+			if (!hasDeeperCard) leaves.push(card);
+		}
+		return leaves;
+	}
+
+	/**
+	 * Re-queue the leaves at the tail so the session keeps going. Also
+	 * clears `drilledKeys` scoped to what we're about to enqueue: a leaf
+	 * that was already completed earlier in the session must be drillable
+	 * again on this lap, otherwise `advanceQueue` would immediately skip
+	 * past it.
+	 */
+	async function extendQueueWithLeaves(): Promise<number> {
+		if (!rep || mode !== 'due') return 0;
+		const leaves = await collectLeafCards();
+		if (leaves.length === 0) return 0;
+		const sorted = sortByLineOrder(leaves);
+		for (const c of sorted) drilledKeys.delete(c.fenKey);
+		queue = [...queue, ...sorted];
+		return sorted.length;
+	}
+
 	function advanceQueue() {
 		let next = idx + 1;
 		while (next < queue.length && drilledKeys.has(queue[next].fenKey)) {
@@ -935,11 +1038,23 @@
 		}
 		if (next >= queue.length) {
 			// Move queue is done. If idea cards are queued, flip into the
-			// self-rated prompt phase; otherwise go to the done screen.
-			// Hold briefly so the final green glyph registers first.
-			setTimeout(() => {
-				if (ideaQueue.length > 0) startIdeaPhase();
-				else phase = 'done';
+			// self-rated prompt phase. Otherwise (in due mode) cycle leaves
+			// back in so the drill never declares the rep "fully learned"
+			// — the user can keep practicing forever. Hold briefly so the
+			// final green glyph registers before anything else moves.
+			setTimeout(async () => {
+				if (ideaQueue.length > 0) {
+					startIdeaPhase();
+					return;
+				}
+				const added = await extendQueueWithLeaves();
+				if (added > 0) {
+					chainedCard = null;
+					idx = next;
+					phase = 'pending';
+					return;
+				}
+				phase = 'done';
 			}, DONE_HOLD_MS);
 		} else {
 			chainedCard = null;
@@ -963,6 +1078,7 @@
 		currentFen = fenFromKey(currentIdea.fenKey);
 		userLastMove = undefined;
 		correctEdge = null;
+		correctEdges = [];
 		moveQuality = null;
 		gradedSquare = null;
 		phase = 'idea-prompt';
@@ -1253,7 +1369,12 @@
 						{/if}
 					</div>
 					<div class="flex gap-2">
-						<Button variant="ghost" size="sm" onclick={showHint} disabled={hintLevel >= 2}>
+						<Button
+							variant="ghost"
+							size="sm"
+							onclick={showHint}
+							disabled={hintLevel >= 2 || hintSuppressed}
+						>
 							<Keyboard class="size-3" />
 							<span>
 								{hintLevel === 0
