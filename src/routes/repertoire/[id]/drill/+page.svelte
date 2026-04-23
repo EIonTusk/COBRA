@@ -11,6 +11,7 @@
 	import {
 		dueCards,
 		getCard,
+		listCards,
 		mistakeCards,
 		pickBalancedDueCards,
 		resetAllFsrs,
@@ -485,6 +486,12 @@
 	const isFirstEverCard = $derived(
 		!!currentCard && !currentCard.lastReview && !introducedKeys.has(currentCard.fenKey)
 	);
+	// Multi-move review cards withhold hints: drawing arrows for every
+	// accepted reply would either overwhelm the board or leak the full
+	// "recipe" for positions where the user is supposed to pick one from
+	// memory. First-ever encounters still get the teaching arrows — the
+	// rest of the session keeps them hidden.
+	const hintSuppressed = $derived(correctEdges.length > 1 && !isFirstEverCard);
 	const currentAutoAdvanceMs = $derived(
 		// Mistake-focused sessions always use the slow pause so the "corrected"
 		// feedback actually registers before the next card loads.
@@ -740,11 +747,6 @@
 		// don't add the same card twice.
 		if (outcome === 'wrong' && !isIntroductionPass) {
 			queue = [...queue, ratedCard];
-		} else if (requeuePeeked) {
-			// Peeked + still-learning re-queue uses the *updated* card so
-			// the retry won't auto-reveal: lastReview is now set and the
-			// intro effect keeps hintLevel at 0 for a real recall test.
-			queue = [...queue, updated];
 		}
 
 		// On a successful answer, try to continue the line: play the opponent's

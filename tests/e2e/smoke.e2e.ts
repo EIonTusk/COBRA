@@ -76,5 +76,5 @@ test('import page renders and validates empty submission', async ({ page }) => {
 test('settings page loads and shows defaults', async ({ page }) => {
 	await page.goto('/settings');
 	await expect(page.getByRole('heading', { name: /dials/i })).toBeVisible();
-	await expect(page.getByLabel('New cards per day')).toHaveValue('10');
+	await expect(page.getByLabel('New cards per session')).toHaveValue('10');
 });
