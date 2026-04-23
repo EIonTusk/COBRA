@@ -1,0 +1,74 @@
+name: Auto-tag
+
+# On push to main, bump the version based on the commit subject prefix and
+# run scripts/release.mjs (which updates package.json / tauri.conf.json /
+# Cargo.toml, commits, tags, and pushes). The tag push then triggers
+# release.yml to build artifacts.
+#
+#   feat / feat(scope) / feat!  -> minor bump (x.y+1.0)
+#   fix  / fix(scope)           -> patch bump (x.y.z+1)
+#   anything else               -> skip
+#
+# Requires a PAT in secret RELEASE_PAT with `contents: write` and
+# `workflows: write`. The default GITHUB_TOKEN cannot trigger another
+# workflow (release.yml) from its tag push.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: autotag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: "!startsWith(github.event.head_commit.message, 'release ')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: npm ci --no-audit --no-fund
+
+      - name: Compute next version
+        id: v
+        run: |
+          MSG=$(git log -1 --pretty=%s)
+          CUR=$(node -p "require('./package.json').version")
+          IFS=. read -r X Y Z <<< "$CUR"
+          case "$MSG" in
+            feat\!:*|feat\(*\)\!:*) NEXT="$X.$((Y+1)).0" ;;
+            feat:*|feat\(*\):*)     NEXT="$X.$((Y+1)).0" ;;
+            fix:*|fix\(*\):*)       NEXT="$X.$Y.$((Z+1))" ;;
+            *)
+              echo "No feat/fix prefix in: $MSG"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          echo "Bumping $CUR -> $NEXT"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Configure git
+        if: steps.v.outputs.next
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Release
+        if: steps.v.outputs.next
+        run: npm run release -- ${{ steps.v.outputs.next }}
