@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { SvelteSet } from 'svelte/reactivity';
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { onMount, untrack } from 'svelte';
 	import { base, resolve } from '$app/paths';
 	import { page } from '$app/state';
@@ -13,6 +13,7 @@
 		getCard,
 		listCards,
 		mistakeCards,
+		pickBalancedDueCards,
 		resetAllFsrs,
 		upsertCard
 	} from '$lib/storage/cards';
@@ -32,6 +33,7 @@
 	} from '$lib/chess/position';
 	import { colorToMove, fenKeyFromFen } from '$lib/chess/fen';
 	import { pathToFenKey, furthestNonBranchingFenKey } from '$lib/tree/traversal';
+	import { buildLineFirstQueue } from '$lib/tree/lineOrder';
 	import { Button, confirmDialog } from '$lib/ui';
 	import { playCorrect, playIncorrect } from '$lib/ui/sounds';
 	import { DRILL_INTRO_MS } from '$lib/types';
@@ -54,6 +56,11 @@
 	let queue = $state<Card[]>([]);
 	let idx = $state(0);
 	let phase = $state<Phase>('loading');
+	// Line label per card fenKey — built once when the queue loads and
+	// consulted whenever we need to know "which line is this card in?".
+	// Keyed on fenKey (not queue index) so the mapping survives mutations
+	// like pruneDeeperInLine and the wrong-answer re-enqueue.
+	let lineLabelByKey = new SvelteMap<string, string | null>();
 
 	// Idea-card tail of the session. Plays after the move queue drains so
 	// the user finishes with a few open-ended prompts while the theory is
@@ -80,6 +87,11 @@
 	// the next queue card from the root.
 	let chainedCard = $state<Card | null>(null);
 	const drilledKeys = new SvelteSet<string>();
+	// FenKeys of never-reviewed cards that have already had their
+	// auto-hinted "introduction" pass this session. On their re-queued second
+	// pass the hint is suppressed so the user actually drills the move
+	// unaided at least once before FSRS schedules it days out.
+	const introducedKeys = new SvelteSet<string>();
 	// Plain variable (not $state): a one-shot "don't play the intro animation
 	// for this card" signal that the chain handler sets before swapping
 	// `chainedCard`. The subsequent $effect reads it to short-circuit.
@@ -171,6 +183,9 @@
 	);
 
 	const currentCard = $derived<Card | undefined>(chainedCard ?? queue[idx]);
+	const currentLineLabel = $derived<string | null>(
+		currentCard ? (lineLabelByKey.get(currentCard.fenKey) ?? null) : null
+	);
 	const orientation = $derived<'white' | 'black'>(rep?.color ?? 'white');
 	const sideToMove = $derived<'white' | 'black'>(currentFen ? colorToMove(currentFen) : 'white');
 	const progress = $derived.by(() => {
@@ -192,8 +207,10 @@
 		untrack(() => {
 			// First-ever cards auto-reveal the full-hint arrow: there's nothing
 			// to recall yet, so skip straight to the teaching cue the user
-			// would otherwise have to click for.
-			hintLevel = card.lastReview ? 0 : 2;
+			// would otherwise have to click for. On the re-queued second pass
+			// of an introduced card the hint is suppressed so the user drills
+			// it unaided — see the introducedKeys logic in rateAndAdvance.
+			hintLevel = card.lastReview || introducedKeys.has(card.fenKey) ? 0 : 2;
 			wrongAttempts = 0;
 			moveQuality = null;
 			gradedSquare = null;
@@ -466,11 +483,14 @@
 	const AUTO_ADVANCE_SLOW_MS = 1400;
 
 	const firstTryClean = $derived(wrongAttempts === 0 && hintLevel === 0);
-	const isFirstEverCard = $derived(!!currentCard && !currentCard.lastReview);
-	// Hint button is live unless the card would refuse to render any arrows
-	// — a multi-move position on a subsequent review deliberately withholds
-	// hints, so bumping hintLevel would penalise the user for a click that
-	// drew nothing.
+	const isFirstEverCard = $derived(
+		!!currentCard && !currentCard.lastReview && !introducedKeys.has(currentCard.fenKey)
+	);
+	// Multi-move review cards withhold hints: drawing arrows for every
+	// accepted reply would either overwhelm the board or leak the full
+	// "recipe" for positions where the user is supposed to pick one from
+	// memory. First-ever encounters still get the teaching arrows — the
+	// rest of the session keeps them hidden.
 	const hintSuppressed = $derived(correctEdges.length > 1 && !isFirstEverCard);
 	const currentAutoAdvanceMs = $derived(
 		// Mistake-focused sessions always use the slow pause so the "corrected"
@@ -663,45 +683,45 @@
 	}
 
 	// Map the final state of the card to an FSRS outcome.
-	//   any wrong attempt        → 'wrong'   (Again)
-	//   any hint used            → 'peeked'  (Hard)
-	//   first-try clean          → 'correct' (Good)
+	//   any wrong attempt OR any hint used  → 'wrong'   (Again)
+	//   first-try clean, unaided            → 'correct' (Good)
 	// 'easy' can still be triggered explicitly from the keyboard.
-	//
-	// First-ever cards auto-reveal the answer as a teaching cue, so they
-	// always end with hintLevel > 0 and correctly grade as 'peeked' — the
-	// user never actually *recalled* the move, the drill showed it. The
-	// in-session re-queue in rateAndAdvance gives the user a second,
-	// unaided pass to demonstrate real recall.
+	// A peek is a failed recall: the user didn't produce the move on their
+	// own, so FSRS schedules it back to short-term just like an outright
+	// miss. The re-queue + prune flow in rateAndAdvance follows the 'wrong'
+	// path, with intro-pass de-duplication handled there.
 	function deriveOutcome(): DrillOutcome {
-		if (wrongAttempts > 0) return 'wrong';
-		if (hintLevel > 0) return 'peeked';
+		if (wrongAttempts > 0 || hintLevel > 0) return 'wrong';
 		return 'correct';
 	}
 
 	async function rateAndAdvance(outcome: DrillOutcome) {
 		if (!rep || !settings || !currentCard) return;
 		const ratedCard = currentCard;
+		// "Introduction pass": the first time we ever show a never-reviewed
+		// card this session it opens with the hint arrow drawn. The pass is
+		// still a viewing rather than a recall — we re-queue the card once
+		// so the user drills it unaided before the session ends. The flow
+		// triggers regardless of outcome (even 'wrong', which is what a peek
+		// now produces) because the point is to guarantee the second pass.
+		// Prune and the generic wrong-re-queue are suppressed on intro pass
+		// so we don't double-queue or strip deeper cards the user never
+		// actually flunked.
+		const isIntroductionPass =
+			!ratedCard.lastReview && !introducedKeys.has(ratedCard.fenKey) && mode === 'due';
 		const updated = reviewCard(ratedCard, outcomeToRating(outcome), settings.fsrsParams);
 		await upsertCard(updated);
 		sessionDone += 1;
-		// Cards still in the FSRS Learning / Relearning phase (and brand-
-		// new cards that haven't been reviewed at all) haven't really been
-		// proved yet — they graduate to Review state only after a clean
-		// recall. Any non-clean outcome on these gets an extra in-session
-		// pass: wrong answers keep the existing re-queue, and hint-aided
-		// solves get a second unaided try so the drill measures actual
-		// recall instead of copying the arrow.
-		const preFsrs = ratedCard.fsrs;
-		const wasLearning =
-			!ratedCard.lastReview ||
-			(!!preFsrs && (preFsrs.state === 0 || preFsrs.state === 1 || preFsrs.state === 3));
-		const requeuePeeked = wasLearning && outcome === 'peeked';
-		const requeuing = outcome === 'wrong' || requeuePeeked;
-		// Mark this position as drilled only on a clean pass — re-queued
-		// cards must stay visible to advanceQueue, which uses drilledKeys
-		// to skip already-finished cards.
-		if (!requeuing) drilledKeys.add(ratedCard.fenKey);
+		// Mark this position as drilled only on a clean pass — a wrong
+		// answer gets re-queued at the tail and must remain visible to
+		// advanceQueue, which uses drilledKeys to skip already-finished
+		// cards. Introduction passes also stay visible: the re-queued card
+		// needs to come around a second time for the drill-without-hint.
+		if (outcome !== 'wrong' && !isIntroductionPass) drilledKeys.add(ratedCard.fenKey);
+		if (isIntroductionPass) {
+			introducedKeys.add(ratedCard.fenKey);
+			queue = [...queue, ratedCard];
+		}
 		// Mark stored Lichess-game mistakes at this position as corrected
 		// when we're in retrain mode and the user answered correctly.
 		if (mode === 'retrain' && (outcome === 'correct' || outcome === 'easy') && rep) {
@@ -714,20 +734,19 @@
 		// position, showing the "correct" move before the user has actually
 		// internalised it. Those deeper cards come back in future sessions
 		// via normal FSRS scheduling. Retrain mode is mistake-specific and
-		// doesn't use tree ordering, so we skip the prune there.
-		if (outcome === 'wrong' && mode !== 'retrain') {
+		// doesn't use tree ordering, so we skip the prune there. Intro-pass
+		// peeks aren't real misses (the user viewed the shown move), so we
+		// don't prune behind them either.
+		if (outcome === 'wrong' && !isIntroductionPass && mode !== 'retrain') {
 			pruneDeeperInLine(ratedCard.fenKey);
 		}
-		if (outcome === 'wrong') {
-			// Wrong-answer re-queue uses the *pre-review* card so the retry
-			// auto-reveals the hint again (its lastReview is still unset for
-			// a first-ever card) — the user just failed, they need the cue.
+		// Always re-queue a failed card at the tail so the user gets a second
+		// pass at it before the session ends. FSRS still schedules it for a
+		// later day; this is an in-session repeat on top of that. Intro pass
+		// already queued this card above — skip the generic re-queue so we
+		// don't add the same card twice.
+		if (outcome === 'wrong' && !isIntroductionPass) {
 			queue = [...queue, ratedCard];
-		} else if (requeuePeeked) {
-			// Peeked + still-learning re-queue uses the *updated* card so
-			// the retry won't auto-reveal: lastReview is now set and the
-			// intro effect keeps hintLevel at 0 for a real recall test.
-			queue = [...queue, updated];
 		}
 
 		// On a successful answer, try to continue the line: play the opponent's
@@ -879,6 +898,7 @@
 	async function reloadSession() {
 		if (!rep || !settings) return;
 		drilledKeys.clear();
+		introducedKeys.clear();
 		chainedCard = null;
 		userLastMove = undefined;
 		userPlayedSan = null;
@@ -900,51 +920,35 @@
 		}
 	}
 
+	const OVERDUE_CAP_MS = 24 * 60 * 60 * 1000;
+
 	/**
-	 * Reorder a drill queue as a BFS (level-order) walk of the repertoire
-	 * tree: every card at ply N gets drilled before any card at ply N+1.
-	 * Shallower moves are what deeper positions rest on, so the user learns
-	 * the trunk before they're asked to recall a sideline six plies in.
+	 * Reorder a drill queue line-first and record each card's line label so
+	 * the UI can announce which opening the user is drilling.
 	 *
-	 * Previously this did a DFS preorder ("drill one branch end-to-end,
-	 * then the next"), which surfaced deep sideline cards before the
-	 * shallow move that leads into a sibling opening — e.g. a 6th-move
-	 * Italian position was drilled before the user had even seen their
-	 * 1.d4 card. BFS removes that inversion while still walking tree
-	 * order within each level, so siblings stay clustered.
+	 * Line-first means: cards sharing the same first branching choice (at or
+	 * below the repertoire's starting position) are drilled contiguously, in
+	 * plies-from-root order. You walk the Ruy end-to-end before moving to
+	 * the Italian — matching how a player thinks about "drilling a line".
 	 *
-	 * Cards that aren't reachable from the root (shouldn't happen for a
-	 * healthy rep, but e.g. after a PGN import with broken links) fall
-	 * to the tail in dueAt order.
+	 * The overdue cap pulls whole line blocks forward when any card in them
+	 * is more than a day late, so a user who ends a session early never
+	 * defers a badly-overdue card behind fresher ones. Mistake and retrain
+	 * modes skip the cap — their `dueAt` isn't FSRS-meaningful.
 	 */
 	function sortByLineOrder(cards: Card[]): Card[] {
+		lineLabelByKey.clear();
 		if (!rep) return cards;
-		const root = rep.rootFenKey;
-		const byKey = new Map(cards.map((c) => [c.fenKey, c]));
-		const remaining = new SvelteSet(byKey.keys());
-		const visited = new SvelteSet<string>([root]);
-		const out: Card[] = [];
-		const queue: string[] = [root];
-		while (queue.length > 0) {
-			const fenKey = queue.shift()!;
-			const card = byKey.get(fenKey);
-			if (card) {
-				out.push(card);
-				remaining.delete(fenKey);
-			}
-			const node = nodes.get(fenKey);
-			if (!node) continue;
-			for (const edge of node.children) {
-				if (visited.has(edge.toFenKey)) continue;
-				visited.add(edge.toFenKey);
-				queue.push(edge.toFenKey);
-			}
+		const applyOverdueCap = mode === 'due';
+		const ordered = buildLineFirstQueue(cards, nodes, {
+			rootFenKey: rep.rootFenKey,
+			startingFenKey: rep.startingFenKey ?? null,
+			overdueCapMs: applyOverdueCap ? OVERDUE_CAP_MS : undefined
+		});
+		for (let i = 0; i < ordered.cards.length; i++) {
+			lineLabelByKey.set(ordered.cards[i].fenKey, ordered.lineLabels[i]);
 		}
-		if (remaining.size > 0) {
-			const orphans = [...remaining].map((k) => byKey.get(k)!).sort((a, b) => a.dueAt - b.dueAt);
-			out.push(...orphans);
-		}
-		return out;
+		return ordered.cards;
 	}
 
 	async function loadQueue(): Promise<Card[]> {
@@ -968,7 +972,12 @@
 			}
 			return queue;
 		}
-		return dueCards(rep.id, Date.now(), settings.drillSessionCap);
+		// Fetch a generous pool so the balancer has room to put review cards
+		// ahead of new ones. The sessionCap alone isn't enough: on a fresh
+		// import, `dueCards` orders by dueAt asc and the first N could be
+		// all-new, leaving no reviews to promote.
+		const pool = await dueCards(rep.id, Date.now(), settings.drillSessionCap * 5);
+		return pickBalancedDueCards(pool, settings.drillSessionCap, settings.dailyNewCardCap);
 	}
 
 	/**
@@ -1315,15 +1324,21 @@
 			<aside class="space-y-5">
 				<!-- Prompt area (or feedback) -->
 				{#if phase === 'intro'}
-					<div class="ot-fade">
-						<div class="eyebrow mb-2 text-[var(--color-parchment-400)]">Playing the line</div>
-						<h2 class="font-serif text-[1.75rem] leading-tight text-[var(--color-parchment-200)]">
-							<em>Setting the stage…</em>
-						</h2>
-						<p class="mt-3 font-serif text-sm text-[var(--color-parchment-500)] italic">
-							The board will arrive at the position in a moment.
-						</p>
-					</div>
+					{#key currentLineLabel}
+						<div class="ot-fade">
+							<div class="eyebrow mb-2 text-[var(--color-parchment-400)]">
+								Playing the line{#if currentLineLabel}
+									<span class="ml-1 text-[var(--color-brass-300)]">· {currentLineLabel}</span>
+								{/if}
+							</div>
+							<h2 class="font-serif text-[1.75rem] leading-tight text-[var(--color-parchment-200)]">
+								<em>Setting the stage…</em>
+							</h2>
+							<p class="mt-3 font-serif text-sm text-[var(--color-parchment-500)] italic">
+								The board will arrive at the position in a moment.
+							</p>
+						</div>
+					{/key}
 				{:else if phase === 'pending'}
 					<div class="ot-fade">
 						<div class="eyebrow mb-2">
@@ -1420,7 +1435,7 @@
 									{moveQualityLabel(moveQuality)}
 								</span>
 							{:else}
-								<span class="text-[var(--color-oxblood-300)]">Not this time</span>
+								<span class="text-[var(--color-parchment-400)]">Checking</span>
 							{/if}
 						</div>
 						<h2 class="font-serif text-[2rem] leading-tight text-[var(--color-parchment-100)]">
@@ -1428,8 +1443,10 @@
 								<em>Fair, but not your repertoire. Try again.</em>
 							{:else if moveQuality === 'dubious'}
 								<em>Not quite. Try again.</em>
-							{:else}
+							{:else if moveQuality}
 								<em>Try again.</em>
+							{:else}
+								<em>Evaluating…</em>
 							{/if}
 						</h2>
 						{#if userPlayedSan && moveQuality}
@@ -1482,6 +1499,14 @@
 						<span class="tabular-nums">{queue.length - idx}</span>
 						<span>remaining</span>
 					</div>
+					{#if currentLineLabel}
+						<div
+							class="mt-2 flex items-center gap-2 font-mono text-xs text-[var(--color-parchment-400)]"
+						>
+							<span>Line</span>
+							<span class="text-[var(--color-brass-300)]">{currentLineLabel}</span>
+						</div>
+					{/if}
 					{#if rep && currentCard}
 						<Button
 							href={`${base}/repertoire/${rep.id}/edit?jump=${encodeURIComponent(currentCard.fenKey)}`}

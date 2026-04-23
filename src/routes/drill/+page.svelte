@@ -8,7 +8,7 @@
 
 	import Board from '$lib/chess/Board.svelte';
 	import { listRepertoires } from '$lib/storage/repertoires';
-	import { dueCards, upsertCard } from '$lib/storage/cards';
+	import { dueCards, pickBalancedDueCards, upsertCard } from '$lib/storage/cards';
 	import { getSettings } from '$lib/storage/settings';
 	import { nodesMap } from '$lib/storage/nodes';
 	import { reviewCard, outcomeToRating, type DrillOutcome } from '$lib/fsrs/scheduler';
@@ -166,7 +166,10 @@
 		const orderedReps = [...reps].sort((a, b) => colorRank(a.color) - colorRank(b.color));
 		const entries: QueueEntry[] = [];
 		for (const rep of orderedReps) {
-			const due = await dueCards(rep.id, Date.now(), cap);
+			// Generous pool so the balancer can promote reviews over fresh new
+			// cards. See note in the per-repertoire drill loadQueue.
+			const pool = await dueCards(rep.id, Date.now(), cap * 5);
+			const due = pickBalancedDueCards(pool, cap, settings.dailyNewCardCap);
 			if (due.length === 0) continue;
 			const nodes = await nodesMap(rep.id);
 			const byKey = new Map(due.map((c) => [c.fenKey, c]));
@@ -489,8 +492,10 @@
 	});
 
 	function deriveOutcome(): DrillOutcome {
-		if (wrongAttempts > 0) return 'wrong';
-		if (hintLevel > 0) return 'peeked';
+		// A peek is a failed recall — same as playing a wrong move, the user
+		// didn't produce the line on their own. Both rate as Again so FSRS
+		// pulls the card back to short-term review.
+		if (wrongAttempts > 0 || hintLevel > 0) return 'wrong';
 		return 'correct';
 	}
 
