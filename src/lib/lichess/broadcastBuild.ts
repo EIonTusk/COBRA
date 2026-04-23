@@ -9,7 +9,7 @@
 
 import { parsePgn, startingPosition } from 'chessops/pgn';
 import { parseSan, makeSanAndPlay } from 'chessops/san';
-import { makeFen } from 'chessops/fen';
+import { makeFen, parseFen } from 'chessops/fen';
 import { makeUci } from 'chessops/util';
 
 import { colorToMove } from '$lib/chess/fen';
@@ -23,6 +23,13 @@ export interface BroadcastBuildOpts {
 	repId: string;
 	color: Color;
 	depth: number;
+	/**
+	 * Optional starting-position filter. Only fold game moves that occur from
+	 * this position onward; games that never reach the position are skipped.
+	 * EPD-matched (castling/en-passant aware, halfmove/fullmove ignored). When
+	 * omitted, defaults to every game's own starting position.
+	 */
+	startFen?: string;
 	/** FIDE player to filter games by (selected from the search picker). */
 	player: {
 		id: number;
@@ -73,6 +80,23 @@ export async function buildFromBroadcasts(
 	}
 	const needles = nameNeedles(fideName);
 	const maxTournaments = opts.maxTournaments ?? 15;
+
+	// Canonicalise the start-position filter (if any) to an EPD so we can
+	// match against each ply's position regardless of halfmove/fullmove
+	// counters in the game PGN.
+	let startEpd: string | null = null;
+	if (opts.startFen) {
+		const parsed = parseFen(opts.startFen);
+		if (parsed.isErr) throw new Error('Invalid starting FEN for broadcast autobuild.');
+		const normalised = makeFen(parsed.value, { epd: true });
+		// Treat the default position as "no filter" so we don't pay the
+		// lookup cost for the common case.
+		const defaultEpd = makeFen(
+			parseFen('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1').unwrap(),
+			{ epd: true }
+		);
+		if (normalised !== defaultEpd) startEpd = normalised;
+	}
 
 	// The search index matches against "First Last" strings better than the
 	// comma-separated FIDE form.
@@ -143,7 +167,7 @@ export async function buildFromBroadcasts(
 			if (opts.color === 'black' && !targetIsBlack) continue;
 			progress.gamesMatched += 1;
 
-			await foldGame(opts.repId, opts.color, opts.depth, game, progress);
+			await foldGame(opts.repId, opts.color, opts.depth, game, progress, startEpd);
 			opts.onProgress?.({ ...progress });
 		}
 		progress.tournamentsScanned += 1;
@@ -159,36 +183,47 @@ async function foldGame(
 	color: Color,
 	depth: number,
 	game: ReturnType<typeof parsePgn>[number],
-	progress: BroadcastBuildProgress
+	progress: BroadcastBuildProgress,
+	startEpd: string | null
 ): Promise<void> {
 	const startR = startingPosition(game.headers);
 	if (startR.isErr) return;
 	const pos = startR.value;
 	let fenKey = makeFen(pos.toSetup(), { epd: true });
 
+	// When a start-position filter is set, fast-forward through the game
+	// without recording edges until we hit that EPD. Games that never reach
+	// it contribute nothing.
+	let recording = startEpd === null || fenKey === startEpd;
 	let ply = 0;
 	for (const node of game.moves.mainline()) {
-		if (ply >= depth) break;
 		const move = parseSan(pos, node.san);
 		if (!move) break;
-		const forked = pos.clone();
-		const san = makeSanAndPlay(forked, move);
-		const uci = makeUci(move);
-		const toFenKey = makeFen(forked.toSetup(), { epd: true });
-		const edge: Edge = { san, uci, toFenKey };
+		if (recording) {
+			if (ply >= depth) break;
+			const forked = pos.clone();
+			const san = makeSanAndPlay(forked, move);
+			const uci = makeUci(move);
+			const toFenKey = makeFen(forked.toSetup(), { epd: true });
+			const edge: Edge = { san, uci, toFenKey };
 
-		const res = await addEdge(repId, fenKey, edge);
-		if (res.created) progress.edgesAdded += 1;
-		if (colorToMove(fenKey) === color) {
-			const existing = await getCard(repId, fenKey);
-			if (!existing) {
-				await upsertCard(createFreshCard(repId, fenKey, edge.san));
-				progress.cardsAdded += 1;
+			const res = await addEdge(repId, fenKey, edge);
+			if (res.created) progress.edgesAdded += 1;
+			if (colorToMove(fenKey) === color) {
+				const existing = await getCard(repId, fenKey);
+				if (!existing) {
+					await upsertCard(createFreshCard(repId, fenKey, edge.san));
+					progress.cardsAdded += 1;
+				}
 			}
+			makeSanAndPlay(pos, move);
+			fenKey = makeFen(pos.toSetup(), { epd: true });
+			ply += 1;
+		} else {
+			makeSanAndPlay(pos, move);
+			fenKey = makeFen(pos.toSetup(), { epd: true });
+			if (fenKey === startEpd) recording = true;
 		}
-		makeSanAndPlay(pos, move);
-		fenKey = makeFen(pos.toSetup(), { epd: true });
-		ply += 1;
 	}
 }
 

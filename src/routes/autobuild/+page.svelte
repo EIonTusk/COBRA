@@ -363,6 +363,7 @@
 					repId: rep.id,
 					color,
 					depth,
+					startFen,
 					player: {
 						id: broadcastSelectedPlayer.id,
 						name: broadcastSelectedPlayer.name
@@ -714,125 +715,123 @@
 			</div>
 		{/if}
 
-		{#if mode !== 'broadcasts'}
-			<div>
-				<div class="mb-1.5 flex items-end justify-between gap-3">
-					<Label for="prefix">Starting moves (optional)</Label>
-					<div
-						class="inline-flex overflow-hidden rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] font-mono text-[10px] tracking-wider uppercase"
-						role="radiogroup"
+		<div>
+			<div class="mb-1.5 flex items-end justify-between gap-3">
+				<Label for="prefix">Starting moves (optional)</Label>
+				<div
+					class="inline-flex overflow-hidden rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] font-mono text-[10px] tracking-wider uppercase"
+					role="radiogroup"
+				>
+					<button
+						type="button"
+						role="radio"
+						aria-checked={prefixMode === 'san'}
+						disabled={running}
+						class={cn(
+							'px-2 py-1 transition-colors',
+							prefixMode === 'san'
+								? 'bg-[var(--color-brass-300)] text-[var(--color-ink-950)]'
+								: 'text-[var(--color-parchment-300)] hover:bg-[var(--color-ink-800)]'
+						)}
+						onclick={() => (prefixMode = 'san')}
 					>
-						<button
-							type="button"
-							role="radio"
-							aria-checked={prefixMode === 'san'}
-							disabled={running}
-							class={cn(
-								'px-2 py-1 transition-colors',
-								prefixMode === 'san'
-									? 'bg-[var(--color-brass-300)] text-[var(--color-ink-950)]'
-									: 'text-[var(--color-parchment-300)] hover:bg-[var(--color-ink-800)]'
-							)}
-							onclick={() => (prefixMode = 'san')}
+						Type SAN
+					</button>
+					<button
+						type="button"
+						role="radio"
+						aria-checked={prefixMode === 'board'}
+						disabled={running}
+						class={cn(
+							'px-2 py-1 transition-colors',
+							prefixMode === 'board'
+								? 'bg-[var(--color-brass-300)] text-[var(--color-ink-950)]'
+								: 'text-[var(--color-parchment-300)] hover:bg-[var(--color-ink-800)]'
+						)}
+						onclick={() => (prefixMode = 'board')}
+					>
+						Build on board
+					</button>
+				</div>
+			</div>
+
+			{#if prefixMode === 'san'}
+				<div class="flex gap-2">
+					<Input
+						id="prefix"
+						bind:value={prefixInput}
+						onblur={formatPrefix}
+						disabled={running}
+						placeholder="1. e4 c5 2. Nf3"
+						class="flex-1 font-mono"
+					/>
+					<Button
+						type="button"
+						variant="ghost"
+						size="md"
+						onclick={formatPrefix}
+						disabled={running || !prefixInput.trim()}
+					>
+						Format
+					</Button>
+				</div>
+				<p class="mt-1.5 font-serif text-xs text-[var(--color-parchment-500)] italic">
+					Paste free-form; Format (or blur) normalises move numbers and spacing.
+				</p>
+			{:else}
+				<div class="grid items-start gap-3 sm:grid-cols-[220px_1fr]">
+					<div class="max-w-[220px]">
+						<Board
+							fen={builderFen}
+							orientation="white"
+							turnColor={colorToMove(builderFen.split(' ')[1] === 'w' ? builderFen : builderFen) as
+								| 'white'
+								| 'black'}
+							movableColor="both"
+							dests={builderDests}
+							lastMove={builderLastMove}
+							onmove={handleBuilderMove}
+						/>
+					</div>
+					<div class="min-w-0 space-y-2">
+						<div
+							class="min-h-10 rounded-[3px] border border-[var(--color-ink-800)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-[13px] leading-6 break-all"
 						>
-							Type SAN
-						</button>
-						<button
-							type="button"
-							role="radio"
-							aria-checked={prefixMode === 'board'}
-							disabled={running}
-							class={cn(
-								'px-2 py-1 transition-colors',
-								prefixMode === 'board'
-									? 'bg-[var(--color-brass-300)] text-[var(--color-ink-950)]'
-									: 'text-[var(--color-parchment-300)] hover:bg-[var(--color-ink-800)]'
-							)}
-							onclick={() => (prefixMode = 'board')}
-						>
-							Build on board
-						</button>
+							{prefixInput || ''}
+							{#if !prefixInput}
+								<span class="font-serif text-[var(--color-parchment-500)] italic"
+									>Play moves on the board to build the starting line…</span
+								>
+							{/if}
+						</div>
+						<div class="flex gap-2">
+							<Button
+								type="button"
+								variant="ghost"
+								size="sm"
+								onclick={builderUndo}
+								disabled={running || builderSans.length === 0}
+							>
+								<span>Undo</span>
+							</Button>
+							<Button
+								type="button"
+								variant="ghost"
+								size="sm"
+								onclick={builderReset}
+								disabled={running || builderSans.length === 0}
+							>
+								<RotateCcw class="size-3" />
+								<span>Reset</span>
+							</Button>
+						</div>
+						<p class="font-serif text-[11px] text-[var(--color-parchment-500)] italic">
+							Plays to whichever side is to move.
+						</p>
 					</div>
 				</div>
-
-				{#if prefixMode === 'san'}
-					<div class="flex gap-2">
-						<Input
-							id="prefix"
-							bind:value={prefixInput}
-							onblur={formatPrefix}
-							disabled={running}
-							placeholder="1. e4 c5 2. Nf3"
-							class="flex-1 font-mono"
-						/>
-						<Button
-							type="button"
-							variant="ghost"
-							size="md"
-							onclick={formatPrefix}
-							disabled={running || !prefixInput.trim()}
-						>
-							Format
-						</Button>
-					</div>
-					<p class="mt-1.5 font-serif text-xs text-[var(--color-parchment-500)] italic">
-						Paste free-form; Format (or blur) normalises move numbers and spacing.
-					</p>
-				{:else}
-					<div class="grid items-start gap-3 sm:grid-cols-[220px_1fr]">
-						<div class="max-w-[220px]">
-							<Board
-								fen={builderFen}
-								orientation="white"
-								turnColor={colorToMove(
-									builderFen.split(' ')[1] === 'w' ? builderFen : builderFen
-								) as 'white' | 'black'}
-								movableColor="both"
-								dests={builderDests}
-								lastMove={builderLastMove}
-								onmove={handleBuilderMove}
-							/>
-						</div>
-						<div class="min-w-0 space-y-2">
-							<div
-								class="min-h-10 rounded-[3px] border border-[var(--color-ink-800)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-[13px] leading-6 break-all"
-							>
-								{prefixInput || ''}
-								{#if !prefixInput}
-									<span class="font-serif text-[var(--color-parchment-500)] italic"
-										>Play moves on the board to build the starting line…</span
-									>
-								{/if}
-							</div>
-							<div class="flex gap-2">
-								<Button
-									type="button"
-									variant="ghost"
-									size="sm"
-									onclick={builderUndo}
-									disabled={running || builderSans.length === 0}
-								>
-									<span>Undo</span>
-								</Button>
-								<Button
-									type="button"
-									variant="ghost"
-									size="sm"
-									onclick={builderReset}
-									disabled={running || builderSans.length === 0}
-								>
-									<RotateCcw class="size-3" />
-									<span>Reset</span>
-								</Button>
-							</div>
-							<p class="font-serif text-[11px] text-[var(--color-parchment-500)] italic">
-								Plays to whichever side is to move.
-							</p>
-						</div>
-					</div>
-				{/if}
-			</div>
-		{/if}
+			{/if}
+		</div>
 
 		<div class="grid grid-cols-2 gap-5">
 			<div>
