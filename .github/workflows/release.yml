@@ -387,6 +387,9 @@ jobs:
           } > "$PROPS"
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
+      - name: Patch Android release signing config
+        run: node scripts/patch-android-signing.mjs
+
       - name: Build Android APK
         run: |
           if [ "${{ steps.signing.outputs.signed }}" = "true" ]; then
