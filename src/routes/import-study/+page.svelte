@@ -14,7 +14,7 @@
 		type LichessStudyMeta
 	} from '$lib/lichess/studies';
 	import { getCard, upsertCard } from '$lib/storage/cards';
-	import { addEdge } from '$lib/storage/nodes';
+	import { addEdge, applyImportedNote } from '$lib/storage/nodes';
 	import { createRepertoire, setLichessStudyLink } from '$lib/storage/repertoires';
 	import { getSettings } from '$lib/storage/settings';
 	import { Button, DashboardBacklink, Input, Label, Separator } from '$lib/ui';
@@ -122,8 +122,9 @@
 			const rep = await createRepertoire(name, color, first.rootFen);
 
 			for (const line of matching) {
-				for (const { fromFenKey, edge } of line.edges) {
+				for (const { fromFenKey, edge, comment, nags } of line.edges) {
 					await addEdge(rep.id, fromFenKey, edge);
+					await applyImportedNote(rep.id, edge.toFenKey, { comment, nags });
 					if (colorToMove(fromFenKey) === color) {
 						const existing = await getCard(rep.id, fromFenKey);
 						if (!existing) {
