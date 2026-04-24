@@ -27,8 +27,8 @@ export interface Repertoire {
 	/**
 	 * Optional link to a private (or public) Lichess study. When set, the
 	 * repertoire can be synced to/from that study from the lichess-sync page.
-	 * `chapterId` tracks the chapter most recently created by a push so the
-	 * next push can delete+replace it rather than leaving stale chapters.
+	 * Chapters are tracked by name+hash in the link so pushes only re-upload
+	 * what actually changed.
 	 */
 	lichessStudy?: LichessStudyLink | null;
 	/**
@@ -47,18 +47,41 @@ export interface Repertoire {
 	startingFenKey?: string | null;
 }
 
+/**
+ * One chapter that we pushed to Lichess, with the hash of its PGN at push
+ * time. On the next push we chapterize the current tree, hash each chapter,
+ * and compare name-groups: unchanged groups are reused verbatim (no delete,
+ * no re-upload), so small edits don't churn every chapter ID or hit the
+ * Lichess rate limiter unnecessarily.
+ */
+export interface LichessStudyChapter {
+	/** Lichess chapter ID. */
+	id: string;
+	/** Local chapter name — the SAN move-path produced by chapterizeRepertoire. */
+	name: string;
+	/** SHA-256 hex of the PGN pushed for this chapter. */
+	hash: string;
+}
+
 export interface LichessStudyLink {
 	studyId: string;
 	studyName: string;
 	/**
-	 * IDs of chapters created by the last push. One push may produce several
-	 * chapters — we chapterize the tree at its first branching node so a study
-	 * like a 1.e4 repertoire ends up as "1.e4 c5", "1.e4 e5", etc. rather than
-	 * one monolithic chapter. Used on the next push to delete-then-replace so
-	 * we don't stack duplicates; chapters the user created manually on Lichess
-	 * stay untouched because we only delete IDs we saved ourselves.
+	 * @deprecated Replaced by `chapters`. Retained only so that links written
+	 * by pre-diff-sync builds can still be cleaned up on their first
+	 * post-upgrade push — those IDs are all deleted and their content
+	 * re-uploaded into the new name+hash format. New writes leave this empty.
 	 */
 	chapterIds?: string[];
+	/**
+	 * Per-chapter records from the last push, keyed by local chapter name.
+	 * One push may produce several chapters — we chapterize the tree at its
+	 * first branching node so a 1.e4 repertoire ends up as "1.e4 c5",
+	 * "1.e4 e5", etc. rather than one monolithic chapter. Chapters the user
+	 * created manually on Lichess stay untouched because we only delete IDs
+	 * we saved here.
+	 */
+	chapters?: LichessStudyChapter[];
 	lastSyncedAt?: number;
 	lastSyncDirection?: 'push' | 'pull';
 }
