@@ -33,7 +33,7 @@
 		type StudyVisibility
 	} from '$lib/lichess/studies';
 	import { Button, Input, Label, Separator, confirmDialog } from '$lib/ui';
-	import type { AppSettings, LichessStudyLink, Repertoire } from '$lib/types';
+	import type { AppSettings, LichessStudyChapter, LichessStudyLink, Repertoire } from '$lib/types';
 
 	let rep = $state<Repertoire | null>(null);
 	let settings = $state<AppSettings | null>(null);
@@ -175,7 +175,7 @@
 		const link: LichessStudyLink = {
 			studyId,
 			studyName,
-			chapterIds: []
+			chapters: []
 		};
 		await setLichessStudyLink(rep.id, link);
 		rep = { ...rep, lichessStudy: link };
@@ -207,13 +207,29 @@
 		rep = { ...rep, lichessStudy: null };
 	}
 
+	async function sha256Hex(text: string): Promise<string> {
+		const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+		return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('');
+	}
+
 	/**
 	 * Core upload routine shared by the explicit Push button and the auto-
 	 * push triggered right after a fresh Create. Builds chapterized PGN from
-	 * the local tree, deletes any chapter IDs we saved from a prior push
-	 * (plus any extras passed in via `alsoDeleteIds`, used to strip the
-	 * auto-generated "Chapter 1" of a brand-new study), uploads each chapter,
-	 * and persists the new chapter ID list.
+	 * the local tree, hashes each chapter, and diffs against the records
+	 * stored from the last push:
+	 *
+	 *   - same name + same hash  → reuse; don't touch Lichess.
+	 *   - same name, hash changed → delete the old chapter ID(s) for that
+	 *     name, upload the new PGN.
+	 *   - name is new            → upload.
+	 *   - name disappeared       → delete the old chapter ID(s).
+	 *
+	 * `alsoDeleteIds` is used by the fresh-Create flow to strip the
+	 * auto-generated "Chapter 1" Lichess makes on study creation. Links
+	 * written by pre-diff-sync builds carry `chapterIds` instead of
+	 * `chapters`; we can't match those by name, so the first push after
+	 * upgrade falls back to full delete-then-reupload and transitions the
+	 * link to the new format for subsequent pushes.
 	 */
 	async function doPush(alsoDeleteIds: string[] = []): Promise<void> {
 		if (!rep || !rep.lichessStudy || !oauth?.accessToken) return;
@@ -237,8 +253,44 @@
 			rep.name,
 			rep.color
 		);
+		const hashed = await Promise.all(
+			chapters.map(async (c) => ({ ...c, hash: await sha256Hex(c.pgn) }))
+		);
 
-		const toDelete = [...(link.chapterIds ?? []), ...alsoDeleteIds];
+		// Group prior chapters by name. One local chapter may map to several
+		// Lichess chapter IDs if importPgnToStudy split the PGN; grouping by
+		// name keeps them together so the diff treats them as one unit.
+		const priorByName = new SvelteMap<string, LichessStudyChapter[]>();
+		for (const c of link.chapters ?? []) {
+			const arr = priorByName.get(c.name) ?? [];
+			arr.push(c);
+			priorByName.set(c.name, arr);
+		}
+		const legacyDeleteIds = link.chapters?.length ? [] : (link.chapterIds ?? []);
+
+		const keep: LichessStudyChapter[] = [];
+		const toUpload: typeof hashed = [];
+		const toDelete: string[] = [...legacyDeleteIds, ...alsoDeleteIds];
+
+		for (const ch of hashed) {
+			const priorGroup = priorByName.get(ch.name);
+			const unchanged = priorGroup && priorGroup.every((p) => p.hash === ch.hash);
+			if (priorGroup && unchanged) {
+				keep.push(...priorGroup);
+			} else if (priorGroup) {
+				for (const p of priorGroup) toDelete.push(p.id);
+				toUpload.push(ch);
+			} else {
+				toUpload.push(ch);
+			}
+			priorByName.delete(ch.name);
+		}
+		// Anything still in priorByName is a chapter whose name no longer
+		// exists locally — drop it from Lichess too.
+		for (const group of priorByName.values()) {
+			for (const p of group) toDelete.push(p.id);
+		}
+
 		if (toDelete.length > 0) {
 			status = `Removing ${toDelete.length} old chapter${toDelete.length === 1 ? '' : 's'}…`;
 			for (const id of toDelete) {
@@ -250,11 +302,11 @@
 			}
 		}
 
-		const newChapterIds: string[] = [];
+		const uploaded: LichessStudyChapter[] = [];
 		let i = 0;
-		for (const ch of chapters) {
+		for (const ch of toUpload) {
 			i += 1;
-			status = `Uploading chapter ${i}/${chapters.length} — ${ch.name}…`;
+			status = `Uploading chapter ${i}/${toUpload.length} — ${ch.name}…`;
 			const created = await importPgnToStudy(
 				oauth.accessToken,
 				link.studyId,
@@ -262,18 +314,25 @@
 				ch.name,
 				rep.color
 			);
-			for (const c of created) newChapterIds.push(c.id);
+			for (const c of created) {
+				uploaded.push({ id: c.id, name: ch.name, hash: ch.hash });
+			}
 		}
 
 		const updated: LichessStudyLink = {
 			...link,
-			chapterIds: newChapterIds,
+			chapters: [...keep, ...uploaded],
+			chapterIds: [],
 			lastSyncedAt: Date.now(),
 			lastSyncDirection: 'push'
 		};
 		await setLichessStudyLink(rep.id, updated);
 		rep = { ...rep, lichessStudy: updated };
-		status = `Pushed · ${chapters.length} chapter${chapters.length === 1 ? '' : 's'}.`;
+
+		const kept = keep.length > 0 ? `${keep.length} unchanged` : '';
+		const pushed = toUpload.length > 0 ? `${toUpload.length} updated` : kept ? '' : '0 changes';
+		const parts = [pushed, kept].filter(Boolean);
+		status = parts.length > 0 ? `Pushed · ${parts.join(', ')}.` : 'Pushed.';
 	}
 
 	async function push() {
@@ -281,7 +340,7 @@
 		const ok = await confirmDialog({
 			title: 'Push to Lichess study?',
 			message:
-				'Replaces chapters created by the last push with a fresh chapterized dump of the current tree. Chapters you created manually on Lichess are not touched.',
+				'Uploads only the chapters that changed since the last push; unchanged chapters are left alone. Chapters you created manually on Lichess are not touched.',
 			confirmLabel: 'Push'
 		});
 		if (!ok) return;
@@ -481,9 +540,9 @@
 					</div>
 
 					<p class="mt-3 font-serif text-xs text-[var(--color-parchment-500)] italic">
-						<strong>Push</strong> replaces the chapter COBRA created last time with the current
-						tree. <strong>Pull</strong> overwrites the local tree with the study. FSRS history is preserved
-						for positions that remain.
+						<strong>Push</strong> uploads only the chapters that changed since the last push;
+						unchanged chapters are left alone. <strong>Pull</strong> overwrites the local tree with the
+						study. FSRS history is preserved for positions that remain.
 					</p>
 				{:else}
 					<div class="eyebrow mb-2">Connect a study</div>
