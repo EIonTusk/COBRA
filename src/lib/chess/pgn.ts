@@ -95,10 +95,16 @@ function buildPgnTree(
 	const node = nodesByKey.get(fromKey);
 	if (!node) return;
 	for (const edge of node.children) {
+		// Import side stores a move's comment/NAGs on the resulting position
+		// (the child's fenKey), so when we re-emit PGN we look those up on
+		// the destination node. Without this the round-trip drops every note.
+		const child = nodesByKey.get(edge.toFenKey);
+		const comments = child?.comment ? [child.comment] : undefined;
+		const nags = child?.nags && child.nags.length > 0 ? child.nags : undefined;
 		const childNode: ChildNode<PgnNodeData> = new ChildNode({
 			san: edge.san,
-			nags: undefined,
-			comments: undefined,
+			nags,
+			comments,
 			startingComments: undefined
 		} as PgnNodeData);
 		parent.children.push(childNode);

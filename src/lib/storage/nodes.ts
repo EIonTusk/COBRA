@@ -152,6 +152,33 @@ export async function setNodeComment(
 	await db.put('nodes', node);
 }
 
+/**
+ * Additive note write used by import paths: lays a parsed comment / NAGs
+ * onto the node for `fenKey` without touching its children or wiping
+ * fields the caller didn't supply. Mirrors how `replaceRepertoireTree`
+ * attaches comments/nags from the parsed-edge tuple to the resulting
+ * position. No-ops when both fields are empty so import loops can call
+ * it unconditionally.
+ */
+export async function applyImportedNote(
+	repertoireId: string,
+	fenKey: string,
+	note: { comment?: string; nags?: number[] }
+): Promise<void> {
+	const hasComment = !!note.comment;
+	const hasNags = !!(note.nags && note.nags.length > 0);
+	if (!hasComment && !hasNags) return;
+	const db = await getDB();
+	const node = (await db.get('nodes', [repertoireId, fenKey])) ?? {
+		repertoireId,
+		fenKey,
+		children: []
+	};
+	if (hasComment) node.comment = note.comment;
+	if (hasNags) node.nags = note.nags;
+	await db.put('nodes', node);
+}
+
 export async function listNodes(repertoireId: string): Promise<RepertoireNode[]> {
 	const db = await getDB();
 	return db.getAllFromIndex('nodes', 'by-repertoire', repertoireId);
