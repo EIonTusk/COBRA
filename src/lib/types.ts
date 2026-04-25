@@ -161,6 +161,24 @@ export interface AppSettings {
 	dailyNewCardCap: number;
 	drillSessionCap: number;
 	drillIntroSpeed: DrillIntroSpeed;
+	/**
+	 * Controls how the drill handles user-side positions in a line that
+	 * aren't strictly due today. 'play' walks the line from the head and
+	 * asks the user for every user move along the way (no FSRS penalty for
+	 * prefix positions — they're a free pass when answered correctly, and
+	 * the lapse is suppressed when wrong). 'auto' animates straight to the
+	 * due card without stopping at prior positions. Defaults to 'play'.
+	 */
+	drillIntermediateMoves?: 'auto' | 'play';
+	/**
+	 * Stability threshold in days for treating a line-walk prefix/suffix
+	 * card as "well-learned": a graduated FSRS card whose stability is at
+	 * or above this value gets animated past during the lead-in instead
+	 * of pulled into the drill. Lower values keep more cards in the pool
+	 * (drill them again every session); higher values trust the schedule
+	 * sooner and animate past faster. Defaults to 7.
+	 */
+	drillWellLearnedDays?: number;
 	explorerSpeeds: string[];
 	explorerRatings: number[];
 	lichessApiToken: string;
