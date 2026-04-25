@@ -367,25 +367,63 @@ jobs:
         id: signing
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
             echo "No keystore secret set — will produce an unsigned release APK."
             echo "signed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          set -euo pipefail
           KEYSTORE_PATH="${GITHUB_WORKSPACE}/src-tauri/gen/android/release.keystore"
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
-          PROPS="${GITHUB_WORKSPACE}/src-tauri/gen/android/keystore.properties"
-          {
-            echo "storeFile=$KEYSTORE_PATH"
-            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
-            echo "keyAlias=$ANDROID_KEY_ALIAS"
-            echo "keyPassword=$ANDROID_KEY_PASSWORD"
-          } > "$PROPS"
           echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify keystore credentials
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KS="${GITHUB_WORKSPACE}/src-tauri/gen/android/release.keystore"
+          # Using `-storepass:env VAR` keeps passwords out of argv / process listings.
+          if ! keytool -list -keystore "$KS" -storepass:env ANDROID_KEYSTORE_PASSWORD >/dev/null 2>&1; then
+            echo "::error::ANDROID_KEYSTORE_PASSWORD does not open the keystore. Rotate the secret."
+            exit 1
+          fi
+          echo "✓ store password opens keystore"
+          if ! keytool -list -keystore "$KS" -storepass:env ANDROID_KEYSTORE_PASSWORD -alias "$ANDROID_KEY_ALIAS" >/dev/null 2>&1; then
+            echo "::error::ANDROID_KEY_ALIAS not found in keystore. Available aliases:"
+            keytool -list -keystore "$KS" -storepass:env ANDROID_KEYSTORE_PASSWORD 2>/dev/null | sed -n 's/^\([^,]*\), .*Entry.*$/  \1/p' || true
+            exit 1
+          fi
+          echo "✓ alias found"
+          # Probe the key password by exporting the entry into a throwaway
+          # PKCS12 — importkeystore fails if -srckeypass is wrong.
+          TMP_P12="$(mktemp --suffix=.p12)"
+          trap 'rm -f "$TMP_P12"' EXIT
+          if ! keytool -importkeystore -noprompt \
+              -srckeystore "$KS" \
+              -srcalias "$ANDROID_KEY_ALIAS" \
+              -srcstorepass:env ANDROID_KEYSTORE_PASSWORD \
+              -srckeypass:env ANDROID_KEY_PASSWORD \
+              -destkeystore "$TMP_P12" -deststoretype PKCS12 \
+              -deststorepass:env ANDROID_KEYSTORE_PASSWORD \
+              -destkeypass:env ANDROID_KEY_PASSWORD \
+              >/dev/null 2>&1; then
+            echo "::error::ANDROID_KEY_PASSWORD does not decrypt the private key. If the keystore was created without a separate key password (keytool default), set ANDROID_KEY_PASSWORD equal to ANDROID_KEYSTORE_PASSWORD."
+            exit 1
+          fi
+          echo "✓ key password decrypts private key"
+
+      - name: Write keystore.properties
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: node scripts/write-keystore-properties.mjs
 
       - name: Patch Android release signing config
         run: node scripts/patch-android-signing.mjs
