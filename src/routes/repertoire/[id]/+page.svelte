@@ -14,6 +14,7 @@
 		ExternalLink,
 		LineChart,
 		Link as LinkIcon,
+		RotateCcw,
 		Share2,
 		Trash2,
 		Type,
@@ -32,7 +33,13 @@
 	import { furthestNonBranchingFenKey, pathToFenKey } from '$lib/tree/traversal';
 	import Board from '$lib/chess/Board.svelte';
 	import type { RepertoireNode } from '$lib/types';
-	import { countCards, countDue, countMistakeCards, listCards } from '$lib/storage/cards';
+	import {
+		countCards,
+		countDue,
+		countMistakeCards,
+		listCards,
+		resetAllFsrs
+	} from '$lib/storage/cards';
 	import { countDueIdeaCards } from '$lib/storage/ideaCards';
 	import { nodesMap } from '$lib/storage/nodes';
 	import { buildShareBundle, encodeShare } from '$lib/storage/share';
@@ -49,6 +56,8 @@
 	let due = $state(0);
 	let mistakes = $state(0);
 	let nodeCount = $state(0);
+	let edgeCount = $state(0);
+	let lineCount = $state(0);
 	let loading = $state(true);
 	let editingName = $state(false);
 	let draftName = $state('');
@@ -90,6 +99,14 @@
 				const nodes = await nodesMap(id);
 				nodeCount = nodes.size;
 				repNodes = nodes;
+				let edges = 0;
+				let leaves = 0;
+				for (const node of nodes.values()) {
+					edges += node.children.length;
+					if (node.children.length === 0) leaves += 1;
+				}
+				edgeCount = edges;
+				lineCount = leaves;
 				// Retention-tile headline: share of cards that have graduated
 				// past the learning phase (same tiering rule as the full
 				// /retention view). Null when the rep has no cards yet — the
@@ -299,6 +316,25 @@
 		await goto(resolve(`/library`));
 	}
 
+	async function onForgetProgress() {
+		if (!rep) return;
+		const ok = await confirmDialog({
+			title: 'Forget all progress?',
+			message:
+				'Resets the spaced-repetition schedule on every card in this repertoire. The tree and your prepared moves stay; lapses, intervals, and review history are wiped and everything becomes due now.',
+			confirmLabel: 'Forget progress',
+			variant: 'destructive'
+		});
+		if (!ok) return;
+		await resetAllFsrs(rep.id);
+		// Pull fresh counts so the dashboard reflects the wipe before the
+		// user navigates anywhere.
+		total = await countCards(rep.id);
+		due = (await countDue(rep.id)) + (await countDueIdeaCards(rep.id));
+		const cards = await listCards(rep.id);
+		masteredPct = computeMasteredPct(cards);
+	}
+
 	function handleKey(e: KeyboardEvent) {
 		if (e.key === 'Escape' && gearMenuOpen) {
 			e.preventDefault();
@@ -481,6 +517,18 @@
 							role="menuitem"
 							onclick={() => {
 								gearMenuOpen = false;
+								void onForgetProgress();
+							}}
+							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)]"
+						>
+							<RotateCcw class="size-3.5 text-[var(--color-parchment-400)]" />
+							<span>Forget all progress</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							onclick={() => {
+								gearMenuOpen = false;
 								void onDelete();
 							}}
 							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-oxblood-300)] transition-colors hover:bg-[var(--color-oxblood-500)]/15"
@@ -628,6 +676,74 @@
 					<span>Mistakes · {mistakes}</span>
 				</Button>
 			</div>
+		{/if}
+
+		<!--
+			Tree contents. The four counts a user typically wants to reconcile
+			against their PGN — lines, positions, moves, cards — each spelled
+			out so "204 cards" doesn't read as a black box. Cards = the subset
+			of positions where it's your move and a reply is prepared, which
+			is what the drill schedules; lines = leaf-to-root paths; positions
+			deduplicate transpositions; moves are edges in the tree.
+		-->
+		{#if nodeCount > 0}
+			<section class="ink-panel mt-6 p-5" style:--i="3">
+				<h2 class="eyebrow mb-4">Tree contents</h2>
+				<dl class="grid gap-4 sm:grid-cols-2 md:grid-cols-4">
+					<div>
+						<dt
+							class="font-mono text-[10px] tracking-wider text-[var(--color-parchment-500)] uppercase"
+						>
+							Lines
+						</dt>
+						<dd class="mt-1 font-serif text-3xl text-[var(--color-parchment-50)] tabular-nums">
+							{lineCount}
+						</dd>
+						<p class="mt-1 font-serif text-xs text-[var(--color-parchment-500)] italic">
+							Distinct leaf-to-root paths.
+						</p>
+					</div>
+					<div>
+						<dt
+							class="font-mono text-[10px] tracking-wider text-[var(--color-parchment-500)] uppercase"
+						>
+							Positions
+						</dt>
+						<dd class="mt-1 font-serif text-3xl text-[var(--color-parchment-50)] tabular-nums">
+							{nodeCount}
+						</dd>
+						<p class="mt-1 font-serif text-xs text-[var(--color-parchment-500)] italic">
+							Unique board states. Transpositions merge.
+						</p>
+					</div>
+					<div>
+						<dt
+							class="font-mono text-[10px] tracking-wider text-[var(--color-parchment-500)] uppercase"
+						>
+							Moves
+						</dt>
+						<dd class="mt-1 font-serif text-3xl text-[var(--color-parchment-50)] tabular-nums">
+							{edgeCount}
+						</dd>
+						<p class="mt-1 font-serif text-xs text-[var(--color-parchment-500)] italic">
+							Edges between positions (both sides).
+						</p>
+					</div>
+					<div>
+						<dt
+							class="font-mono text-[10px] tracking-wider text-[var(--color-parchment-500)] uppercase"
+						>
+							Cards
+						</dt>
+						<dd class="mt-1 font-serif text-3xl text-[var(--color-parchment-50)] tabular-nums">
+							{total}
+						</dd>
+						<p class="mt-1 font-serif text-xs text-[var(--color-parchment-500)] italic">
+							Your-turn positions the drill schedules.
+						</p>
+					</div>
+				</dl>
+			</section>
 		{/if}
 
 		{#if sparGames.length > 0}

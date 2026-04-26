@@ -3,7 +3,18 @@
 	import { onMount, untrack } from 'svelte';
 	import { base, resolve } from '$app/paths';
 	import { page } from '$app/state';
-	import { X, Keyboard, Pencil, RotateCcw, Trophy, Check } from 'lucide-svelte';
+	import {
+		X,
+		Keyboard,
+		Pencil,
+		RotateCcw,
+		Trophy,
+		Check,
+		ChevronFirst,
+		ChevronLast,
+		ChevronLeft,
+		ChevronRight
+	} from 'lucide-svelte';
 	import type { Key, MoveMetadata, Dests } from '@lichess-org/chessground/types';
 
 	import Board from '$lib/chess/Board.svelte';
@@ -11,7 +22,6 @@
 	import {
 		dueCards,
 		getCard,
-		listCards,
 		mistakeCards,
 		pickBalancedDueCards,
 		resetAllFsrs,
@@ -79,7 +89,50 @@
 	// whichever SAN happens to be stored as expectedSan.
 	let correctEdges = $state<Edge[]>([]);
 	let sessionDone = $state(0);
+	// Locked at the moment loadQueue returns. The progress bar's denominator
+	// uses this so wrong-answer re-queues, intro re-queues, and leaf cycling
+	// don't move the goalposts mid-session. Lapses surface as a separate
+	// "to retry" counter instead of inflating the bar.
+	let sessionPlannedTotal = $state(0);
+	// Per-walk Learn → Train state. Each line walk gets a Learn pass
+	// (hints shown for never-seen positions) immediately followed by a
+	// Train pass (no hints, same line again from move 1) before the queue
+	// moves on to the next walk. `walkPhase` flips between 'learn' and
+	// 'train' as `advanceQueue` crosses each walk's boundary; reviews-only
+	// walks (no introducedKeys overlap) skip the Train pass entirely. Each
+	// entry in `walkStarts` is the queue index where a fresh line walk
+	// begins; `walkFenKeys[i]` is the set of fenKeys in that walk. Both
+	// are reset and repopulated by `pickWithLineWalk` on each session
+	// load.
+	let walkPhase = $state<'learn' | 'train'>('learn');
+	const walkStarts: number[] = [];
+	const walkFenKeys: SvelteSet<string>[] = [];
+	// Slot-based progress: every rate event against a planned card adds one
+	// slot. Brand-new cards are counted as two slots up-front because the
+	// drill plays an introduction pass (hint-shown viewing) before the real
+	// recall pass — counting both keeps the progress bar moving from the
+	// first answer instead of staying at 0% through the entire intro half
+	// of the session.
+	let plannedSlotsDone = $state(0);
+	const plannedKeys = new SvelteSet<string>();
+	const pendingLapses = new SvelteSet<string>();
+	// Subset of plannedKeys that came from the original FSRS due selection
+	// (before line-walk prefix augmentation). Cards outside this set are
+	// "line steps": positions the user is walking through to preserve
+	// move-sequence memory. A correct answer at a line step is a free pass
+	// (no FSRS schedule update); a wrong answer doesn't count as a lapse
+	// against scheduling either, so practising the prefix can never punish
+	// a card that wasn't due today.
+	const dueOriginalKeys = new SvelteSet<string>();
 	let nodes: Map<string, RepertoireNode> = new Map();
+
+	// Lead-in scrubbing. Lets the user step back through the moves that led
+	// to the question position (and forward to return) — useful when two
+	// near-identical positions appear back-to-back, the intro animation
+	// played too fast, or the answer depends on a detail the user wants to
+	// re-check. Offset 0 = at the question; positive offsets walk backwards
+	// one ply at a time. Reset whenever a new card becomes current.
+	let scrubOffset = $state(0);
 
 	// Chain-through-line state. When the user gets a card right, we play the
 	// opponent's response from the tree and — if the position that follows is
@@ -192,7 +245,45 @@
 		if (phase === 'idea-prompt' || phase === 'idea-reveal') {
 			return ideaQueue.length > 0 ? (ideaIdx / ideaQueue.length) * 100 : 0;
 		}
-		return queue.length > 0 ? (idx / queue.length) * 100 : 0;
+		if (sessionPlannedTotal === 0) return 0;
+		const done = Math.min(plannedSlotsDone, sessionPlannedTotal);
+		return (done / sessionPlannedTotal) * 100;
+	});
+	const plannedDoneCount = $derived(Math.min(plannedSlotsDone, sessionPlannedTotal));
+	const pendingLapsesCount = $derived(pendingLapses.size);
+
+	// Pre-computed lead-in history for the current card: every FEN from the
+	// repertoire root down to the question position, plus the move that
+	// produced each one. The user scrubs through this with the back/forward
+	// controls without the drill state machine having to know about it.
+	const scrubHistory = $derived.by<{
+		fens: string[];
+		lastMoves: ([Key, Key] | undefined)[];
+	}>(() => {
+		if (!rep || !currentCard) return { fens: [], lastMoves: [] };
+		const path = pathToFenKey(nodes, rep.rootFenKey, currentCard.fenKey);
+		const fens: string[] = [rep.rootFen];
+		const lastMoves: ([Key, Key] | undefined)[] = [undefined];
+		if (!path) return { fens, lastMoves };
+		let f = rep.rootFen;
+		for (const edge of path) {
+			f = fenAfterMove(f, edge);
+			fens.push(f);
+			lastMoves.push([edge.uci.slice(0, 2) as Key, edge.uci.slice(2, 4) as Key]);
+		}
+		return { fens, lastMoves };
+	});
+	const scrubMaxOffset = $derived(Math.max(0, scrubHistory.fens.length - 1));
+	const scrubActive = $derived(phase === 'pending' && scrubOffset > 0);
+	const displayFen = $derived.by(() => {
+		if (!scrubActive) return currentFen;
+		const i = scrubHistory.fens.length - 1 - scrubOffset;
+		return scrubHistory.fens[i] ?? currentFen;
+	});
+	const displayLastMove = $derived.by<[Key, Key] | undefined>(() => {
+		if (!scrubActive) return userLastMove;
+		const i = scrubHistory.fens.length - 1 - scrubOffset;
+		return scrubHistory.lastMoves[i];
 	});
 
 	$effect(() => {
@@ -210,10 +301,20 @@
 			// would otherwise have to click for. On the re-queued second pass
 			// of an introduced card the hint is suppressed so the user drills
 			// it unaided — see the introducedKeys logic in rateAndAdvance.
-			hintLevel = card.lastReview || introducedKeys.has(card.fenKey) ? 0 : 2;
+			// Brand-new FSRS-tracked cards (never reviewed, not yet
+			// introduced this session) auto-show the answer arrow — there's
+			// nothing to recall yet, so the teaching cue is offered without
+			// requiring a click. Subsequent passes (`lastReview` set or in
+			// `introducedKeys`) suppress it. Line-walk *steps* — positions
+			// pulled in because a deeper card was due, not because they
+			// were due themselves — also never auto-show: those are recall
+			// practice, not first introduction.
+			const isLineWalkStepCard = mode === 'due' && !dueOriginalKeys.has(card.fenKey);
+			hintLevel = card.lastReview || introducedKeys.has(card.fenKey) || isLineWalkStepCard ? 0 : 2;
 			wrongAttempts = 0;
 			moveQuality = null;
 			gradedSquare = null;
+			scrubOffset = 0;
 			if (skipNextIntro) {
 				skipNextIntro = false;
 				userPlayedSan = null;
@@ -270,7 +371,13 @@
 					const orig = edge.uci.slice(0, 2) as Key;
 					const dest = edge.uci.slice(2, 4) as Key;
 					if (hintLevel === 1) shapes.push({ orig, brush: 'paleGreen' });
-					else shapes.push({ orig, dest, brush: 'green' });
+					else
+						shapes.push({
+							orig,
+							dest,
+							brush: 'green',
+							modifiers: { lineWidth: 12 }
+						});
 				}
 			}
 		}
@@ -286,6 +393,21 @@
 		const stepMs = DRILL_INTRO_MS[settings?.drillIntroSpeed ?? 'normal'];
 
 		if (stepMs === 0 || rep.rootFenKey === card.fenKey) {
+			currentFen = targetFen;
+			userLastMove = undefined;
+			correctEdges = acceptedEdgesFor(card, currentFen);
+			correctEdge = correctEdges[0] ?? null;
+			phase = 'pending';
+			return;
+		}
+
+		// Already-introduced cards (e.g. the tail duplicate added for the
+		// unaided revision pass) snap straight to the question position
+		// instead of replaying the whole lead-in. The user has already seen
+		// the line walked through once on the first pass — making them
+		// watch it again would be exactly the "all lines are visualised"
+		// complaint the line walk is meant to avoid.
+		if (introducedKeys.has(card.fenKey)) {
 			currentFen = targetFen;
 			userLastMove = undefined;
 			correctEdges = acceptedEdgesFor(card, currentFen);
@@ -324,10 +446,17 @@
 		// animation only covers the meaningful part of the line. Drills
 		// for cards *before* the starting position keep the full intro
 		// — the user explicitly drills them, so dropping animation would
-		// feel abrupt.
+		// feel abrupt. In line-walk mode the fast-forward is suppressed
+		// entirely: the line walk already drops well-learned moves out of
+		// the drill pool, so anything that ended up *before* the queue's
+		// first card is exactly the well-learned context the user wants
+		// to *see* play out as a refresher — skipping it would be the
+		// "ask the last move" anti-pattern again.
+		const lineWalkModeIntro =
+			(settings?.drillIntermediateMoves ?? 'play') === 'play' && mode === 'due';
 		let skippedFen: string | null = null;
 		let skippedLastMove: [Key, Key] | undefined;
-		if (startIdx === 0 && settings?.openAtStartingPosition !== false) {
+		if (startIdx === 0 && settings?.openAtStartingPosition !== false && !lineWalkModeIntro) {
 			const startKey = rep.startingFenKey ?? furthestNonBranchingFenKey(nodes, rep.rootFenKey);
 			if (startKey && startKey !== rep.rootFenKey && startKey !== card.fenKey) {
 				let walkFen = rep.rootFen;
@@ -401,6 +530,7 @@
 		settings = await getSettings();
 		nodes = await nodesMap(rep.id);
 		queue = sortByLineOrder(await loadQueue());
+		snapshotPlannedSet(queue);
 		// Idea cards only join the "due" mode session — retrain/mistakes are
 		// tightly scoped to move-card deviations and a prompt would dilute
 		// the point of those sessions.
@@ -468,6 +598,15 @@
 			moveQuality = 'correct';
 			phase = 'correct';
 			playCorrect();
+			// Fill the progress slot the moment the move lands rather than
+			// waiting on the auto-advance pause — the user wants to see the
+			// bar move with their action, not after the celebratory dwell.
+			// Lapse tracking still settles in rateAndAdvance because it has
+			// to know whether the final outcome was 'wrong' (intro/line-walk
+			// flags decide whether the lapse is real or just retry chatter).
+			if (plannedKeys.has(currentCard.fenKey)) {
+				plannedSlotsDone += 1;
+			}
 		} else {
 			wrongAttempts += 1;
 			moveQuality = null;
@@ -683,15 +822,17 @@
 	}
 
 	// Map the final state of the card to an FSRS outcome.
-	//   any wrong attempt OR any hint used  → 'wrong'   (Again)
+	//   any wrong attempt                   → 'wrong'   (Again)
+	//   hint shown but no wrong attempts    → 'peeked'  (Hard) — keeps the
+	//                                         chain alive into the next
+	//                                         card so a line walk doesn't
+	//                                         break every time the user
+	//                                         leans on the arrow.
 	//   first-try clean, unaided            → 'correct' (Good)
 	// 'easy' can still be triggered explicitly from the keyboard.
-	// A peek is a failed recall: the user didn't produce the move on their
-	// own, so FSRS schedules it back to short-term just like an outright
-	// miss. The re-queue + prune flow in rateAndAdvance follows the 'wrong'
-	// path, with intro-pass de-duplication handled there.
 	function deriveOutcome(): DrillOutcome {
-		if (wrongAttempts > 0 || hintLevel > 0) return 'wrong';
+		if (wrongAttempts > 0) return 'wrong';
+		if (hintLevel > 0) return 'peeked';
 		return 'correct';
 	}
 
@@ -707,17 +848,68 @@
 		// Prune and the generic wrong-re-queue are suppressed on intro pass
 		// so we don't double-queue or strip deeper cards the user never
 		// actually flunked.
+		// Line-walk prefix cards aren't FSRS-due today — the user is only
+		// drilling them to preserve sequence memory leading into a deeper due
+		// card. Skip the schedule update and the lapse tracking so a missed
+		// prefix can't poison the parent card's FSRS state. The in-session
+		// retry behaviour (replay, re-queue) still applies.
+		const isLineWalkStep = mode === 'due' && !dueOriginalKeys.has(ratedCard.fenKey);
+		const lineWalkMode = (settings.drillIntermediateMoves ?? 'play') === 'play';
+
+		// Introduction pass only applies to FSRS-tracked due cards in classic
+		// (`auto`) mode. In line-walk mode, the whole point is a contiguous
+		// front-to-back walk of each line, so we never re-queue cards at the
+		// tail — that would scatter intro retries and lapses out of order
+		// and turn the session back into the "ask the last move" anti-
+		// pattern the line walk was meant to fix. The schedule still
+		// catches up on lapses via FSRS Again rescheduling for the next
+		// session.
 		const isIntroductionPass =
-			!ratedCard.lastReview && !introducedKeys.has(ratedCard.fenKey) && mode === 'due';
-		const updated = reviewCard(ratedCard, outcomeToRating(outcome), settings.fsrsParams);
-		await upsertCard(updated);
+			!ratedCard.lastReview &&
+			!introducedKeys.has(ratedCard.fenKey) &&
+			mode === 'due' &&
+			!isLineWalkStep &&
+			!lineWalkMode;
+		if (!isLineWalkStep) {
+			const updated = reviewCard(ratedCard, outcomeToRating(outcome), settings.fsrsParams);
+			await upsertCard(updated);
+		}
 		sessionDone += 1;
-		// Mark this position as drilled only on a clean pass — a wrong
-		// answer gets re-queued at the tail and must remain visible to
-		// advanceQueue, which uses drilledKeys to skip already-finished
-		// cards. Introduction passes also stay visible: the re-queued card
-		// needs to come around a second time for the drill-without-hint.
-		if (outcome !== 'wrong' && !isIntroductionPass) drilledKeys.add(ratedCard.fenKey);
+		// Lapse tracking. The slot itself was already filled by `handleMove`
+		// the moment the move was accepted — that's what advances the
+		// progress bar. Here we only record whether the final outcome
+		// counts as a lapse: wrong on a real FSRS card adds it to the
+		// "to retry" badge, anything else clears it.
+		if (plannedKeys.has(ratedCard.fenKey)) {
+			if (outcome === 'wrong' && !isIntroductionPass && !isLineWalkStep) {
+				pendingLapses.add(ratedCard.fenKey);
+			} else if (outcome !== 'wrong') {
+				pendingLapses.delete(ratedCard.fenKey);
+			}
+		}
+		// Track brand-new cards drilled in the first pass of line-walk mode
+		// so the second pass (Train) knows which fenKeys to revisit. The
+		// transition in `advanceQueue` clears `drilledKeys` for everything
+		// in `introducedKeys` and restarts idx=0; reviews stay drilled and
+		// drop out of the second pass.
+		if (
+			lineWalkMode &&
+			!ratedCard.lastReview &&
+			walkPhase === 'learn' &&
+			!introducedKeys.has(ratedCard.fenKey)
+		) {
+			introducedKeys.add(ratedCard.fenKey);
+		}
+
+		// Mark this position as drilled unless we intend to re-drill it. In
+		// `auto` mode we keep the legacy behaviour: introduction passes and
+		// non-line-walk wrongs both re-queue at the tail for a second pass.
+		// In line-walk mode every drill cleanly adds to `drilledKeys` —
+		// the second pass is reached by clearing those keys at the queue-
+		// end transition, not by leaving the queue in an unfinished state.
+		const willReDrill =
+			!lineWalkMode && (isIntroductionPass || (outcome === 'wrong' && !isLineWalkStep));
+		if (!willReDrill) drilledKeys.add(ratedCard.fenKey);
 		if (isIntroductionPass) {
 			introducedKeys.add(ratedCard.fenKey);
 			queue = [...queue, ratedCard];
@@ -736,16 +928,25 @@
 		// via normal FSRS scheduling. Retrain mode is mistake-specific and
 		// doesn't use tree ordering, so we skip the prune there. Intro-pass
 		// peeks aren't real misses (the user viewed the shown move), so we
-		// don't prune behind them either.
-		if (outcome === 'wrong' && !isIntroductionPass && mode !== 'retrain') {
+		// don't prune behind them either. Pruning is also suppressed on
+		// line-walk prefixes: the deeper card the user is walking towards is
+		// the whole point of the line walk, and stripping it would defeat
+		// the exercise.
+		if (
+			outcome === 'wrong' &&
+			!isIntroductionPass &&
+			!isLineWalkStep &&
+			!lineWalkMode &&
+			mode !== 'retrain'
+		) {
 			pruneDeeperInLine(ratedCard.fenKey);
 		}
-		// Always re-queue a failed card at the tail so the user gets a second
-		// pass at it before the session ends. FSRS still schedules it for a
-		// later day; this is an in-session repeat on top of that. Intro pass
-		// already queued this card above — skip the generic re-queue so we
-		// don't add the same card twice.
-		if (outcome === 'wrong' && !isIntroductionPass) {
+		// Re-queue a failed card at the tail in `auto` mode so the user gets
+		// a second pass before the session ends. Skipped for intro pass
+		// (already queued above), line-walk steps (their wrong-flow retries
+		// in place), and line-walk mode entirely (a tail re-queue would
+		// shred the line-by-line ordering).
+		if (outcome === 'wrong' && !isIntroductionPass && !isLineWalkStep && !lineWalkMode) {
 			queue = [...queue, ratedCard];
 		}
 
@@ -760,7 +961,7 @@
 			}
 		}
 
-		advanceQueue();
+		advanceQueue(ratedCard.fenKey);
 	}
 
 	/**
@@ -823,6 +1024,12 @@
 		// First recorded opponent reply. Weighted/random could come later.
 		const oppEdge = nodeAfterUser.children[0];
 		if (drilledKeys.has(oppEdge.toFenKey)) return null;
+		// Cap respect: never chain past the planned queue. The session was
+		// built with a per-line forward walk that pulls every reachable user
+		// move into `plannedKeys`, so anything outside that set is a card we
+		// deliberately deferred to a future session — chaining into it would
+		// silently bypass `dailyNewCardCap` and `drillSessionCap`.
+		if (mode === 'due' && !plannedKeys.has(oppEdge.toFenKey)) return null;
 		const nextCard = await getCard(rep.id, oppEdge.toFenKey);
 		if (!nextCard) return null;
 		return nextCard;
@@ -908,6 +1115,7 @@
 		wrongAttempts = 0;
 		sessionDone = 0;
 		queue = sortByLineOrder(await loadQueue());
+		snapshotPlannedSet(queue);
 		idx = 0;
 		ideaQueue =
 			mode === 'due' ? await dueIdeaCards(rep.id, Date.now(), settings.drillSessionCap) : [];
@@ -918,6 +1126,33 @@
 		} else {
 			phase = queue.length === 0 ? 'empty' : 'pending';
 		}
+	}
+
+	/**
+	 * Lock the session's planned-progress denominator. Captures the cards the
+	 * session opens with so the progress bar measures work against that fixed
+	 * goal — not against a queue length that grows every time a card lapses
+	 * or a leaf gets cycled in. Brand-new cards count as two slots in `due`
+	 * mode because they trigger an introduction pass before the unaided
+	 * recall pass; that keeps the bar advancing from the first answer rather
+	 * than parking at 0% through the entire intro phase.
+	 */
+	function snapshotPlannedSet(initial: Card[]) {
+		plannedKeys.clear();
+		pendingLapses.clear();
+		plannedSlotsDone = 0;
+		walkPhase = 'learn';
+		// Brand-new cards always cost two slots in either drill mode: in
+		// `auto` mode the intro pass re-queues a duplicate at runtime, and
+		// in line-walk mode the per-walk Train pass drills every introduced
+		// card again. Reviews drill once in either mode.
+		let total = 0;
+		for (const c of initial) {
+			plannedKeys.add(c.fenKey);
+			const newDue = !c.lastReview && mode === 'due' && dueOriginalKeys.has(c.fenKey);
+			total += newDue ? 2 : 1;
+		}
+		sessionPlannedTotal = total;
 	}
 
 	const OVERDUE_CAP_MS = 24 * 60 * 60 * 1000;
@@ -939,6 +1174,16 @@
 	function sortByLineOrder(cards: Card[]): Card[] {
 		lineLabelByKey.clear();
 		if (!rep) return cards;
+		// `pickWithLineWalk` already builds the queue as a sequence of
+		// independent line walks (one per candidate, full path included),
+		// and we deliberately keep duplicate fenKeys across walks so each
+		// line is drilled from its own beginning. The dedup-by-fenKey in
+		// `buildLineFirstQueue` would collapse those duplicates and shuffle
+		// the order, so skip it for line-walk-mode sessions.
+		const lineWalkMode = (settings?.drillIntermediateMoves ?? 'play') === 'play';
+		if (lineWalkMode && mode === 'due') {
+			return cards;
+		}
 		const applyOverdueCap = mode === 'due';
 		const ordered = buildLineFirstQueue(cards, nodes, {
 			rootFenKey: rep.rootFenKey,
@@ -953,8 +1198,11 @@
 
 	async function loadQueue(): Promise<Card[]> {
 		if (!rep || !settings) return [];
+		dueOriginalKeys.clear();
 		if (mode === 'mistakes') {
-			return mistakeCards(rep.id, settings.drillSessionCap);
+			const cards = await mistakeCards(rep.id, settings.drillSessionCap);
+			for (const c of cards) dueOriginalKeys.add(c.fenKey);
+			return cards;
 		}
 		if (mode === 'retrain') {
 			// Build a queue from pending Lichess-game mistakes in this repertoire.
@@ -970,6 +1218,7 @@
 				const existing = await getCard(rep.id, m.fenKey);
 				queue.push(existing ?? createFreshCard(rep.id, m.fenKey, m.expectedSan, Date.now()));
 			}
+			for (const c of queue) dueOriginalKeys.add(c.fenKey);
 			return queue;
 		}
 		// Fetch a generous pool so the balancer has room to put review cards
@@ -977,91 +1226,368 @@
 		// import, `dueCards` orders by dueAt asc and the first N could be
 		// all-new, leaving no reviews to promote.
 		const pool = await dueCards(rep.id, Date.now(), settings.drillSessionCap * 5);
-		return pickBalancedDueCards(pool, settings.drillSessionCap, settings.dailyNewCardCap);
+		// Line-walk path: pick due cards greedily and pull each one's full
+		// line prefix into the session, but stop the moment either the
+		// total-session or new-card budget would be exceeded. Prefix moves
+		// count against `dailyNewCardCap` because they're additional new
+		// positions the user is being asked to play through, even though
+		// they don't update FSRS state. Without this, a brand-new repertoire
+		// would walk every line in full and steamroll the daily-new setting.
+		const lineWalkOn = (settings.drillIntermediateMoves ?? 'play') === 'play';
+		if (lineWalkOn) {
+			const session = await pickWithLineWalk(
+				pool,
+				settings.drillSessionCap,
+				settings.dailyNewCardCap
+			);
+			return session;
+		}
+		const due = pickBalancedDueCards(pool, settings.drillSessionCap, settings.dailyNewCardCap);
+		for (const c of due) dueOriginalKeys.add(c.fenKey);
+		return due;
 	}
 
 	/**
-	 * "Leaf" cards in the tree: user-turn cards whose expected move leads
-	 * (via the opponent's first reply) to a position with no further card
-	 * — i.e. the deepest rung of each line. A repertoire is never really
-	 * "done"; once the due queue drains in `due` mode we cycle the leaves
-	 * back in so the user keeps practicing the end of every line. Any
-	 * intermediate card that fails along the way still gets re-queued
-	 * through the normal wrong-answer path.
+	 * Greedy session builder for line-walk mode. Walks the due-card pool in
+	 * priority order and, for each candidate, computes the full path back to
+	 * the line head — the deepest due card plus every earlier user-side card
+	 * along the way. The whole walk is admitted only if it fits within both
+	 * `drillSessionCap` (total queue length) and `dailyNewCardCap` (new
+	 * positions: cards with no FSRS history). When a candidate doesn't fit,
+	 * it's skipped and the next is tried, so the session ends up with as
+	 * many *complete* line walks as the budgets allow rather than a clipped
+	 * mix that leaves deep cards stranded.
+	 *
+	 * Side effect: populates `dueOriginalKeys` with the cards whose full
+	 * walks were admitted. Their prefix companions are NOT added — those
+	 * are line-walk steps and skip FSRS scheduling on rate.
 	 */
-	async function collectLeafCards(): Promise<Card[]> {
+	async function pickWithLineWalk(
+		pool: Card[],
+		sessionCap: number,
+		newCap: number
+	): Promise<Card[]> {
 		if (!rep) return [];
-		const all = await listCards(rep.id);
-		const byKey = new Map(all.map((c) => [c.fenKey, c]));
-		const leaves: Card[] = [];
-		for (const card of all) {
-			const node = nodes.get(card.fenKey);
-			if (!node || node.children.length === 0) {
-				leaves.push(card);
+		// Always walk from the absolute root in line-walk mode. The
+		// `openAtStartingPosition` setting only affects how the lead-in
+		// animation is staged; for queue construction we want every user
+		// move in the line included, so brand-new forced-sequence moves
+		// (1.e4 e5, 2.Nf3 Nc6, …) get drilled instead of animated past.
+		// `isWellLearned` is what gates an already-mastered move into the
+		// "animate, don't drill" bucket — not the line head.
+		const lineHead = rep.rootFenKey;
+
+		// Deepest-first admission: precompute each candidate's depth from
+		// the rep root and iterate the pool in (depth desc, dueAt asc)
+		// order. The deepest due candidate's walk subsumes any shallower
+		// candidate on the same line, so iterating deep-to-shallow lets
+		// us skip subsumed candidates (`A1` and `A2` are skipped once
+		// `A3`'s walk `[A1, A2, A3]` is already admitted) without losing
+		// the deepest position the schedule actually surfaced. Variant
+		// distribution emerges across sessions: well-learned cards drop
+		// out of future walks via `isWellLearned`, freeing the daily-new
+		// budget for other variants' deeper moves.
+		const depthByKey = new SvelteMap<string, number>();
+		for (const c of pool) {
+			if (depthByKey.has(c.fenKey)) continue;
+			const path = pathToFenKey(nodes, lineHead, c.fenKey);
+			depthByKey.set(c.fenKey, path ? path.length : -1);
+		}
+		const sortedPool = pool.slice().sort((a, b) => {
+			const dA = depthByKey.get(a.fenKey) ?? -1;
+			const dB = depthByKey.get(b.fenKey) ?? -1;
+			if (dA !== dB) return dB - dA;
+			return a.dueAt - b.dueAt;
+		});
+
+		const out: Card[] = [];
+		// Tracks which candidate fenKeys we've already led a walk with —
+		// otherwise the same candidate could be picked twice (a candidate's
+		// own fenKey isn't shared with another candidate's walk, but it
+		// could still appear in the pool more than once if the schedule
+		// surfaces it via multiple paths).
+		const ledBy = new SvelteSet<string>();
+		// Quick lookup so cards that were FSRS-due today but got picked up
+		// as part of another candidate's walk still get their schedules
+		// updated — without this, only the candidate that "led" the walk
+		// would FSRS-update and the others would silently graduate as
+		// line-walk steps.
+		const poolKeys = new SvelteSet<string>();
+		for (const c of pool) poolKeys.add(c.fenKey);
+		const uniqueNewSeen = new SvelteSet<string>();
+		walkStarts.length = 0;
+		walkFenKeys.length = 0;
+		let totalRemaining = Math.max(0, sessionCap);
+		let newRemaining = Math.max(0, newCap);
+
+		// `drillSessionCap` is the ceiling on *drill events* — the moves the
+		// user will actually play this session. A walk with brand-new
+		// cards costs `walk.length × 2` events because it gets a Learn
+		// pass (with hints) followed by a Train pass (no hints); a walk
+		// containing only reviews skips Train and costs `walk.length`.
+		// Shared prefixes across multiple candidates' walks count
+		// separately because each line is drilled from its own beginning.
+		// `dailyNewCardCap` counts unique new positions: a brand-new
+		// prefix shared by lines A and B costs one against the cap, but
+		// it'll appear in both line walks and be drilled in each line's
+		// context. `drilledKeys` is cleared at every walk boundary in
+		// `advanceQueue` so the duplicates aren't skipped.
+		// Set of fenKeys already covered by an admitted walk. Iterating
+		// deepest-first means a shallower candidate on the same line will
+		// have its fenKey already in here — that's the cue to skip it
+		// because its walk would be a strict prefix of the admitted one.
+		const admittedFenKeys = new SvelteSet<string>();
+		for (const candidate of sortedPool) {
+			if (totalRemaining <= 0) break;
+			if (newRemaining <= 0) break;
+			if (ledBy.has(candidate.fenKey)) continue;
+			if (admittedFenKeys.has(candidate.fenKey)) continue;
+
+			const walk = await collectLineWalk(candidate, lineHead);
+			if (!walk) continue;
+			const newInWalk = walk.reduce(
+				(sum, c) => sum + (!c.lastReview && !uniqueNewSeen.has(c.fenKey) ? 1 : 0),
+				0
+			);
+			// Walks with any new card are drilled twice (Learn + Train);
+			// review-only walks drill once. Both passes count against
+			// `drillSessionCap`.
+			const walkHasNew = walk.some((c) => !c.lastReview);
+			const eventCost = walk.length * (walkHasNew ? 2 : 1);
+			if (eventCost > totalRemaining) continue;
+			if (newInWalk > newRemaining) continue;
+
+			ledBy.add(candidate.fenKey);
+			const walkStart = out.length;
+			const fenSet = new SvelteSet<string>();
+			for (const c of walk) {
+				out.push(c);
+				fenSet.add(c.fenKey);
+				admittedFenKeys.add(c.fenKey);
+				if (poolKeys.has(c.fenKey)) dueOriginalKeys.add(c.fenKey);
+				if (!c.lastReview) uniqueNewSeen.add(c.fenKey);
+			}
+			walkStarts.push(walkStart);
+			walkFenKeys.push(fenSet);
+			totalRemaining -= eventCost;
+			newRemaining -= newInWalk;
+		}
+		return out;
+	}
+
+	/**
+	 * Build the line-walk for one candidate due card: every prior user-side
+	 * card on the path from `lineHead` to the candidate, then the candidate
+	 * itself, then every later user-side card on the way to a leaf. Walking
+	 * forward as well as backward closes the cap loophole where chain-
+	 * forward at drill time would happily run past a mid-line candidate
+	 * into unplanned suffixes — the entire line gets admitted (or rejected)
+	 * as a single budget unit. Already-claimed positions are skipped so a
+	 * second candidate from the same line yields a near-empty walk that
+	 * gets dropped by the budget check.
+	 *
+	 * Forward expansion follows the first prepared user move and the first
+	 * recorded opponent reply at each step, mirroring the chain logic in
+	 * `findNextInLine` / `playChainTransition`. That keeps the queue and
+	 * the chain in sync — every position the chain might walk into is
+	 * already a queue item with a `drilledKeys` flag.
+	 */
+	async function collectLineWalk(card: Card, lineHead: string): Promise<Card[] | null> {
+		if (!rep) return null;
+		const walk: Card[] = [];
+		// Walk is `lineHead → candidate` only — no forward expansion past
+		// the FSRS-due candidate. Deeper user moves enter future sessions
+		// when their own FSRS schedule comes due. This keeps each session
+		// focused on the moves the schedule actually surfaced today rather
+		// than dragging an entire line's tail into the drill every time
+		// any one of its positions is due.
+		if (card.fenKey !== lineHead) {
+			const path = pathToFenKey(nodes, lineHead, card.fenKey);
+			if (path) {
+				for (let i = 0; i < path.length; i++) {
+					const fenKeyBeforeEdge = i === 0 ? lineHead : path[i - 1].toFenKey;
+					if (fenKeyBeforeEdge === card.fenKey) break;
+					if (colorToMove(fenKeyBeforeEdge) !== rep.color) continue;
+					const stored = await getCard(rep.id, fenKeyBeforeEdge);
+					if (!stored) continue;
+					// Well-learned prefix moves get animated past during the
+					// lead-in instead of pulled into the drill — the user has
+					// already proven recall, so re-asking would waste their
+					// time. Anything below the threshold stays in the walk
+					// so the user has to play it themselves, even when the
+					// same prefix appears in a sibling line walk later in
+					// the session — every line is drilled independently
+					// from the beginning until the prefix is well-learned.
+					if (isWellLearned(stored)) continue;
+					walk.push(stored);
+				}
+			}
+		}
+		walk.push(card);
+		return walk;
+	}
+
+	/**
+	 * "Well-learned" = the user has demonstrated reliable recall and the
+	 * spaced-repetition schedule reflects it. Used to decide whether a
+	 * prefix or suffix card on a line walk should be drilled (forces the
+	 * user to play it again from memory) or animated past (saves their
+	 * time on positions they already know). Card must be in FSRS Review
+	 * state and meet the user-configured stability threshold (Settings →
+	 * Drill, default 7 days).
+	 */
+	function isWellLearned(card: Card): boolean {
+		const state = card.fsrs.state;
+		const stability = typeof card.fsrs.stability === 'number' ? card.fsrs.stability : 0;
+		const threshold = settings?.drillWellLearnedDays ?? 7;
+		return state === 2 && stability >= threshold;
+	}
+
+	/**
+	 * Clear `drilledKeys` for every fenKey in the walk whose first index is
+	 * `queueIdx` — called as the queue crosses walk boundaries so a shared
+	 * prefix drilled as part of the previous line becomes eligible for the
+	 * new line again. No-op when the given index isn't a walk start.
+	 */
+	function maybeOpenWalkAt(queueIdx: number) {
+		const walk = walkStarts.indexOf(queueIdx);
+		if (walk < 0) return;
+		const keys = walkFenKeys[walk];
+		if (!keys) return;
+		for (const k of keys) drilledKeys.delete(k);
+	}
+
+	/** Walk index that contains `queueIdx`, or -1 if no walks are tracked. */
+	function walkOfIdx(queueIdx: number): number {
+		for (let i = walkStarts.length - 1; i >= 0; i--) {
+			if (walkStarts[i] <= queueIdx) return i;
+		}
+		return -1;
+	}
+
+	/** End-exclusive boundary of walk `w` in the flat queue. */
+	function walkEndOf(w: number): number {
+		return w + 1 < walkStarts.length ? walkStarts[w + 1] : queue.length;
+	}
+
+	/** True when any fenKey in this walk has been introduced this session — the signal for "needs a Train pass". */
+	function walkNeedsTrain(walkIdx: number): boolean {
+		const keys = walkFenKeys[walkIdx];
+		if (!keys) return false;
+		for (const k of keys) {
+			if (introducedKeys.has(k)) return true;
+		}
+		return false;
+	}
+
+	function advanceQueue(justRatedKey?: string) {
+		const lineWalkMode = (settings?.drillIntermediateMoves ?? 'play') === 'play';
+		const currentWalk = walkOfIdx(idx);
+
+		// Auto-mode (no walks tracked) and any session that ran out of
+		// walks fall back to the simple linear advance: skip drilled cards
+		// + the just-rated fenKey, end the session at queue exhaustion.
+		if (!lineWalkMode || currentWalk < 0) {
+			let next = idx + 1;
+			while (next < queue.length) {
+				maybeOpenWalkAt(next);
+				if (drilledKeys.has(queue[next].fenKey) || queue[next].fenKey === justRatedKey) {
+					next++;
+					continue;
+				}
+				break;
+			}
+			if (next >= queue.length) {
+				setTimeout(() => {
+					if (ideaQueue.length > 0) {
+						startIdeaPhase();
+						return;
+					}
+					phase = 'done';
+				}, DONE_HOLD_MS);
+			} else {
+				chainedCard = null;
+				idx = next;
+			}
+			return;
+		}
+
+		// Line-walk mode: stay inside the current walk's [start, end) range
+		// while looking for an undrilled card. When we'd cross out of it,
+		// flip to the Train pass for the same walk (if it had any new
+		// cards), or move on to the next walk.
+		const walkEnd = walkEndOf(currentWalk);
+		let next = idx + 1;
+		while (next < walkEnd) {
+			if (drilledKeys.has(queue[next].fenKey) || queue[next].fenKey === justRatedKey) {
+				next++;
 				continue;
 			}
-			let hasDeeperCard = false;
-			outer: for (const userEdge of node.children) {
-				const oppNode = nodes.get(userEdge.toFenKey);
-				if (!oppNode) continue;
-				for (const oppEdge of oppNode.children) {
-					if (byKey.has(oppEdge.toFenKey)) {
-						hasDeeperCard = true;
-						break outer;
-					}
-				}
-			}
-			if (!hasDeeperCard) leaves.push(card);
+			break;
 		}
-		return leaves;
+		if (next < walkEnd) {
+			chainedCard = null;
+			idx = next;
+			return;
+		}
+
+		// Exhausted current walk. Decide whether to Train it or move on.
+		if (walkPhase === 'learn' && walkNeedsTrain(currentWalk)) {
+			setTimeout(() => {
+				walkPhase = 'train';
+				// Clear `drilledKeys` for *every* card in this walk, not just
+				// the introduced ones — a review card mixed into the walk
+				// would otherwise stay drilled and break the chain partway
+				// through the Train pass, leaving only the moves before it
+				// playable. Reviews in partly-new walks get a second drill
+				// this session as a side effect, which is fine: it's recall
+				// practice on a card already past the well-learned threshold
+				// might already filter mature reviews out of the walk
+				// upstream.
+				const keys = walkFenKeys[currentWalk];
+				for (const k of keys) drilledKeys.delete(k);
+				chainedCard = null;
+				idx = walkStarts[currentWalk];
+				phase = 'pending';
+			}, DONE_HOLD_MS);
+			return;
+		}
+
+		setTimeout(() => moveToWalk(currentWalk + 1), DONE_HOLD_MS);
 	}
 
 	/**
-	 * Re-queue the leaves at the tail so the session keeps going. Also
-	 * clears `drilledKeys` scoped to what we're about to enqueue: a leaf
-	 * that was already completed earlier in the session must be drillable
-	 * again on this lap, otherwise `advanceQueue` would immediately skip
-	 * past it.
+	 * Slide the queue head to walk `target`. Resets `walkPhase` to 'learn',
+	 * opens the new walk's drilledKeys, and lands `idx` on the first
+	 * undrilled card inside it. Falls through to idea cards or `done` when
+	 * no more walks remain.
 	 */
-	async function extendQueueWithLeaves(): Promise<number> {
-		if (!rep || mode !== 'due') return 0;
-		const leaves = await collectLeafCards();
-		if (leaves.length === 0) return 0;
-		const sorted = sortByLineOrder(leaves);
-		for (const c of sorted) drilledKeys.delete(c.fenKey);
-		queue = [...queue, ...sorted];
-		return sorted.length;
-	}
-
-	function advanceQueue() {
-		let next = idx + 1;
-		while (next < queue.length && drilledKeys.has(queue[next].fenKey)) {
-			next++;
+	function moveToWalk(target: number) {
+		while (target < walkStarts.length) {
+			walkPhase = 'learn';
+			const walkStart = walkStarts[target];
+			const walkEnd = walkEndOf(target);
+			maybeOpenWalkAt(walkStart);
+			let restart = walkStart;
+			while (restart < walkEnd && drilledKeys.has(queue[restart].fenKey)) {
+				restart++;
+			}
+			if (restart < walkEnd) {
+				chainedCard = null;
+				idx = restart;
+				phase = 'pending';
+				return;
+			}
+			// All cards in this walk are still drilled (rare — only
+			// happens when every card in the walk is also in a previously
+			// fully-drilled walk and isn't in introducedKeys). Skip walk.
+			target += 1;
 		}
-		if (next >= queue.length) {
-			// Move queue is done. If idea cards are queued, flip into the
-			// self-rated prompt phase. Otherwise (in due mode) cycle leaves
-			// back in so the drill never declares the rep "fully learned"
-			// — the user can keep practicing forever. Hold briefly so the
-			// final green glyph registers before anything else moves.
-			setTimeout(async () => {
-				if (ideaQueue.length > 0) {
-					startIdeaPhase();
-					return;
-				}
-				const added = await extendQueueWithLeaves();
-				if (added > 0) {
-					chainedCard = null;
-					idx = next;
-					phase = 'pending';
-					return;
-				}
-				phase = 'done';
-			}, DONE_HOLD_MS);
-		} else {
-			chainedCard = null;
-			idx = next;
+		if (ideaQueue.length > 0) {
+			startIdeaPhase();
+			return;
 		}
+		phase = 'done';
 	}
 
 	/**
@@ -1107,11 +1633,53 @@
 		phase = 'idea-prompt';
 	}
 
+	function scrubBack() {
+		if (phase !== 'pending') return;
+		if (scrubOffset < scrubMaxOffset) scrubOffset += 1;
+	}
+	function scrubForward() {
+		if (phase !== 'pending') return;
+		if (scrubOffset > 0) scrubOffset -= 1;
+	}
+	function scrubToStart() {
+		if (phase !== 'pending') return;
+		scrubOffset = scrubMaxOffset;
+	}
+	function scrubToEnd() {
+		scrubOffset = 0;
+	}
+
 	function handleKey(e: KeyboardEvent) {
 		if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
 		if (phase === 'pending') {
-			if (e.key === 'z' || e.key === 'Z' || e.key === '?' || e.key === 'h' || e.key === 'H') {
+			if (e.key === 'ArrowLeft') {
+				e.preventDefault();
+				scrubBack();
+				return;
+			}
+			if (e.key === 'ArrowRight') {
+				e.preventDefault();
+				scrubForward();
+				return;
+			}
+			if (e.key === 'Home') {
+				e.preventDefault();
+				scrubToStart();
+				return;
+			}
+			if (e.key === 'End') {
+				e.preventDefault();
+				scrubToEnd();
+				return;
+			}
+			// Hint shapes are pinned to the question position; suppress the
+			// shortcut while scrubbing so the user doesn't trigger arrows
+			// they can't see on a historical position.
+			if (
+				!scrubActive &&
+				(e.key === 'z' || e.key === 'Z' || e.key === '?' || e.key === 'h' || e.key === 'H')
+			) {
 				e.preventDefault();
 				showHint();
 			}
@@ -1160,8 +1728,16 @@
 		{/if}
 		{#if phase === 'intro' || phase === 'pending' || phase === 'correct' || phase === 'wrong' || phase === 'refuted'}
 			<span class="eyebrow ml-auto tabular-nums">
-				{idx + 1} <span class="text-[var(--color-ink-600)]">/</span>
-				{queue.length}
+				{plannedDoneCount} <span class="text-[var(--color-ink-600)]">/</span>
+				{sessionPlannedTotal}
+				{#if pendingLapsesCount > 0}
+					<span
+						class="ml-2 text-[var(--color-oxblood-300)]"
+						title="Cards you missed that need a clean retry before the session ends"
+					>
+						· {pendingLapsesCount} to retry
+					</span>
+				{/if}
 			</span>
 		{:else if phase === 'idea-prompt' || phase === 'idea-reveal'}
 			<span class="eyebrow ml-auto tabular-nums">
@@ -1307,17 +1883,60 @@
 					class:board-wrong-ring={phase === 'wrong'}
 				>
 					<Board
-						fen={currentFen}
+						fen={displayFen}
 						{orientation}
 						turnColor={sideToMove}
-						movableColor={phase === 'pending' ? rep?.color : undefined}
+						movableColor={phase === 'pending' && !scrubActive ? rep?.color : undefined}
 						{dests}
-						lastMove={userLastMove}
-						shapes={boardShapes}
+						lastMove={displayLastMove}
+						shapes={scrubActive ? [] : boardShapes}
 						onmove={handleMove}
-						viewOnly={phase !== 'pending'}
+						viewOnly={phase !== 'pending' || scrubActive}
 					/>
 				</div>
+				{#if phase === 'pending' && scrubMaxOffset > 0}
+					<div class="mx-auto mt-2 flex max-w-[560px] items-center justify-center gap-1 md:mt-4">
+						<button
+							type="button"
+							onclick={scrubToStart}
+							disabled={scrubOffset >= scrubMaxOffset}
+							title="Start (Home)"
+							class="flex size-9 items-center justify-center rounded-[3px] text-[var(--color-parchment-300)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:pointer-events-none disabled:opacity-30"
+						>
+							<ChevronFirst class="size-4" />
+						</button>
+						<button
+							type="button"
+							onclick={scrubBack}
+							disabled={scrubOffset >= scrubMaxOffset}
+							title="Back (←)"
+							class="flex size-9 items-center justify-center rounded-[3px] text-[var(--color-parchment-300)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:pointer-events-none disabled:opacity-30"
+						>
+							<ChevronLeft class="size-4" />
+						</button>
+						<span class="eyebrow px-3 tabular-nums">
+							{scrubMaxOffset - scrubOffset} / {scrubMaxOffset}
+						</span>
+						<button
+							type="button"
+							onclick={scrubForward}
+							disabled={scrubOffset === 0}
+							title="Next (→)"
+							class="flex size-9 items-center justify-center rounded-[3px] text-[var(--color-parchment-300)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:pointer-events-none disabled:opacity-30"
+						>
+							<ChevronRight class="size-4" />
+						</button>
+						<button
+							type="button"
+							onclick={scrubToEnd}
+							disabled={scrubOffset === 0}
+							title="End (End)"
+							class="flex size-9 items-center justify-center rounded-[3px] text-[var(--color-parchment-300)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:pointer-events-none disabled:opacity-30"
+						>
+							<ChevronLast class="size-4" />
+						</button>
+					</div>
+				{/if}
 			</div>
 
 			<!-- Side: prompt + feedback + rating -->
@@ -1492,12 +2111,24 @@
 
 				<div class="border-t border-[var(--color-ink-800)] pt-4">
 					<div class="eyebrow mb-2">Session</div>
-					<div class="flex items-center gap-2 font-mono text-xs text-[var(--color-parchment-400)]">
-						<span class="text-[var(--color-parchment-100)] tabular-nums">{sessionDone}</span>
-						<span>reviewed</span>
-						<span class="text-[var(--color-ink-600)]">·</span>
-						<span class="tabular-nums">{queue.length - idx}</span>
-						<span>remaining</span>
+					<div
+						class="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs text-[var(--color-parchment-400)]"
+					>
+						<span class="text-[var(--color-parchment-100)] tabular-nums">{plannedDoneCount}</span>
+						<span>of</span>
+						<span class="tabular-nums">{sessionPlannedTotal}</span>
+						<span>done</span>
+						{#if pendingLapsesCount > 0}
+							<span class="text-[var(--color-ink-600)]">·</span>
+							<span class="text-[var(--color-oxblood-300)] tabular-nums">{pendingLapsesCount}</span>
+							<span>to retry</span>
+						{/if}
+					</div>
+					<div
+						class="mt-1 flex items-center gap-2 font-mono text-[10px] text-[var(--color-parchment-500)]"
+					>
+						<span class="tabular-nums">{sessionDone}</span>
+						<span>total reviews this session</span>
 					</div>
 					{#if currentLineLabel}
 						<div
