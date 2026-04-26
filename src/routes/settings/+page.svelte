@@ -31,12 +31,11 @@
 	import {
 		listStoredBaselines,
 		deleteStoredBaseline,
-		saveStoredBaseline,
 		type StoredBaselineBucket
 	} from '$lib/storage/baselines';
-	import { calibrateBaseline } from '$lib/dossier/calibrate';
 	import { setRuntimeBaselines } from '$lib/dossier/fingerprint';
-	import { scanDossierAcrossAccounts } from '$lib/dossier/scan';
+	import { baselineCalibration } from '$lib/dossier/baselineCalibrationStore.svelte';
+	import BaselineCalibrationProgress from '$lib/dossier/BaselineCalibrationProgress.svelte';
 	import type { AppSettings, DrillIntroSpeed, ScanAccount } from '$lib/types';
 
 	const INTRO_SPEEDS: { id: DrillIntroSpeed; label: string; hint: string }[] = [
@@ -125,14 +124,15 @@
 	});
 
 	let storedBaselines = $state<StoredBaselineBucket[]>([]);
-	let baselineBusy = $state(false);
-	let baselineProgress = $state<string>('');
-	let baselineError = $state<string | null>(null);
+	// Calibration state lives in a module singleton so it survives nav and
+	// shows progress in the layout-level BaselineProgressBar. This page
+	// just reads from it and proxies start/cancel.
+	const baselineBusy = $derived(baselineCalibration.running);
+	const baselineError = $derived(baselineCalibration.error);
 	let baselineGames = $state(50);
 	/** Subset of scan-account keys (`${source}:${lower-user}`) that should
 	 *  drive the baseline. Empty = use every configured account. */
 	let baselineAccountKeys = $state<string[]>([]);
-	let baselineController: AbortController | null = null;
 
 	const baselineAccountOptions = $derived(
 		displayedScanAccounts.map((a) => ({
@@ -166,50 +166,29 @@
 
 	async function calibrateNow() {
 		if (!settings || baselineBusy) return;
-		baselineError = null;
-		baselineBusy = true;
-		baselineController = new AbortController();
-		try {
-			const scopedAccounts = baselineAccountKeys
-				.map((k) => baselineAccountByValue.get(k))
-				.filter((a): a is { source: 'lichess' | 'chesscom'; username: string } => !!a);
-			const accountsOverride = scopedAccounts.length > 0 ? scopedAccounts : undefined;
-			// Walk chess.com opponents whenever a chess.com account is in scope,
-			// or no scope is set (scan everything the user has configured).
-			const includeChesscom =
-				scopedAccounts.length === 0 || scopedAccounts.some((a) => a.source === 'chesscom');
+		const scopedAccounts = baselineAccountKeys
+			.map((k) => baselineAccountByValue.get(k))
+			.filter((a): a is { source: 'lichess' | 'chesscom'; username: string } => !!a);
+		// Walk chess.com opponents whenever a chess.com account is in scope,
+		// or no scope is set (scan everything the user has configured).
+		const includeChesscom =
+			scopedAccounts.length === 0 || scopedAccounts.some((a) => a.source === 'chesscom');
 
-			baselineProgress = 'scanning your games…';
-			const scan = await scanDossierAcrossAccounts(settings, {
-				maxGamesPerAccount: baselineGames,
-				rated: true,
-				accountsOverride,
-				signal: baselineController.signal,
-				onProgress: (acc, n) => {
-					baselineProgress = `scan: ${acc.source}/${acc.username} · ${n} games`;
-				}
-			});
-			if (scan.classified.length === 0) {
-				throw new Error('Scan returned no games — add a scan account or check your token.');
-			}
-			const out = await calibrateBaseline({
-				settings,
-				scan,
-				includeChesscom,
-				signal: baselineController.signal,
-				onProgress: (done, total, label) => {
-					baselineProgress = `calibrate: ${done}/${total} · ${label}`;
-				}
-			});
-			await saveStoredBaseline(out.bucket);
+		const bucket = await baselineCalibration.start({
+			settings,
+			gamesPerAccount: baselineGames,
+			accountsOverride: scopedAccounts.length > 0 ? scopedAccounts : undefined,
+			includeChesscom
+		});
+		if (bucket) {
 			storedBaselines = await listStoredBaselines();
-			setRuntimeBaselines(storedBaselines);
-		} catch (e) {
-			baselineError = e instanceof Error ? e.message : String(e);
-		} finally {
-			baselineBusy = false;
-			baselineProgress = '';
+			// `setRuntimeBaselines` already runs inside the store on success;
+			// refreshing the local list view here keeps the table in sync.
 		}
+	}
+
+	function cancelCalibration() {
+		baselineCalibration.cancel();
 	}
 
 	async function forgetBaseline(id: string) {
@@ -751,12 +730,7 @@
 						<span>{baselineBusy ? 'Working…' : 'Calibrate now'}</span>
 					</Button>
 					{#if baselineBusy}
-						<Button
-							variant="ghost"
-							size="md"
-							class="h-10"
-							onclick={() => baselineController?.abort()}
-						>
+						<Button variant="ghost" size="md" class="h-10" onclick={cancelCalibration}>
 							Cancel
 						</Button>
 					{/if}
@@ -764,13 +738,11 @@
 				<p class="mb-3 font-serif text-xs text-[var(--color-parchment-500)] italic">
 					Leave the account list empty to base the baseline on every configured scan account.
 				</p>
-				{#if baselineProgress}
-					<p class="mb-2 font-mono text-xs text-[var(--color-parchment-400)]">
-						{baselineProgress}
-					</p>
+				{#if baselineBusy}
+					<BaselineCalibrationProgress />
 				{/if}
 				{#if baselineError}
-					<p class="mb-2 text-xs text-[var(--color-oxblood-300)]">{baselineError}</p>
+					<p class="mt-2 text-xs text-[var(--color-oxblood-300)]">{baselineError}</p>
 				{/if}
 
 				{#if storedBaselines.length > 0}

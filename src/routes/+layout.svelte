@@ -5,11 +5,13 @@
 	import { base, resolve } from '$app/paths';
 	import { Menu, X, Moon, Sun } from 'lucide-svelte';
 	import { ModeWatcher, mode, toggleMode } from 'mode-watcher';
-	import { ConfirmDialog } from '$lib/ui';
+	import { ConfirmDialog, Toaster, toast } from '$lib/ui';
 	import ScanProgressBar from '$lib/dossier/ScanProgressBar.svelte';
+	import BaselineProgressBar from '$lib/dossier/BaselineProgressBar.svelte';
 	import { getSettings, saveSettings } from '$lib/storage/settings';
 	import { scanAllAccounts, collectAccountsFromSettings } from '$lib/lichess/mistakeScan';
 	import { applySoundSettings } from '$lib/ui/sounds';
+	import { getEngine } from '$lib/stockfish/engine';
 	import pkg from '../../package.json';
 
 	const appVersion = pkg.version;
@@ -79,6 +81,36 @@
 	const AUTOSCAN_INTERVAL_MS = 60 * 60 * 1000; // once per hour
 	let autoscanTriggered = false;
 
+	// Subscribe once to the engine's error channel so init failures and
+	// search timeouts surface as toasts instead of being swallowed by the
+	// `.catch(() => undefined)` callers scatter around. `stderr` is the
+	// emscripten log firehose — too noisy to render. The error events use a
+	// dedup key so a long scan that times out repeatedly doesn't tile the
+	// screen with notices.
+	$effect(() => {
+		const engine = getEngine();
+		const off = engine.onError((e) => {
+			if (e.kind === 'stderr') return;
+			if (e.kind === 'init') {
+				toast.error('Engine unavailable', {
+					body: e.message,
+					dedupKey: 'engine-init'
+				});
+			} else if (e.kind === 'timeout' || e.kind === 'no-info') {
+				toast.warn('Engine slow to respond', {
+					body: e.message,
+					dedupKey: `engine-${e.kind}`
+				});
+			} else if (e.kind === 'handler') {
+				toast.warn('Engine event handler error', {
+					body: e.message,
+					dedupKey: 'engine-handler'
+				});
+			}
+		});
+		return off;
+	});
+
 	onMount(async () => {
 		// Hourly background mistake scan: fires once per session if the last
 		// scan is stale and a Lichess account is connected. Silent — results
@@ -99,8 +131,19 @@
 					const next = { ...latest, lastMistakeScanAt: Date.now() };
 					await saveSettings(JSON.parse(JSON.stringify(next)));
 				})
-				.catch(() => {
-					/* silent — no point nagging if a platform is down */
+				.catch((e) => {
+					// Background scan failures stay quiet — a transient Lichess
+					// outage shouldn't pop a toast every page load. But a single
+					// per-session warn lets the user notice config issues
+					// (revoked token, deleted account) instead of wondering why
+					// /mistakes isn't refreshing. Dedup key keeps repeats off
+					// screen even if multiple scans are in flight.
+					const detail = e instanceof Error ? e.message : String(e);
+					console.warn('[cobra] autoscan failed:', e);
+					toast.warn('Background mistake scan ran into trouble', {
+						body: `${detail}. Open /mistakes to retry manually if you were expecting fresh data.`,
+						dedupKey: 'autoscan-fail'
+					});
 				});
 		} catch {
 			/* ignore */
@@ -295,7 +338,11 @@
 
 <ScanProgressBar />
 
+<BaselineProgressBar />
+
 <ConfirmDialog />
+
+<Toaster />
 
 <!--
 	ModeWatcher: persists the chosen mode in localStorage, applies the

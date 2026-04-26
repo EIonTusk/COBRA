@@ -47,10 +47,23 @@ export class StockfishUnavailable extends Error {
 	}
 }
 
+/**
+ * Categorises non-fatal events the engine surfaces so consumers can decide
+ * which to show. `stderr` is the firehose of emscripten log lines and is
+ * normally too noisy to surface; the others should generally reach the user.
+ */
+export type EngineErrorKind = 'stderr' | 'init' | 'timeout' | 'no-info' | 'handler';
+
+export interface EngineError {
+	kind: EngineErrorKind;
+	message: string;
+}
+
 export class Engine {
 	private sf: StockfishWebInstance | null = null;
 	private handlers: Array<(info: EngineInfo) => void> = [];
 	private bestmoveHandlers: Array<() => void> = [];
+	private errorHandlers: Array<(e: EngineError) => void> = [];
 	private readyPromise: Promise<void> | null = null;
 	private sideToMove: 'white' | 'black' = 'white';
 	private currentFen: string | null = null;
@@ -72,7 +85,11 @@ export class Engine {
 		if (this.readyPromise) return this.readyPromise;
 		this.readyPromise = (async () => {
 			if (typeof SharedArrayBuffer === 'undefined') {
-				throw new StockfishUnavailable('SharedArrayBuffer unavailable — check COOP/COEP headers.');
+				const err = new StockfishUnavailable(
+					'SharedArrayBuffer unavailable — check COOP/COEP headers.'
+				);
+				this.emitError({ kind: 'init', message: err.message });
+				throw err;
 			}
 			// Honour SvelteKit's base path so deployments under a subpath
 			// (GH Pages at /COBRA) find the assets under the right prefix.
@@ -82,21 +99,30 @@ export class Engine {
 			try {
 				mod = await import(/* @vite-ignore */ jsUrl);
 			} catch (_e) {
-				throw new StockfishUnavailable('Stockfish script not found. Run `npm run prep:stockfish`.');
+				const err = new StockfishUnavailable(
+					'Stockfish script not found. Run `npm run prep:stockfish`.'
+				);
+				this.emitError({ kind: 'init', message: err.message });
+				throw err;
 			}
 			const sf = await mod.default();
 			sf.listen = (line: string) => this.onLine(line);
 			sf.onError = (msg: string) => {
-				// Emscripten surfaces stderr here; log but don't throw.
+				// Emscripten surfaces stderr here; log but don't throw. Most of
+				// these are routine NNUE / search-info noise — surface them as
+				// the low-priority `stderr` kind so subscribers can filter.
 				console.warn('[stockfish]', msg);
+				this.emitError({ kind: 'stderr', message: msg });
 			};
 			sf.uci('uci');
 			const nnueName = sf.getRecommendedNnue(0);
 			const res = await fetch(`${base}/stockfish/${nnueName}`);
 			if (!res.ok) {
-				throw new StockfishUnavailable(
+				const err = new StockfishUnavailable(
 					`Stockfish NNUE (${nnueName}) missing. Run \`npm run prep:stockfish\`.`
 				);
+				this.emitError({ kind: 'init', message: err.message });
+				throw err;
 			}
 			const buf = new Uint8Array(await res.arrayBuffer());
 			sf.setNnueBuffer(buf, 0);
@@ -124,6 +150,31 @@ export class Engine {
 		return () => {
 			this.bestmoveHandlers = this.bestmoveHandlers.filter((h) => h !== handler);
 		};
+	}
+
+	/**
+	 * Subscribe to non-fatal engine errors. Use this from a layout-level
+	 * listener to surface engine trouble (init failure, search timeouts) as
+	 * toasts. `stderr` events are emscripten noise — most subscribers should
+	 * filter them out.
+	 */
+	onError(handler: (e: EngineError) => void): () => void {
+		this.errorHandlers.push(handler);
+		return () => {
+			this.errorHandlers = this.errorHandlers.filter((h) => h !== handler);
+		};
+	}
+
+	private emitError(e: EngineError): void {
+		// Snapshot so handlers that unsubscribe themselves don't trip iteration.
+		const snapshot = this.errorHandlers.slice();
+		for (const h of snapshot) {
+			try {
+				h(e);
+			} catch (err) {
+				console.warn('[stockfish] error handler threw:', err);
+			}
+		}
 	}
 
 	async go(fen: string, depth: number = 20, searchmoves?: string[]): Promise<void> {
@@ -254,12 +305,14 @@ export class Engine {
 				cleanup();
 				this.stop();
 				if (lastInfo) {
-					console.warn(
-						`[stockfish] analyse timed out at depth ${depth}; resolving with last info (depth ${lastInfo.depth}).`
-					);
+					const msg = `analyse timed out at depth ${depth}; resolving with last info (depth ${lastInfo.depth}).`;
+					console.warn(`[stockfish] ${msg}`);
+					this.emitError({ kind: 'timeout', message: msg });
 					resolve(lastInfo);
 				} else {
-					console.warn(`[stockfish] analyse timed out at depth ${depth}; no info received.`);
+					const msg = `analyse timed out at depth ${depth}; no info received.`;
+					console.warn(`[stockfish] ${msg}`);
+					this.emitError({ kind: 'no-info', message: msg });
 					reject(new Error(`Engine analysis timed out at depth ${depth}.`));
 				}
 			}, timeoutMs);
@@ -371,13 +424,19 @@ export class Engine {
 
 			const timer = setTimeout(() => {
 				if (resolved) return;
-				console.warn(`[stockfish] analyseMulti timed out; resolving with latest state.`);
-				if (latest.size > 0) finalise();
-				else {
+				if (latest.size > 0) {
+					const msg = `analyseMulti timed out at depth ${lastDepthSeen}; resolving with latest state.`;
+					console.warn(`[stockfish] ${msg}`);
+					this.emitError({ kind: 'timeout', message: msg });
+					finalise();
+				} else {
+					const msg = `analyseMulti timed out before any info arrived.`;
+					console.warn(`[stockfish] ${msg}`);
+					this.emitError({ kind: 'no-info', message: msg });
 					resolved = true;
 					cleanup();
 					this.stop();
-					reject(new Error('analyseMulti timed out before any info arrived.'));
+					reject(new Error(msg));
 				}
 			}, timeoutMs);
 
@@ -405,7 +464,9 @@ export class Engine {
 				try {
 					h();
 				} catch (e) {
+					const msg = e instanceof Error ? e.message : String(e);
 					console.warn('[stockfish] bestmove handler threw:', e);
+					this.emitError({ kind: 'handler', message: `bestmove handler threw: ${msg}` });
 				}
 			}
 			return;

@@ -172,4 +172,53 @@ describe('buildLineFirstQueue', () => {
 		expect(out.lineLabels).toEqual(['e4', 'd4', 'c4']);
 		expect([...out.lineBoundaries].sort((a, b) => a - b)).toEqual([0, 1, 2]);
 	});
+
+	it('emits each user card exactly once when two move orders transpose', () => {
+		// Repertoire (Black) — two move orders that meet at the same position.
+		//
+		//   Line 1: 1.d4 d5 2.Nc3 c5 3.Bf4 Nf6
+		//   Line 2: 1.d4 d5 2.Nc3 Nf6 3.Bf4 c5 4.e3 e6
+		//
+		// The position after both c5 and Nf6 + Nc3 + Bf4 (`K6` below) is
+		// reached from both lines. K6 is White-to-move so it has no user
+		// card, but the graph stores it once and the walk has to handle the
+		// transposition without double-emitting any of the five user cards
+		// (K1, K3, K5a, K5b, K7).
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('d4', 'K1')]));
+		m.set('K1', node('K1', [edge('d5', 'K2')]));
+		m.set('K2', node('K2', [edge('Nc3', 'K3')]));
+		m.set('K3', node('K3', [edge('c5', 'K4a'), edge('Nf6', 'K4b')]));
+		m.set('K4a', node('K4a', [edge('Bf4', 'K5a')]));
+		m.set('K4b', node('K4b', [edge('Bf4', 'K5b')]));
+		m.set('K5a', node('K5a', [edge('Nf6', 'K6')]));
+		m.set('K5b', node('K5b', [edge('c5', 'K6')]));
+		// K6 is the transposition join. Line 2 continues with 4.e3 e6 from
+		// here; Line 1's repertoire stops at K6.
+		m.set('K6', node('K6', [edge('e3', 'K7')]));
+		m.set('K7', node('K7', [edge('e6', 'K8')]));
+		m.set('K8', node('K8', []));
+
+		// Black-to-move cards only — five total.
+		const cards = [card('K1'), card('K3'), card('K5a'), card('K5b'), card('K7')];
+		const out = buildLineFirstQueue(cards, m, { rootFenKey: 'r' });
+
+		// Each user fenKey appears exactly once.
+		const keys = out.cards.map((c) => c.fenKey);
+		expect(keys).toHaveLength(5);
+		const counts = keys.reduce<Record<string, number>>((acc, k) => {
+			acc[k] = (acc[k] ?? 0) + 1;
+			return acc;
+		}, {});
+		expect(counts).toEqual({ K1: 1, K3: 1, K5a: 1, K5b: 1, K7: 1 });
+
+		// The deeper card past the transposition (K7) is reached as a
+		// descendant of K6 the first time the walk visits K6 — not orphaned
+		// at the tail just because the second move-order tries to enter K6
+		// after it's already been visited.
+		const k7 = out.cards.findIndex((c) => c.fenKey === 'K7');
+		const k5b = out.cards.findIndex((c) => c.fenKey === 'K5b');
+		expect(k7).toBeLessThan(k5b);
+		expect(out.lineLabels[k7]).not.toBeNull();
+	});
 });

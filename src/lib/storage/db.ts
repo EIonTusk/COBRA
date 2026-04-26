@@ -54,6 +54,30 @@ export interface StoredDossierReport {
 	payload: unknown;
 }
 
+/**
+ * Single-row checkpoint for an in-flight Dossier scan. Lets the eval pass
+ * resume from the same cursor on a new tab/session if the user navigated
+ * away mid-scan. `payload` carries the serialized EvalAxesState plus the
+ * already-classified games so we don't need to re-fetch / re-classify.
+ *
+ * `scanHash` fingerprints the scan's inputs (opts + account list + game
+ * window). On resume we recompute the hash; if it differs we throw the
+ * checkpoint away rather than risk applying it to a different scan.
+ */
+export interface StoredDossierScanCheckpoint {
+	id: 'latest';
+	savedAt: number;
+	version: number;
+	/** Combined hash of opts + accounts + game cursors. */
+	scanHash: string;
+	/** Cursor inside the work[] array — next move index to process. */
+	cursor: number;
+	/** Total moves the eval pass needs to process. */
+	total: number;
+	/** Pre-eval state: classified games, opts, and accumulator. Opaque payload. */
+	payload: unknown;
+}
+
 export interface BaselineAxisSd {
 	forcing: number;
 	capture: number;
@@ -206,6 +230,10 @@ export interface OpeningTrainerDB extends DBSchema {
 		key: string;
 		value: StoredDossierReport;
 	};
+	dossier_scan_checkpoint: {
+		key: string;
+		value: StoredDossierScanCheckpoint;
+	};
 	spar_games: {
 		key: string;
 		value: SparGame;
@@ -229,7 +257,7 @@ export interface OpeningTrainerDB extends DBSchema {
 // repertoires and cards survive the rebrand. Renaming would create a
 // fresh empty DB and orphan their data.
 const DB_NAME = 'openingtrainer';
-const DB_VERSION = 14;
+const DB_VERSION = 15;
 const REQUIRED_STORES = [
 	'repertoires',
 	'nodes',
@@ -241,6 +269,7 @@ const REQUIRED_STORES = [
 	'idea_cards',
 	'baselines',
 	'style_reports',
+	'dossier_scan_checkpoint',
 	'spar_games',
 	'position_wdl'
 ] as const;
@@ -304,6 +333,9 @@ function ensureAllStores(db: IDBPDatabase<OpeningTrainerDB>) {
 	}
 	if (!has('style_reports')) {
 		db.createObjectStore('style_reports', { keyPath: 'id' });
+	}
+	if (!has('dossier_scan_checkpoint')) {
+		db.createObjectStore('dossier_scan_checkpoint', { keyPath: 'id' });
 	}
 	if (!has('spar_games')) {
 		const sg = db.createObjectStore('spar_games', { keyPath: 'id' });

@@ -56,6 +56,10 @@
 	let queue = $state<Card[]>([]);
 	let idx = $state(0);
 	let phase = $state<Phase>('loading');
+	// True once the leaf re-cycle has run for this session. Caps the
+	// auto-cycle at one extra lap — keeps the "drill the deepest lines a
+	// second time" practice without the queue length running away.
+	let leavesCycled = false;
 	// Line label per card fenKey — built once when the queue loads and
 	// consulted whenever we need to know "which line is this card in?".
 	// Keyed on fenKey (not queue index) so the mapping survives mutations
@@ -907,6 +911,7 @@
 		hintLevel = 0;
 		wrongAttempts = 0;
 		sessionDone = 0;
+		leavesCycled = false;
 		queue = sortByLineOrder(await loadQueue());
 		idx = 0;
 		ideaQueue =
@@ -1025,11 +1030,21 @@
 	 */
 	async function extendQueueWithLeaves(): Promise<number> {
 		if (!rep || mode !== 'due') return 0;
+		// Cap the auto-cycle at one lap. Without this the queue would
+		// re-extend on every successful pass through the leaves and the
+		// counter would visibly grow forever (12/24, 24/48, …) instead of
+		// reading as a clean second pass.
+		if (leavesCycled) return 0;
 		const leaves = await collectLeafCards();
 		if (leaves.length === 0) return 0;
 		const sorted = sortByLineOrder(leaves);
 		for (const c of sorted) drilledKeys.delete(c.fenKey);
-		queue = [...queue, ...sorted];
+		// Replace rather than append so the counter shows "1/N" → "N/N"
+		// across the leaf lap; the prior queue is fully drilled by now and
+		// keeping it would just inflate the denominator.
+		queue = sorted;
+		idx = 0;
+		leavesCycled = true;
 		return sorted.length;
 	}
 
@@ -1040,10 +1055,10 @@
 		}
 		if (next >= queue.length) {
 			// Move queue is done. If idea cards are queued, flip into the
-			// self-rated prompt phase. Otherwise (in due mode) cycle leaves
-			// back in so the drill never declares the rep "fully learned"
-			// — the user can keep practicing forever. Hold briefly so the
-			// final green glyph registers before anything else moves.
+			// self-rated prompt phase. Otherwise (in due mode) run one extra
+			// lap over just the leaves so the deepest lines get a second
+			// pass, then end. `extendQueueWithLeaves` replaces the queue
+			// and resets `idx` itself.
 			setTimeout(async () => {
 				if (ideaQueue.length > 0) {
 					startIdeaPhase();
@@ -1052,7 +1067,6 @@
 				const added = await extendQueueWithLeaves();
 				if (added > 0) {
 					chainedCard = null;
-					idx = next;
 					phase = 'pending';
 					return;
 				}
@@ -1170,9 +1184,8 @@
 				<span class="ml-1 text-[var(--color-brass-300)]">ideas</span>
 			</span>
 		{/if}
-		<!-- eslint-disable svelte/no-navigation-without-resolve -->
 		<a
-			href={rep ? `/repertoire/${rep.id}` : '/'}
+			href={rep ? resolve(`/repertoire/${rep.id}`) : resolve('/')}
 			class="flex size-8 items-center justify-center rounded-[3px] text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]"
 			class:ml-auto={!(
 				phase === 'intro' ||
@@ -1183,7 +1196,6 @@
 			)}
 			aria-label="Close drill"
 		>
-			<!-- eslint-enable svelte/no-navigation-without-resolve -->
 			<X class="size-4" />
 		</a>
 	</div>

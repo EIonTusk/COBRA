@@ -117,6 +117,16 @@ export interface EvalMoveResult {
 	 * field; consumers should fall back to the report's `evalDepth` field.
 	 */
 	actualDepth?: number;
+	/**
+	 * True when this move was materially losing per SEE (the user's piece on
+	 * the destination square is en prise after the move). Subset of these
+	 * are then flagged as `intentionalSac` when CP loss is small enough to
+	 * mean the engine endorses the trade. Stored explicitly so the
+	 * sac-tendency aggregate (`materialLossEndorsed / lostMaterial total`)
+	 * is derivable from `moveResults` without a parallel running counter.
+	 * Optional for back-compat with reports written before this field.
+	 */
+	lostMaterial?: boolean;
 }
 
 export interface PhaseEvalSummary {
@@ -205,7 +215,72 @@ export interface EvalAxesOpts {
 	adaptiveShallowDepth?: number;
 	/** Top1-top2 CP gap under which a deep re-evaluation is triggered. Default 30. */
 	adaptiveGapCp?: number;
+	/**
+	 * Resume an interrupted scan from a saved checkpoint. The state was
+	 * produced by `freezeEvalAxesState()` — it carries every running
+	 * accumulator plus the move-results gathered up to `cursor`. Caller
+	 * is responsible for verifying the games array matches what the
+	 * checkpoint was built against; a mismatched resume yields garbage
+	 * aggregates. The function will pick up at index `cursor` in the
+	 * derived work[] array.
+	 */
+	resumeFrom?: { cursor: number; state: EvalAxesPersistedState };
+	/**
+	 * Periodically receive a serializable snapshot of the in-flight state
+	 * so the caller can persist it to IDB. Called after every move (one
+	 * call per loop iteration) but the caller is expected to throttle —
+	 * e.g. `scanStore` debounces writes to once every ~30 seconds.
+	 *
+	 * `cursor` is the index of the *next* move to be processed (not the
+	 * one just finished), so resuming at this cursor is exactly correct.
+	 */
+	onCheckpoint?: (cursor: number, total: number, state: EvalAxesPersistedState) => void;
 }
+
+interface PhaseAcc {
+	sum: number;
+	n: number;
+	blunders: number;
+	inaccuracies: number;
+	wpSum: number;
+	accSum: number;
+}
+
+interface PerGameAcc {
+	sum: number;
+	n: number;
+	accSum: number;
+}
+
+/**
+ * Mutable accumulator for the eval pass. Held by the loop; mutated in
+ * place. Convert to/from the persisted shape via `freezeEvalAxesState`
+ * and `thawEvalAxesState` at IDB boundaries.
+ */
+interface EvalAxesRuntimeState {
+	cpSum: number;
+	wpSumAll: number;
+	accSumAll: number;
+	blunders: number;
+	inaccuracies: number;
+	volatileMoves: number;
+	movesSkippedSan: number;
+	movesSkippedEngine: number;
+	movesSkippedNoScore: number;
+	movesSkippedBook: number;
+	movesFromLichess: number;
+	movesFromLocal: number;
+	firstError: string | null;
+	phaseAcc: Record<Phase, PhaseAcc>;
+	phaseColorAcc: Record<Phase, Record<Color, PhaseAcc>>;
+	perGameAcc: Map<string, PerGameAcc>;
+	moveResults: EvalMoveResult[];
+}
+
+/** JSON-friendly mirror — Map → entries array — for IDB persistence. */
+export type EvalAxesPersistedState = Omit<EvalAxesRuntimeState, 'perGameAcc'> & {
+	perGameAcc: Array<[string, PerGameAcc]>;
+};
 
 const MATE_CP = 1500;
 
@@ -239,63 +314,34 @@ export async function analyseEvalAxes(
 	const work: Array<{ game: ClassifiedGame; move: MoveFeatures }> = [];
 	for (const g of games) for (const m of g.moves) work.push({ game: g, move: m });
 
-	const moveResults: EvalMoveResult[] = [];
-	let movesFromLichess = 0;
-	let movesFromLocal = 0;
-	type PhaseAcc = {
-		sum: number;
-		n: number;
-		blunders: number;
-		inaccuracies: number;
-		wpSum: number;
-		accSum: number;
-	};
-	const emptyPhaseAcc = (): PhaseAcc => ({
-		sum: 0,
-		n: 0,
-		blunders: 0,
-		inaccuracies: 0,
-		wpSum: 0,
-		accSum: 0
-	});
-	const phaseAcc: Record<Phase, PhaseAcc> = {
-		opening: emptyPhaseAcc(),
-		middle: emptyPhaseAcc(),
-		end: emptyPhaseAcc()
-	};
-	const phaseColorAcc: Record<Phase, Record<Color, PhaseAcc>> = {
-		opening: { white: emptyPhaseAcc(), black: emptyPhaseAcc() },
-		middle: { white: emptyPhaseAcc(), black: emptyPhaseAcc() },
-		end: { white: emptyPhaseAcc(), black: emptyPhaseAcc() }
-	};
-	const perGameAcc = new Map<string, { sum: number; n: number; accSum: number }>();
-	let cpSum = 0;
-	let wpSumAll = 0;
-	let accSumAll = 0;
-	let blunders = 0;
-	let inaccuracies = 0;
-	let materialLossEndorsed = 0;
-	let materialLossTotal = 0;
-	let volatileMoves = 0;
-	let movesSkippedSan = 0;
-	let movesSkippedEngine = 0;
-	let movesSkippedNoScore = 0;
-	let movesSkippedBook = 0;
-	let firstError: string | null = null;
+	const state: EvalAxesRuntimeState = opts.resumeFrom
+		? thawEvalAxesState(opts.resumeFrom.state)
+		: createEvalAxesRuntimeState();
+	// Resume cursor — clamp so a stale checkpoint pointing past work.length
+	// can't crash the loop. If clamped to work.length the loop body never
+	// executes and we go straight to the summary, which is correct: a
+	// completed scan needs no more work.
+	const startIndex = Math.min(Math.max(0, opts.resumeFrom?.cursor ?? 0), work.length);
 	const noteError = (msg: string) => {
-		if (firstError == null) firstError = msg;
+		if (state.firstError == null) state.firstError = msg;
 		console.warn('[evalAxes]', msg);
 	};
+	// Only fire onCheckpoint when state actually advances. The caller
+	// throttles further; this just avoids redundant snapshots.
+	const fireCheckpoint = (nextCursor: number) => {
+		opts.onCheckpoint?.(nextCursor, work.length, freezeEvalAxesState(state));
+	};
 
-	for (let i = 0; i < work.length; i++) {
+	for (let i = startIndex; i < work.length; i++) {
 		if (opts.signal?.aborted) break;
 		const { game, move } = work[i];
-		opts.onProgress?.(i, work.length, movesFromLichess);
+		opts.onProgress?.(i, work.length, state.movesFromLichess);
 
 		const fenAfter = playSanOnFen(move.fenBefore, move.san);
 		if (!fenAfter) {
-			movesSkippedSan += 1;
+			state.movesSkippedSan += 1;
 			noteError(`SAN re-parse failed: "${move.san}" on ${move.fenBefore}`);
+			fireCheckpoint(i + 1);
 			continue;
 		}
 
@@ -326,18 +372,14 @@ export async function analyseEvalAxes(
 			const intentionalSac = lostMaterial && cpLoss <= 50;
 			if (intentionalSac && wpLossVal < 3) quality = 'brilliant';
 
-			cpSum += cpLoss;
-			wpSumAll += wpLossVal;
-			accSumAll += accuracyPct;
-			if (classification === 'blunder') blunders += 1;
-			if (classification === 'inaccuracy' || classification === 'mistake') inaccuracies += 1;
-			if (lostMaterial) {
-				materialLossTotal += 1;
-				if (intentionalSac) materialLossEndorsed += 1;
-			}
-			if (moveWasForcing) volatileMoves += 1;
+			state.cpSum += cpLoss;
+			state.wpSumAll += wpLossVal;
+			state.accSumAll += accuracyPct;
+			if (classification === 'blunder') state.blunders += 1;
+			if (classification === 'inaccuracy' || classification === 'mistake') state.inaccuracies += 1;
+			if (moveWasForcing) state.volatileMoves += 1;
 
-			const p = phaseAcc[move.phase];
+			const p = state.phaseAcc[move.phase];
 			p.sum += cpLoss;
 			p.n += 1;
 			p.wpSum += wpLossVal;
@@ -345,7 +387,7 @@ export async function analyseEvalAxes(
 			if (classification === 'blunder') p.blunders += 1;
 			if (classification === 'inaccuracy' || classification === 'mistake') p.inaccuracies += 1;
 
-			const pc = phaseColorAcc[move.phase][game.color];
+			const pc = state.phaseColorAcc[move.phase][game.color];
 			pc.sum += cpLoss;
 			pc.n += 1;
 			pc.wpSum += wpLossVal;
@@ -353,13 +395,13 @@ export async function analyseEvalAxes(
 			if (classification === 'blunder') pc.blunders += 1;
 			if (classification === 'inaccuracy' || classification === 'mistake') pc.inaccuracies += 1;
 
-			const gAcc = perGameAcc.get(game.gameId) ?? { sum: 0, n: 0, accSum: 0 };
+			const gAcc = state.perGameAcc.get(game.gameId) ?? { sum: 0, n: 0, accSum: 0 };
 			gAcc.sum += cpLoss;
 			gAcc.n += 1;
 			gAcc.accSum += accuracyPct;
-			perGameAcc.set(game.gameId, gAcc);
+			state.perGameAcc.set(game.gameId, gAcc);
 
-			moveResults.push({
+			state.moveResults.push({
 				gameId: game.gameId,
 				playedAt: game.playedAt,
 				ply: move.ply,
@@ -385,9 +427,11 @@ export async function analyseEvalAxes(
 				tablebase: null,
 				inBook: false,
 				source: 'lichess',
-				actualDepth: undefined // server eval; no local depth
+				actualDepth: undefined, // server eval; no local depth
+				lostMaterial
 			});
-			movesFromLichess += 1;
+			state.movesFromLichess += 1;
+			fireCheckpoint(i + 1);
 			continue;
 		}
 
@@ -407,7 +451,8 @@ export async function analyseEvalAxes(
 				inBook = false;
 			}
 			if (inBook) {
-				movesSkippedBook += 1;
+				state.movesSkippedBook += 1;
+				fireCheckpoint(i + 1);
 				continue;
 			}
 		}
@@ -469,25 +514,27 @@ export async function analyseEvalAxes(
 				after = afterMulti.lines[0];
 			}
 		} catch (e) {
-			movesSkippedEngine += 1;
+			state.movesSkippedEngine += 1;
 			noteError(`engine.analyseMulti rejected: ${e instanceof Error ? e.message : String(e)}`);
+			fireCheckpoint(i + 1);
 			continue;
 		}
 
 		const before = beforeMulti.lines[0];
 		if (!before || !hasScore(before) || !after || !hasScore(after)) {
-			movesSkippedNoScore += 1;
+			state.movesSkippedNoScore += 1;
 			noteError(
 				`engine returned no score (before depth=${before?.depth} mate=${before?.scoreMate} cp=${before?.scoreCp}; after depth=${after?.depth} mate=${after?.scoreMate} cp=${after?.scoreCp})`
 			);
+			fireCheckpoint(i + 1);
 			continue;
 		}
 
 		// Sample-log the first few eval pairs so the user can verify the
 		// pipeline. Cheap (capped at 5) and only emits in dev console.
-		if (moveResults.length < 5) {
+		if (state.moveResults.length < 5) {
 			console.debug(
-				`[evalAxes sample ${moveResults.length}] color=${game.color} ply=${move.ply} san=${move.san} ` +
+				`[evalAxes sample ${state.moveResults.length}] color=${game.color} ply=${move.ply} san=${move.san} ` +
 					`before=${formatScore(before)} after=${formatScore(after)}`
 			);
 		}
@@ -543,7 +590,7 @@ export async function analyseEvalAxes(
 		// uses played-move-forcing instead so the metric behaves the same
 		// on adopted moves that don't expose multi-PV history.
 		const volatile = beforeMulti.volatility.topMoveChanges >= 2;
-		if (moveWasForcing) volatileMoves += 1;
+		if (moveWasForcing) state.volatileMoves += 1;
 
 		// Top-K alternatives (excludes the bestmove itself for brevity; the
 		// bestUci above already covers PV[0]).
@@ -557,17 +604,13 @@ export async function analyseEvalAxes(
 			});
 		}
 
-		cpSum += cpLoss;
-		wpSumAll += wpLossVal;
-		accSumAll += accuracyPct;
-		if (classification === 'blunder') blunders += 1;
-		if (classification === 'inaccuracy' || classification === 'mistake') inaccuracies += 1;
-		if (lostMaterial) {
-			materialLossTotal += 1;
-			if (intentionalSac) materialLossEndorsed += 1;
-		}
+		state.cpSum += cpLoss;
+		state.wpSumAll += wpLossVal;
+		state.accSumAll += accuracyPct;
+		if (classification === 'blunder') state.blunders += 1;
+		if (classification === 'inaccuracy' || classification === 'mistake') state.inaccuracies += 1;
 
-		const p = phaseAcc[move.phase];
+		const p = state.phaseAcc[move.phase];
 		p.sum += cpLoss;
 		p.n += 1;
 		p.wpSum += wpLossVal;
@@ -575,7 +618,7 @@ export async function analyseEvalAxes(
 		if (classification === 'blunder') p.blunders += 1;
 		if (classification === 'inaccuracy' || classification === 'mistake') p.inaccuracies += 1;
 
-		const pc = phaseColorAcc[move.phase][game.color];
+		const pc = state.phaseColorAcc[move.phase][game.color];
 		pc.sum += cpLoss;
 		pc.n += 1;
 		pc.wpSum += wpLossVal;
@@ -583,13 +626,13 @@ export async function analyseEvalAxes(
 		if (classification === 'blunder') pc.blunders += 1;
 		if (classification === 'inaccuracy' || classification === 'mistake') pc.inaccuracies += 1;
 
-		const gAcc = perGameAcc.get(game.gameId) ?? { sum: 0, n: 0, accSum: 0 };
+		const gAcc = state.perGameAcc.get(game.gameId) ?? { sum: 0, n: 0, accSum: 0 };
 		gAcc.sum += cpLoss;
 		gAcc.n += 1;
 		gAcc.accSum += accuracyPct;
-		perGameAcc.set(game.gameId, gAcc);
+		state.perGameAcc.set(game.gameId, gAcc);
 
-		moveResults.push({
+		state.moveResults.push({
 			gameId: game.gameId,
 			playedAt: game.playedAt,
 			ply: move.ply,
@@ -615,56 +658,70 @@ export async function analyseEvalAxes(
 			tablebase,
 			inBook,
 			source: 'local',
-			actualDepth
+			actualDepth,
+			lostMaterial
 		});
-		movesFromLocal += 1;
+		state.movesFromLocal += 1;
+		fireCheckpoint(i + 1);
 	}
-	opts.onProgress?.(work.length, work.length, movesFromLichess);
+	opts.onProgress?.(work.length, work.length, state.movesFromLichess);
 
-	const movesAnalysed = moveResults.length;
+	const movesAnalysed = state.moveResults.length;
 	const safe = movesAnalysed || 1;
+	// sac-tendency = endorsed material losses / total material losses.
+	// Derived from moveResults at summary time so the runtime state
+	// doesn't need a parallel counter (the lostMaterial flag on each
+	// EvalMoveResult is the source of truth).
+	let lostMaterialCount = 0;
+	let lostMaterialEndorsed = 0;
+	for (const m of state.moveResults) {
+		if (m.lostMaterial) {
+			lostMaterialCount += 1;
+			if (m.intentionalSac) lostMaterialEndorsed += 1;
+		}
+	}
 	const byPhase: Record<Phase, PhaseEvalSummary> = {
-		opening: finalisePhase(phaseAcc.opening),
-		middle: finalisePhase(phaseAcc.middle),
-		end: finalisePhase(phaseAcc.end)
+		opening: finalisePhase(state.phaseAcc.opening),
+		middle: finalisePhase(state.phaseAcc.middle),
+		end: finalisePhase(state.phaseAcc.end)
 	};
 	const byPhaseColor: Record<Phase, Record<Color, PhaseEvalSummary>> = {
 		opening: {
-			white: finalisePhase(phaseColorAcc.opening.white),
-			black: finalisePhase(phaseColorAcc.opening.black)
+			white: finalisePhase(state.phaseColorAcc.opening.white),
+			black: finalisePhase(state.phaseColorAcc.opening.black)
 		},
 		middle: {
-			white: finalisePhase(phaseColorAcc.middle.white),
-			black: finalisePhase(phaseColorAcc.middle.black)
+			white: finalisePhase(state.phaseColorAcc.middle.white),
+			black: finalisePhase(state.phaseColorAcc.middle.black)
 		},
 		end: {
-			white: finalisePhase(phaseColorAcc.end.white),
-			black: finalisePhase(phaseColorAcc.end.black)
+			white: finalisePhase(state.phaseColorAcc.end.white),
+			black: finalisePhase(state.phaseColorAcc.end.black)
 		}
 	};
 
-	const allMoves = [...moveResults].sort((a, b) => a.playedAt - b.playedAt || a.ply - b.ply);
-	const histogram = bucketHistogram(moveResults.map((m) => m.quality));
+	const allMoves = [...state.moveResults].sort((a, b) => a.playedAt - b.playedAt || a.ply - b.ply);
+	const histogram = bucketHistogram(state.moveResults.map((m) => m.quality));
 
 	return {
 		movesAnalysed,
-		movesSkippedSan,
-		movesSkippedEngine,
-		movesSkippedNoScore,
-		movesSkippedBook,
-		firstError,
-		avgCpLoss: cpSum / safe,
-		blunderRate: blunders / safe,
-		inaccuracyRate: inaccuracies / safe,
-		sacTendency: materialLossTotal > 0 ? materialLossEndorsed / materialLossTotal : 0,
-		avgAccuracy: accSumAll / safe,
-		avgWpLoss: wpSumAll / safe,
-		tacticalMoveRate: volatileMoves / safe,
+		movesSkippedSan: state.movesSkippedSan,
+		movesSkippedEngine: state.movesSkippedEngine,
+		movesSkippedNoScore: state.movesSkippedNoScore,
+		movesSkippedBook: state.movesSkippedBook,
+		firstError: state.firstError,
+		avgCpLoss: state.cpSum / safe,
+		blunderRate: state.blunders / safe,
+		inaccuracyRate: state.inaccuracies / safe,
+		sacTendency: lostMaterialCount > 0 ? lostMaterialEndorsed / lostMaterialCount : 0,
+		avgAccuracy: state.accSumAll / safe,
+		avgWpLoss: state.wpSumAll / safe,
+		tacticalMoveRate: state.volatileMoves / safe,
 		byPhase,
 		byPhaseColor,
-		worst: [...moveResults].sort((a, b) => b.wpLoss - a.wpLoss).slice(0, 12),
+		worst: [...state.moveResults].sort((a, b) => b.wpLoss - a.wpLoss).slice(0, 12),
 		allMoves,
-		perGame: [...perGameAcc.entries()]
+		perGame: [...state.perGameAcc.entries()]
 			.map(([gameId, v]) => ({
 				gameId,
 				moves: v.n,
@@ -676,8 +733,67 @@ export async function analyseEvalAxes(
 		multiPv: multiPV > 1,
 		usedTablebase: useTb,
 		usedMastersBook: useBook,
-		movesFromLichess,
-		movesFromLocal
+		movesFromLichess: state.movesFromLichess,
+		movesFromLocal: state.movesFromLocal
+	};
+}
+
+function emptyPhaseAcc(): PhaseAcc {
+	return { sum: 0, n: 0, blunders: 0, inaccuracies: 0, wpSum: 0, accSum: 0 };
+}
+
+function createEvalAxesRuntimeState(): EvalAxesRuntimeState {
+	return {
+		cpSum: 0,
+		wpSumAll: 0,
+		accSumAll: 0,
+		blunders: 0,
+		inaccuracies: 0,
+		volatileMoves: 0,
+		movesSkippedSan: 0,
+		movesSkippedEngine: 0,
+		movesSkippedNoScore: 0,
+		movesSkippedBook: 0,
+		movesFromLichess: 0,
+		movesFromLocal: 0,
+		firstError: null,
+		phaseAcc: {
+			opening: emptyPhaseAcc(),
+			middle: emptyPhaseAcc(),
+			end: emptyPhaseAcc()
+		},
+		phaseColorAcc: {
+			opening: { white: emptyPhaseAcc(), black: emptyPhaseAcc() },
+			middle: { white: emptyPhaseAcc(), black: emptyPhaseAcc() },
+			end: { white: emptyPhaseAcc(), black: emptyPhaseAcc() }
+		},
+		perGameAcc: new Map(),
+		moveResults: []
+	};
+}
+
+/**
+ * Snapshot the live accumulator into a JSON-friendly form. Maps become
+ * entries arrays; everything else is plain data already. Caller is
+ * responsible for any further serialization (e.g. structured-clone for
+ * IDB write); this just normalises the shape.
+ */
+export function freezeEvalAxesState(s: EvalAxesRuntimeState): EvalAxesPersistedState {
+	return {
+		...s,
+		perGameAcc: [...s.perGameAcc.entries()]
+	};
+}
+
+/**
+ * Inverse of `freezeEvalAxesState` — rebuild the live accumulator from
+ * its persisted form. Idempotent; safe to call on the output of
+ * `freezeEvalAxesState` to round-trip without loss.
+ */
+export function thawEvalAxesState(p: EvalAxesPersistedState): EvalAxesRuntimeState {
+	return {
+		...p,
+		perGameAcc: new Map(p.perGameAcc)
 	};
 }
 
