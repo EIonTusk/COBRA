@@ -22,6 +22,7 @@
 	import {
 		dueCards,
 		getCard,
+		listCards,
 		mistakeCards,
 		pickBalancedDueCards,
 		resetAllFsrs,
@@ -1441,6 +1442,46 @@
 	 * state and meet the user-configured stability threshold (Settings →
 	 * Drill, default 7 days).
 	 */
+	function isWellLearned(card: Card): boolean {
+		const state = card.fsrs.state;
+		const stability = typeof card.fsrs.stability === 'number' ? card.fsrs.stability : 0;
+		const threshold = settings?.drillWellLearnedDays ?? 7;
+		return state === 2 && stability >= threshold;
+	}
+
+	/**
+	 * Cards whose user-move position has no deeper user-move card in the
+	 * repertoire — the "tips" of every prepared line. Used to seed the
+	 * second-pass leaves cycle so the deepest moves get an extra rep
+	 * before the session ends.
+	 */
+	async function collectLeafCards(): Promise<Card[]> {
+		if (!rep) return [];
+		const all = await listCards(rep.id);
+		const byKey = new Map(all.map((c) => [c.fenKey, c]));
+		const leaves: Card[] = [];
+		for (const card of all) {
+			const node = nodes.get(card.fenKey);
+			if (!node || node.children.length === 0) {
+				leaves.push(card);
+				continue;
+			}
+			let hasDeeperCard = false;
+			outer: for (const userEdge of node.children) {
+				const oppNode = nodes.get(userEdge.toFenKey);
+				if (!oppNode) continue;
+				for (const oppEdge of oppNode.children) {
+					if (byKey.has(oppEdge.toFenKey)) {
+						hasDeeperCard = true;
+						break outer;
+					}
+				}
+			}
+			if (!hasDeeperCard) leaves.push(card);
+		}
+		return leaves;
+	}
+
 	async function extendQueueWithLeaves(): Promise<number> {
 		if (!rep || mode !== 'due') return 0;
 		// Cap the auto-cycle at one lap. Without this the queue would
@@ -1480,29 +1521,56 @@
 		for (let i = walkStarts.length - 1; i >= 0; i--) {
 			if (walkStarts[i] <= queueIdx) return i;
 		}
-		if (next >= queue.length) {
-			// Move queue is done. If idea cards are queued, flip into the
-			// self-rated prompt phase. Otherwise (in due mode) run one extra
-			// lap over just the leaves so the deepest lines get a second
-			// pass, then end. `extendQueueWithLeaves` replaces the queue
-			// and resets `idx` itself.
-			setTimeout(async () => {
-				if (ideaQueue.length > 0) {
-					startIdeaPhase();
-					return;
-				}
-				const added = await extendQueueWithLeaves();
-				if (added > 0) {
-					chainedCard = null;
-					phase = 'pending';
-					return;
+		return -1;
+	}
+
+	/** End-exclusive boundary of walk `w` in the flat queue. */
+	function walkEndOf(w: number): number {
+		return w + 1 < walkStarts.length ? walkStarts[w + 1] : queue.length;
+	}
+
+	/** True when any fenKey in this walk has been introduced this session — the signal for "needs a Train pass". */
+	function walkNeedsTrain(walkIdx: number): boolean {
+		const keys = walkFenKeys[walkIdx];
+		if (!keys) return false;
+		for (const k of keys) {
+			if (introducedKeys.has(k)) return true;
+		}
+		return false;
+	}
+
+	function advanceQueue(justRatedKey?: string) {
+		const lineWalkMode = (settings?.drillIntermediateMoves ?? 'play') === 'play';
+		const currentWalk = walkOfIdx(idx);
+
+		// Auto-mode (no walks tracked) and any session that ran out of
+		// walks fall back to the simple linear advance: skip drilled cards
+		// + the just-rated fenKey, end the session at queue exhaustion.
+		if (!lineWalkMode || currentWalk < 0) {
+			let next = idx + 1;
+			while (next < queue.length) {
+				maybeOpenWalkAt(next);
+				if (drilledKeys.has(queue[next].fenKey) || queue[next].fenKey === justRatedKey) {
+					next++;
+					continue;
 				}
 				break;
 			}
 			if (next >= queue.length) {
-				setTimeout(() => {
+				// Move queue is done. If idea cards are queued, flip into the
+				// self-rated prompt phase. Otherwise (in due mode) run one extra
+				// lap over just the leaves so the deepest lines get a second
+				// pass, then end. `extendQueueWithLeaves` replaces the queue
+				// and resets `idx` itself.
+				setTimeout(async () => {
 					if (ideaQueue.length > 0) {
 						startIdeaPhase();
+						return;
+					}
+					const added = await extendQueueWithLeaves();
+					if (added > 0) {
+						chainedCard = null;
+						phase = 'pending';
 						return;
 					}
 					phase = 'done';
