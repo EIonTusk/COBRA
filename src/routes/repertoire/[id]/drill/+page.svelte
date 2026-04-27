@@ -22,6 +22,7 @@
 	import {
 		dueCards,
 		getCard,
+		listCards,
 		mistakeCards,
 		pickBalancedDueCards,
 		resetAllFsrs,
@@ -66,6 +67,10 @@
 	let queue = $state<Card[]>([]);
 	let idx = $state(0);
 	let phase = $state<Phase>('loading');
+	// True once the leaf re-cycle has run for this session. Caps the
+	// auto-cycle at one extra lap — keeps the "drill the deepest lines a
+	// second time" practice without the queue length running away.
+	let leavesCycled = false;
 	// Line label per card fenKey — built once when the queue loads and
 	// consulted whenever we need to know "which line is this card in?".
 	// Keyed on fenKey (not queue index) so the mapping survives mutations
@@ -1114,6 +1119,7 @@
 		hintLevel = 0;
 		wrongAttempts = 0;
 		sessionDone = 0;
+		leavesCycled = false;
 		queue = sortByLineOrder(await loadQueue());
 		snapshotPlannedSet(queue);
 		idx = 0;
@@ -1444,6 +1450,59 @@
 	}
 
 	/**
+	 * Cards whose user-move position has no deeper user-move card in the
+	 * repertoire — the "tips" of every prepared line. Used to seed the
+	 * second-pass leaves cycle so the deepest moves get an extra rep
+	 * before the session ends.
+	 */
+	async function collectLeafCards(): Promise<Card[]> {
+		if (!rep) return [];
+		const all = await listCards(rep.id);
+		const byKey = new Map(all.map((c) => [c.fenKey, c]));
+		const leaves: Card[] = [];
+		for (const card of all) {
+			const node = nodes.get(card.fenKey);
+			if (!node || node.children.length === 0) {
+				leaves.push(card);
+				continue;
+			}
+			let hasDeeperCard = false;
+			outer: for (const userEdge of node.children) {
+				const oppNode = nodes.get(userEdge.toFenKey);
+				if (!oppNode) continue;
+				for (const oppEdge of oppNode.children) {
+					if (byKey.has(oppEdge.toFenKey)) {
+						hasDeeperCard = true;
+						break outer;
+					}
+				}
+			}
+			if (!hasDeeperCard) leaves.push(card);
+		}
+		return leaves;
+	}
+
+	async function extendQueueWithLeaves(): Promise<number> {
+		if (!rep || mode !== 'due') return 0;
+		// Cap the auto-cycle at one lap. Without this the queue would
+		// re-extend on every successful pass through the leaves and the
+		// counter would visibly grow forever (12/24, 24/48, …) instead of
+		// reading as a clean second pass.
+		if (leavesCycled) return 0;
+		const leaves = await collectLeafCards();
+		if (leaves.length === 0) return 0;
+		const sorted = sortByLineOrder(leaves);
+		for (const c of sorted) drilledKeys.delete(c.fenKey);
+		// Replace rather than append so the counter shows "1/N" → "N/N"
+		// across the leaf lap; the prior queue is fully drilled by now and
+		// keeping it would just inflate the denominator.
+		queue = sorted;
+		idx = 0;
+		leavesCycled = true;
+		return sorted.length;
+	}
+
+	/**
 	 * Clear `drilledKeys` for every fenKey in the walk whose first index is
 	 * `queueIdx` — called as the queue crosses walk boundaries so a shared
 	 * prefix drilled as part of the previous line becomes eligible for the
@@ -1498,9 +1557,20 @@
 				break;
 			}
 			if (next >= queue.length) {
-				setTimeout(() => {
+				// Move queue is done. If idea cards are queued, flip into the
+				// self-rated prompt phase. Otherwise (in due mode) run one extra
+				// lap over just the leaves so the deepest lines get a second
+				// pass, then end. `extendQueueWithLeaves` replaces the queue
+				// and resets `idx` itself.
+				setTimeout(async () => {
 					if (ideaQueue.length > 0) {
 						startIdeaPhase();
+						return;
+					}
+					const added = await extendQueueWithLeaves();
+					if (added > 0) {
+						chainedCard = null;
+						phase = 'pending';
 						return;
 					}
 					phase = 'done';
@@ -1746,9 +1816,8 @@
 				<span class="ml-1 text-[var(--color-brass-300)]">ideas</span>
 			</span>
 		{/if}
-		<!-- eslint-disable svelte/no-navigation-without-resolve -->
 		<a
-			href={rep ? `/repertoire/${rep.id}` : '/'}
+			href={rep ? resolve(`/repertoire/${rep.id}`) : resolve('/')}
 			class="flex size-8 items-center justify-center rounded-[3px] text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]"
 			class:ml-auto={!(
 				phase === 'intro' ||
@@ -1759,7 +1828,6 @@
 			)}
 			aria-label="Close drill"
 		>
-			<!-- eslint-enable svelte/no-navigation-without-resolve -->
 			<X class="size-4" />
 		</a>
 	</div>

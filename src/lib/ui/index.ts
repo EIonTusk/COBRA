@@ -8,6 +8,8 @@ export { default as MultiSelect } from './MultiSelect.svelte';
 export { default as Select } from './Select.svelte';
 export { default as ConfirmDialog } from './ConfirmDialog.svelte';
 export { confirmDialog, type ConfirmOptions } from './confirm';
+export { default as Toaster } from './Toaster.svelte';
+export { toast, type ToastEntry, type ToastKind, type ToastOptions } from './toast.svelte';
 export { default as Textarea } from './Textarea.svelte';
 export { default as Label } from './Label.svelte';
 export { default as Badge, badgeVariants } from './Badge.svelte';

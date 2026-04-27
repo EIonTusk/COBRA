@@ -43,6 +43,14 @@
 								Dossier scan
 							{/if}
 						</span>
+						{#if dossierScan.resumed}
+							<span
+								class="font-mono text-[10px] tracking-wider text-[var(--color-olive-300)] uppercase"
+								title="Resumed from a saved checkpoint"
+							>
+								resumed
+							</span>
+						{/if}
 						<span class="truncate font-mono text-[11px] text-[var(--color-parchment-500)]">
 							{#if dossierScan.phase === 'fetching' && dossierScan.progressText}
 								{dossierScan.progressText}

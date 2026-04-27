@@ -19,7 +19,7 @@ import {
 	type DossierFingerprint
 } from './fingerprint';
 import { detectLeaks, type LeakSummary } from './mismatch';
-import { analyseEvalAxes, type EvalAxesSummary } from './evalAxes';
+import { analyseEvalAxes, type EvalAxesPersistedState, type EvalAxesSummary } from './evalAxes';
 
 export interface DossierScanOpts {
 	maxGamesPerAccount?: number;
@@ -51,6 +51,35 @@ export interface DossierScanOpts {
 	 * chess.com games (the endpoint doesn't exist there).
 	 */
 	useServerEval?: boolean;
+	/**
+	 * Resume an interrupted scan. When provided, Phase 1 (network fetch +
+	 * classify) is skipped — `resumeFrom.classified` is used directly. The
+	 * eval pass starts from `resumeFrom.cursor` with the already-accumulated
+	 * `resumeFrom.evalState`. Caller is responsible for verifying the
+	 * checkpoint matches the requested scan (see `scanStore`'s scanHash);
+	 * a mismatched resume yields garbage aggregates.
+	 */
+	resumeFrom?: {
+		classified: ClassifiedGame[];
+		cursor: number;
+		evalState: EvalAxesPersistedState;
+		/** Saved per-account scan counts so the dossier UI block stays
+		 *  populated after a resume. */
+		perAccount: DossierScanResult['perAccount'];
+	};
+	/**
+	 * Receives a self-contained checkpoint payload after each eval move.
+	 * Carries everything needed to resume — the already-classified games,
+	 * per-account counts, and the running eval accumulator. Caller is
+	 * expected to throttle the actual IDB writes.
+	 */
+	onCheckpoint?: (cursor: number, total: number, payload: DossierScanCheckpointPayload) => void;
+}
+
+export interface DossierScanCheckpointPayload {
+	classified: ClassifiedGame[];
+	perAccount: DossierScanResult['perAccount'];
+	evalState: EvalAxesPersistedState;
 }
 
 export interface DossierScanResult {
@@ -81,52 +110,60 @@ export async function scanDossierAcrossAccounts(
 ): Promise<DossierScanResult> {
 	const accounts = opts.accountsOverride ?? collectAccountsFromSettings(settings);
 	const token = effectiveLichessToken(settings);
-	const classified: ClassifiedGame[] = [];
-	const perAccount: DossierScanResult['perAccount'] = [];
+	let perAccount: DossierScanResult['perAccount'] = [];
+	let classified: ClassifiedGame[];
 
-	for (const account of accounts) {
-		if (account.source === 'lichess' && !token) {
-			perAccount.push({
-				account,
-				scanned: 0,
-				error: 'Lichess token required — connect in Settings.'
-			});
-			continue;
-		}
-		try {
-			const stream =
-				account.source === 'chesscom'
-					? streamChesscomGames(account.username, {
-							max: opts.maxGamesPerAccount ?? 100,
-							rated: opts.rated,
-							since: opts.since,
-							signal: opts.signal
-						})
-					: streamUserGames(account.username, {
-							max: opts.maxGamesPerAccount ?? 100,
-							token,
-							variant: 'standard',
-							rated: opts.rated,
-							since: opts.since,
-							evals: opts.useServerEval,
-							signal: opts.signal
-						});
-
-			let scanned = 0;
-			for await (const game of stream) {
-				scanned += 1;
-				if (game.variant !== 'standard') continue;
-				const c = classifyGame(game, account.username);
-				if (c) classified.push(c);
-				opts.onProgress?.(account, scanned);
+	if (opts.resumeFrom) {
+		// Phase 1 already done in the original session. Trust the supplied
+		// classified set and per-account counts captured at checkpoint time.
+		classified = opts.resumeFrom.classified;
+		perAccount = opts.resumeFrom.perAccount;
+	} else {
+		classified = [];
+		for (const account of accounts) {
+			if (account.source === 'lichess' && !token) {
+				perAccount.push({
+					account,
+					scanned: 0,
+					error: 'Lichess token required — connect in Settings.'
+				});
+				continue;
 			}
-			perAccount.push({ account, scanned });
-		} catch (e) {
-			perAccount.push({
-				account,
-				scanned: 0,
-				error: e instanceof Error ? e.message : String(e)
-			});
+			try {
+				const stream =
+					account.source === 'chesscom'
+						? streamChesscomGames(account.username, {
+								max: opts.maxGamesPerAccount ?? 100,
+								rated: opts.rated,
+								since: opts.since,
+								signal: opts.signal
+							})
+						: streamUserGames(account.username, {
+								max: opts.maxGamesPerAccount ?? 100,
+								token,
+								variant: 'standard',
+								rated: opts.rated,
+								since: opts.since,
+								evals: opts.useServerEval,
+								signal: opts.signal
+							});
+
+				let scanned = 0;
+				for await (const game of stream) {
+					scanned += 1;
+					if (game.variant !== 'standard') continue;
+					const c = classifyGame(game, account.username);
+					if (c) classified.push(c);
+					opts.onProgress?.(account, scanned);
+				}
+				perAccount.push({ account, scanned });
+			} catch (e) {
+				perAccount.push({
+					account,
+					scanned: 0,
+					error: e instanceof Error ? e.message : String(e)
+				});
+			}
 		}
 	}
 
@@ -139,12 +176,24 @@ export async function scanDossierAcrossAccounts(
 	const runEval = opts.runEvalAnalysis !== false;
 	const effectiveDepth = opts.evalDepth ?? 14;
 	if (runEval && classified.length > 0 && !opts.signal?.aborted) {
+		// Wrap the user's onCheckpoint so it sees the full payload (classified
+		// + perAccount), not just the eval accumulator. analyseEvalAxes only
+		// knows about its own state; this layer adds the Phase-1 outputs.
+		const onCheckpoint = opts.onCheckpoint;
+		const wrappedOnCheckpoint = onCheckpoint
+			? (cursor: number, total: number, evalState: EvalAxesPersistedState) =>
+					onCheckpoint(cursor, total, { classified, perAccount, evalState })
+			: undefined;
 		try {
 			evalAxes = await analyseEvalAxes(classified, {
 				depth: effectiveDepth,
 				signal: opts.signal,
 				onProgress: opts.onEvalProgress,
-				lichessToken: token ?? undefined
+				lichessToken: token ?? undefined,
+				resumeFrom: opts.resumeFrom
+					? { cursor: opts.resumeFrom.cursor, state: opts.resumeFrom.evalState }
+					: undefined,
+				onCheckpoint: wrappedOnCheckpoint
 			});
 		} catch (e) {
 			evalError = e instanceof Error ? e.message : String(e);

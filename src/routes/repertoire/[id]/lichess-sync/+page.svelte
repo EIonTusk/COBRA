@@ -32,7 +32,7 @@
 		type LichessStudyMeta,
 		type StudyVisibility
 	} from '$lib/lichess/studies';
-	import { Button, Input, Label, Separator, confirmDialog } from '$lib/ui';
+	import { Button, Input, Label, Separator, confirmDialog, toast } from '$lib/ui';
 	import type { AppSettings, LichessStudyChapter, LichessStudyLink, Repertoire } from '$lib/types';
 
 	let rep = $state<Repertoire | null>(null);
@@ -154,7 +154,11 @@
 				const chapters = await listChapters(oauth.accessToken, id);
 				initialChapterIds = chapters.map((c) => c.id);
 			} catch (e) {
+				const detail = e instanceof Error ? e.message : String(e);
 				console.warn('Could not list initial chapters:', e);
+				toast.warn('Could not list new study chapters', {
+					body: `${detail}. Lichess's auto-generated "Chapter 1" may remain alongside your push — delete it on Lichess if you don't want it.`
+				});
 			}
 
 			await doPush(initialChapterIds);
@@ -291,13 +295,16 @@
 			for (const p of group) toDelete.push(p.id);
 		}
 
+		const deleteFailures: Array<{ id: string; reason: string }> = [];
 		if (toDelete.length > 0) {
 			status = `Removing ${toDelete.length} old chapter${toDelete.length === 1 ? '' : 's'}…`;
 			for (const id of toDelete) {
 				try {
 					await deleteChapter(oauth.accessToken, link.studyId, id);
 				} catch (e) {
+					const reason = e instanceof Error ? e.message : String(e);
 					console.warn('Previous-chapter delete failed:', e);
+					deleteFailures.push({ id, reason });
 				}
 			}
 		}
@@ -333,6 +340,19 @@
 		const pushed = toUpload.length > 0 ? `${toUpload.length} updated` : kept ? '' : '0 changes';
 		const parts = [pushed, kept].filter(Boolean);
 		status = parts.length > 0 ? `Pushed · ${parts.join(', ')}.` : 'Pushed.';
+
+		// Surface partial-failure paths so the user knows there are orphaned
+		// chapters still on Lichess. The push itself succeeded; a separate
+		// warn toast keeps the success status while still flagging cleanup.
+		if (deleteFailures.length > 0) {
+			const sample = deleteFailures[0]?.reason;
+			toast.warn(
+				`${deleteFailures.length} old chapter${deleteFailures.length === 1 ? '' : 's'} couldn't be removed`,
+				{
+					body: `Old chapters remain on Lichess and may need manual cleanup.${sample ? ` (${sample})` : ''}`
+				}
+			);
+		}
 	}
 
 	async function push() {
