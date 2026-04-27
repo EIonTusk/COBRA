@@ -351,7 +351,7 @@
 						/>
 					</div>
 					<div>
-						<Label for="seshcap">Cards per session</Label>
+						<Label for="seshcap">Moves per session</Label>
 						<Input
 							id="seshcap"
 							name="seshcap"
@@ -423,6 +423,62 @@
 						</p>
 					</div>
 				</label>
+
+				<label
+					class="mt-3 flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
+				>
+					<input
+						type="checkbox"
+						checked={(settings.drillIntermediateMoves ?? 'play') === 'play'}
+						onchange={(e) =>
+							(settings!.drillIntermediateMoves = (e.currentTarget as HTMLInputElement).checked
+								? 'play'
+								: 'auto')}
+						class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
+					/>
+					<div class="min-w-0 flex-1">
+						<span class="font-serif text-sm text-[var(--color-parchment-100)]">
+							Walk every move of a line
+						</span>
+						<p
+							class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+						>
+							When a card from late in a line is due, the drill walks each earlier user move first
+							instead of jumping past them. Prefix moves don't count towards FSRS — getting them
+							right is a free pass, getting them wrong replays without a lapse. Disable to drill the
+							due card directly.
+						</p>
+					</div>
+				</label>
+
+				<div
+					class="mt-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3"
+				>
+					<div class="flex items-baseline justify-between gap-3">
+						<Label for="welllearneddays" class="!mb-0">Animate past well-learned moves</Label>
+						<div class="flex items-baseline gap-1.5">
+							<Input
+								id="welllearneddays"
+								name="welllearneddays"
+								type="number"
+								min="0"
+								max="365"
+								autocomplete="off"
+								bind:value={settings.drillWellLearnedDays}
+								class="w-20 font-mono"
+							/>
+							<span class="font-mono text-xs text-[var(--color-parchment-500)]">days</span>
+						</div>
+					</div>
+					<p
+						class="mt-2 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+					>
+						Threshold for treating a graduated FSRS card as well-learned. Prefix and suffix moves in
+						a line walk skip the drill and play out as animation when their stability is at or above
+						this value. Lower keeps more moves in the recall pool; higher trusts the schedule
+						sooner. 0 animates everything that's reached Review state.
+					</p>
+				</div>
 			</section>
 
 			<Separator />

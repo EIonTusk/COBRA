@@ -12,6 +12,8 @@ export function defaultSettings(): AppSettings {
 		dailyNewCardCap: 10,
 		drillSessionCap: 30,
 		drillIntroSpeed: 'normal',
+		drillIntermediateMoves: 'play',
+		drillWellLearnedDays: 7,
 		explorerSpeeds: ['blitz', 'rapid', 'classical'],
 		explorerRatings: [1600, 1800, 2000, 2200, 2500],
 		lichessApiToken: '',
@@ -27,7 +29,11 @@ export function defaultSettings(): AppSettings {
 export async function getSettings(): Promise<AppSettings> {
 	const db = await getDB();
 	const s = await db.get('settings', 'root');
-	return s ?? defaultSettings();
+	if (!s) return defaultSettings();
+	// Merge with defaults so newly-introduced fields (added after the user
+	// last saved their settings) get their preset values instead of coming
+	// back `undefined` and forcing every consumer to repeat the fallback.
+	return { ...defaultSettings(), ...s };
 }
 
 export async function saveSettings(s: AppSettings): Promise<void> {
