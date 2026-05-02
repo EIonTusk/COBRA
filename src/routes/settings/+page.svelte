@@ -36,6 +36,8 @@
 	import { setRuntimeBaselines } from '$lib/dossier/fingerprint';
 	import { baselineCalibration } from '$lib/dossier/baselineCalibrationStore.svelte';
 	import BaselineCalibrationProgress from '$lib/dossier/BaselineCalibrationProgress.svelte';
+	import BoardPiecePicker from '$lib/board/BoardPiecePicker.svelte';
+	import { appearance } from '$lib/board/appearance.svelte';
 	import type { AppSettings, DrillIntroSpeed, ScanAccount } from '$lib/types';
 
 	const INTRO_SPEEDS: { id: DrillIntroSpeed; label: string; hint: string }[] = [
@@ -227,6 +229,12 @@
 	function discard() {
 		if (!savedSnapshot) return;
 		settings = JSON.parse(savedSnapshot);
+		// Roll the live preview back too — the user just rejected the
+		// in-flight tweaks they were trying out.
+		if (settings) {
+			appearance.setBoard(settings.boardTheme);
+			appearance.setPieces(settings.pieceSet);
+		}
 	}
 
 	async function restoreDefaults() {
@@ -237,6 +245,8 @@
 		});
 		if (!ok) return;
 		settings = defaultSettings();
+		appearance.setBoard(settings.boardTheme);
+		appearance.setPieces(settings.pieceSet);
 	}
 
 	async function wipe() {
@@ -479,6 +489,25 @@
 						sooner. 0 animates everything that's reached Review state.
 					</p>
 				</div>
+			</section>
+
+			<Separator />
+
+			<!-- Appearance section -->
+			<section style:--i="3b">
+				<div class="mb-4 flex items-baseline gap-3">
+					<h2 class="font-serif text-2xl">Appearance</h2>
+					<span class="eyebrow text-[var(--color-parchment-500)]">Board &amp; pieces</span>
+				</div>
+				<p class="mb-4 max-w-md font-serif text-sm text-[var(--color-parchment-400)] italic">
+					Picks apply everywhere a board is shown. Click a tile to preview live; commit with Save.
+				</p>
+				<BoardPiecePicker
+					boardTheme={settings.boardTheme}
+					pieceSet={settings.pieceSet}
+					onBoardChange={(id) => (settings!.boardTheme = id)}
+					onPieceChange={(id) => (settings!.pieceSet = id)}
+				/>
 			</section>
 
 			<Separator />

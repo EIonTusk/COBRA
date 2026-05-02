@@ -12,6 +12,7 @@
 	import { scanAllAccounts, collectAccountsFromSettings } from '$lib/lichess/mistakeScan';
 	import { applySoundSettings } from '$lib/ui/sounds';
 	import { getEngine } from '$lib/stockfish/engine';
+	import { appearance } from '$lib/board/appearance.svelte';
 	import pkg from '../../package.json';
 
 	const appVersion = pkg.version;
@@ -111,6 +112,12 @@
 		return off;
 	});
 
+	// Re-apply board / piece-set choices to <html> whenever they change.
+	// One effect, lives for the session — the layout never unmounts.
+	$effect(() => {
+		appearance.apply();
+	});
+
 	onMount(async () => {
 		// Hourly background mistake scan: fires once per session if the last
 		// scan is stale and a Lichess account is connected. Silent — results
@@ -120,6 +127,8 @@
 		try {
 			const s = await getSettings();
 			applySoundSettings(s);
+			appearance.setBoard(s.boardTheme);
+			appearance.setPieces(s.pieceSet);
 			const lastScan = s.lastMistakeScanAt ?? 0;
 			if (Date.now() - lastScan < AUTOSCAN_INTERVAL_MS) return;
 			if (collectAccountsFromSettings(s).length === 0) return;
