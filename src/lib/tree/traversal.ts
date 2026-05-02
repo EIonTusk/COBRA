@@ -35,6 +35,38 @@ export function pathToFenKey(
 }
 
 /**
+ * Count the edges reachable by descending children from `startKey` —
+ * the size of the subtree rooted at that position. Cycle-safe: each
+ * (parent → child) edge is counted at most once even when transpositions
+ * make the graph cyclic. Used to surface the blast radius of pruning an
+ * edge ("delete this and N moves below it").
+ *
+ * Note: this counts the subtree *as drawn from `startKey`*, not the set
+ * of nodes that would become unreachable from the root if a particular
+ * incoming edge were cut. A descendant that also transposes into the
+ * main line stays reachable in practice; we still include it here
+ * because the user mental model is "everything I built under this
+ * move", which matches subtree edges.
+ */
+export function countDescendantEdges(nodes: Map<string, RepertoireNode>, startKey: string): number {
+	const visited = new Set<string>([startKey]);
+	const queue: string[] = [startKey];
+	let edges = 0;
+	while (queue.length > 0) {
+		const key = queue.shift()!;
+		const node = nodes.get(key);
+		if (!node) continue;
+		for (const edge of node.children) {
+			edges++;
+			if (visited.has(edge.toFenKey)) continue;
+			visited.add(edge.toFenKey);
+			queue.push(edge.toFenKey);
+		}
+	}
+	return edges;
+}
+
+/**
  * Auto-detected starting position for game analysis: walk the trunk
  * down from the root while each node has exactly one child, stopping
  * at the first node that branches (2+ children) or dead-ends (leaf).
