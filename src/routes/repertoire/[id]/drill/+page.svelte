@@ -150,6 +150,17 @@
 	// pass the hint is suppressed so the user actually drills the move
 	// unaided at least once before FSRS schedules it days out.
 	const introducedKeys = new SvelteSet<string>();
+	// Walks the user failed in this session, with the specific fenKeys that
+	// failed in each — drained at session end as a one-shot retry pass so
+	// the user retries the exact failed move in line context. Tracking by
+	// walk index avoids transposition false positives (a shared prefix's
+	// fenKey appears in multiple walks' `walkFenKeys`); per-walk fenKey
+	// granularity means the drain only re-drills the failed cards, not
+	// every position in the walk. Failures during a Train pass aren't
+	// tracked — the retry is one-shot, FSRS handles persistent lapses
+	// across sessions.
+	const failedWalkIndices = new SvelteSet<number>();
+	const failedKeysByWalk = new SvelteMap<number, SvelteSet<string>>();
 	// Plain variable (not $state): a one-shot "don't play the intro animation
 	// for this card" signal that the chain handler sets before swapping
 	// `chainedCard`. The subsequent $effect reads it to short-circuit.
@@ -892,6 +903,27 @@
 				pendingLapses.delete(ratedCard.fenKey);
 			}
 		}
+		// Mark the *walk* (not just the fenKey) so its end-of-session
+		// retry drains the exact failed cards in line context. Walk-index
+		// granularity avoids transposition false positives; per-walk
+		// fenKey granularity means the drain only re-drills the failed
+		// cards, not every position in the walk. Failures during a Train
+		// pass aren't tracked — keeps the deferred drain one-shot so the
+		// progress bar can't grow unboundedly when the user repeatedly
+		// fails the same line. FSRS Again rescheduling handles persistent
+		// lapses across sessions.
+		if (outcome === 'wrong' && !isIntroductionPass && walkPhase === 'learn') {
+			const failedWalk = walkOfIdx(idx);
+			if (failedWalk >= 0) {
+				failedWalkIndices.add(failedWalk);
+				let keys = failedKeysByWalk.get(failedWalk);
+				if (!keys) {
+					keys = new SvelteSet<string>();
+					failedKeysByWalk.set(failedWalk, keys);
+				}
+				keys.add(ratedCard.fenKey);
+			}
+		}
 		// Track brand-new cards drilled in the first pass of line-walk mode
 		// so the second pass (Train) knows which fenKeys to revisit. The
 		// transition in `advanceQueue` clears `drilledKeys` for everything
@@ -953,6 +985,7 @@
 		// shred the line-by-line ordering).
 		if (outcome === 'wrong' && !isIntroductionPass && !isLineWalkStep && !lineWalkMode) {
 			queue = [...queue, ratedCard];
+			if (plannedKeys.has(ratedCard.fenKey)) sessionPlannedTotal += 1;
 		}
 
 		// On a successful answer, try to continue the line: play the opponent's
@@ -1111,6 +1144,8 @@
 		if (!rep || !settings) return;
 		drilledKeys.clear();
 		introducedKeys.clear();
+		failedWalkIndices.clear();
+		failedKeysByWalk.clear();
 		chainedCard = null;
 		userLastMove = undefined;
 		userPlayedSan = null;
@@ -1148,15 +1183,33 @@
 		pendingLapses.clear();
 		plannedSlotsDone = 0;
 		walkPhase = 'learn';
-		// Brand-new cards always cost two slots in either drill mode: in
-		// `auto` mode the intro pass re-queues a duplicate at runtime, and
-		// in line-walk mode the per-walk Train pass drills every introduced
-		// card again. Reviews drill once in either mode.
+		for (const c of initial) plannedKeys.add(c.fenKey);
+		// Pre-count predictable extras so the denominator stays stable
+		// across the session. Line-walk: a walk containing any !lastReview
+		// card auto-trains after Learn, so it costs walkLength × 2;
+		// review-only walks cost walkLength × 1. Auto mode: brand-new
+		// dueOriginalKeys cards re-queue once for an intro pass, costing
+		// 2 slots; reviews cost 1. Unpredictable extras (auto-mode wrong
+		// requeue, deferred Train of failed walks, leaves cycle) bump
+		// `sessionPlannedTotal` dynamically at their commit sites.
 		let total = 0;
-		for (const c of initial) {
-			plannedKeys.add(c.fenKey);
-			const newDue = !c.lastReview && mode === 'due' && dueOriginalKeys.has(c.fenKey);
-			total += newDue ? 2 : 1;
+		if (walkStarts.length > 0) {
+			for (let w = 0; w < walkStarts.length; w++) {
+				const start = walkStarts[w];
+				const end = walkEndOf(w);
+				let walkLen = 0;
+				let walkHasNew = false;
+				for (let i = start; i < end; i++) {
+					walkLen += 1;
+					if (!initial[i].lastReview) walkHasNew = true;
+				}
+				total += walkLen * (walkHasNew ? 2 : 1);
+			}
+		} else {
+			for (const c of initial) {
+				const newDue = !c.lastReview && mode === 'due' && dueOriginalKeys.has(c.fenKey);
+				total += newDue ? 2 : 1;
+			}
 		}
 		sessionPlannedTotal = total;
 	}
@@ -1493,9 +1546,13 @@
 		if (leaves.length === 0) return 0;
 		const sorted = sortByLineOrder(leaves);
 		for (const c of sorted) drilledKeys.delete(c.fenKey);
-		// Replace rather than append so the counter shows "1/N" → "N/N"
-		// across the leaf lap; the prior queue is fully drilled by now and
-		// keeping it would just inflate the denominator.
+		// Replace rather than append so the prior (fully drilled) cards
+		// don't inflate the queue. Each leaf card cycled here will fire a
+		// fresh `plannedSlotsDone += 1` when its move is accepted, so bump
+		// the denominator by the planned overlap.
+		let extraSlots = 0;
+		for (const c of sorted) if (plannedKeys.has(c.fenKey)) extraSlots++;
+		sessionPlannedTotal += extraSlots;
 		queue = sorted;
 		idx = 0;
 		leavesCycled = true;
@@ -1529,7 +1586,13 @@
 		return w + 1 < walkStarts.length ? walkStarts[w + 1] : queue.length;
 	}
 
-	/** True when any fenKey in this walk has been introduced this session — the signal for "needs a Train pass". */
+	/**
+	 * True when this walk introduced new cards — the signal for the
+	 * IMMEDIATE Train pass that follows Learn. Failure-only walks aren't
+	 * trained here; they're drained at the end of the session via
+	 * `failedWalkIndices` so the user finishes the forward pass first
+	 * instead of being yanked back into a retry mid-stream.
+	 */
 	function walkNeedsTrain(walkIdx: number): boolean {
 		const keys = walkFenKeys[walkIdx];
 		if (!keys) return false;
@@ -1616,6 +1679,14 @@
 				// upstream.
 				const keys = walkFenKeys[currentWalk];
 				for (const k of keys) drilledKeys.delete(k);
+				// This Train pass also retrains any failure that happened on
+				// the Learn pass, so clear the deferred-retry markers.
+				// Failures during this Train pass aren't tracked (the
+				// retry is one-shot per walk). The Train cost was already
+				// pre-counted in `snapshotPlannedSet` because the walk
+				// contained a non-review card.
+				failedWalkIndices.delete(currentWalk);
+				failedKeysByWalk.delete(currentWalk);
 				chainedCard = null;
 				idx = walkStarts[currentWalk];
 				phase = 'pending';
@@ -1652,6 +1723,38 @@
 			// happens when every card in the walk is also in a previously
 			// fully-drilled walk and isn't in introducedKeys). Skip walk.
 			target += 1;
+		}
+		// Forward pass complete. Drain any walks the user failed in on the
+		// forward pass that didn't already trigger an immediate Train via
+		// newly-introduced cards. One walk at a time, in walk-index order.
+		// Only the *failed* cards in each walk are reopened — cards the
+		// user got right stay drilled, so the skip-loop in `advanceQueue`
+		// lands the user directly on each failed move with its prefix as
+		// lead-in. No replay of moves the user already played correctly.
+		while (failedWalkIndices.size > 0) {
+			const next = Math.min(...failedWalkIndices);
+			failedWalkIndices.delete(next);
+			const failedKeys = failedKeysByWalk.get(next);
+			failedKeysByWalk.delete(next);
+			if (!failedKeys || failedKeys.size === 0) continue;
+			let plannedFails = 0;
+			for (const k of failedKeys) {
+				drilledKeys.delete(k);
+				if (plannedKeys.has(k)) plannedFails++;
+			}
+			const walkStart = walkStarts[next];
+			const walkEnd = walkEndOf(next);
+			let firstFailed = walkStart;
+			while (firstFailed < walkEnd && drilledKeys.has(queue[firstFailed].fenKey)) {
+				firstFailed++;
+			}
+			if (firstFailed >= walkEnd) continue;
+			walkPhase = 'train';
+			sessionPlannedTotal += plannedFails;
+			chainedCard = null;
+			idx = firstFailed;
+			phase = 'pending';
+			return;
 		}
 		if (ideaQueue.length > 0) {
 			startIdeaPhase();
