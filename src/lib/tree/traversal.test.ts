@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Edge, RepertoireNode } from '$lib/types';
-import { pathToFenKey, furthestNonBranchingFenKey } from './traversal';
+import { pathToFenKey, furthestNonBranchingFenKey, countDescendantEdges } from './traversal';
 
 function node(fenKey: string, children: Edge[]): RepertoireNode {
 	return { repertoireId: 'r', fenKey, children };
@@ -106,5 +106,58 @@ describe('pathToFenKey', () => {
 		m.set('t', node('t', []));
 		const path = pathToFenKey(m, 'r', 't');
 		expect(path?.map((e) => e.san)).toEqual(['m1', 'fwd']);
+	});
+});
+
+describe('countDescendantEdges', () => {
+	it('returns 0 for a leaf', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('a', node('a', []));
+		expect(countDescendantEdges(m, 'a')).toBe(0);
+	});
+
+	it('counts every edge in a linear chain', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('a', node('a', [edge('e4', 'b')]));
+		m.set('b', node('b', [edge('e5', 'c')]));
+		m.set('c', node('c', [edge('Nf3', 'd')]));
+		m.set('d', node('d', []));
+		expect(countDescendantEdges(m, 'a')).toBe(3);
+	});
+
+	it('counts branching edges', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('a', node('a', [edge('e4', 'b'), edge('d4', 'c')]));
+		m.set('b', node('b', [edge('e5', 'd')]));
+		m.set('c', node('c', []));
+		m.set('d', node('d', []));
+		expect(countDescendantEdges(m, 'a')).toBe(3);
+	});
+
+	it('counts a transposing edge once even when two parents reach the same child', () => {
+		// Two parents both point at 't'; t is reached twice but its outgoing
+		// edge should still only be counted once.
+		const m = new Map<string, RepertoireNode>();
+		m.set('a', node('a', [edge('m1', 'b'), edge('m2', 'c')]));
+		m.set('b', node('b', [edge('x', 't')]));
+		m.set('c', node('c', [edge('y', 't')]));
+		m.set('t', node('t', [edge('z', 'leaf')]));
+		m.set('leaf', node('leaf', []));
+		// Edges: a→b, a→c, b→t, c→t, t→leaf  → 5
+		expect(countDescendantEdges(m, 'a')).toBe(5);
+	});
+
+	it('does not hang on a cycle', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('m1', 'a')]));
+		m.set('a', node('a', [edge('back', 'r')]));
+		// r→a, a→r — both counted, then cycle stops.
+		expect(countDescendantEdges(m, 'r')).toBe(2);
+	});
+
+	it('returns 0 for an unknown key', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('a', node('a', []));
+		expect(countDescendantEdges(m, 'missing')).toBe(0);
 	});
 });

@@ -31,6 +31,7 @@
 	import { adviseMoves, type StyleAdvice } from '$lib/dossier/styleAdvisor';
 	import type { DossierFingerprint } from '$lib/dossier/fingerprint';
 	import type { OpeningFitSummary } from '$lib/dossier/openingFit';
+	import { Button } from '$lib/ui';
 
 	interface Props {
 		fen: string;
@@ -99,6 +100,13 @@
 		 * `?` next to the saved-bookmark glyph.
 		 */
 		userWdlBySan?: Map<string, { white: number; draws: number; black: number; games: number }>;
+		/**
+		 * Per-SAN count of how many edges sit beneath the user's saved move
+		 * at this position. Surfaced in the delete-confirm dialog and in the
+		 * right-click menu so the user sees the blast radius before pruning.
+		 * Missing entries are treated as zero.
+		 */
+		subtreeSizeBySan?: Map<string, number>;
 	}
 	let {
 		fen,
@@ -112,15 +120,17 @@
 		fingerprint = null,
 		openingFit = null,
 		headerRight,
-		userWdlBySan
+		userWdlBySan,
+		subtreeSizeBySan
 	}: Props = $props();
 
-	// Right-click context menu for moves already in the tree.
+	// Right-click context menu for moves already in the tree. Kept as a
+	// power-user shortcut alongside the primary bookmark-click flow.
 	let menuSan = $state<string | null>(null);
 	let menuUci = $state<string | null>(null);
 	let menuX = $state(0);
 	let menuY = $state(0);
-	function openContextMenu(e: MouseEvent, m: ExplorerMove) {
+	function openContextMenu(e: MouseEvent, m: { san: string; uci: string }) {
 		if (!knownSans?.has(m.san) || !ondelete) return;
 		e.preventDefault();
 		menuSan = m.san;
@@ -132,9 +142,51 @@
 		menuSan = null;
 		menuUci = null;
 	}
-	function confirmDelete() {
-		if (menuSan && menuUci) ondelete?.(menuSan, menuUci);
+
+	// Confirm dialog driven by clicking the bookmark glyph (or the Del/
+	// Backspace keyboard shortcut on a focused row). Shows the blast
+	// radius — the count of moves saved beneath the move being pruned —
+	// so a single tap on a small target can't silently nuke a deep
+	// subline.
+	let confirmSan = $state<string | null>(null);
+	let confirmUci = $state<string | null>(null);
+	let confirmCount = $state(0);
+	function openConfirm(m: { san: string; uci: string }) {
+		if (!knownSans?.has(m.san) || !ondelete) return;
 		closeContextMenu();
+		confirmSan = m.san;
+		confirmUci = m.uci;
+		confirmCount = subtreeSizeBySan?.get(m.san) ?? 0;
+	}
+	function closeConfirm() {
+		confirmSan = null;
+		confirmUci = null;
+		confirmCount = 0;
+	}
+	function commitConfirm() {
+		if (confirmSan && confirmUci) ondelete?.(confirmSan, confirmUci);
+		closeConfirm();
+	}
+	// Right-click menu's Delete also goes through the confirm dialog so
+	// both entry points show the same blast-radius preview.
+	function confirmFromMenu() {
+		if (!menuSan || !menuUci) return;
+		const san = menuSan;
+		const uci = menuUci;
+		closeContextMenu();
+		openConfirm({ san, uci });
+	}
+
+	function handleRowKey(e: KeyboardEvent, m: { san: string; uci: string }) {
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			onselect?.(m.san);
+			return;
+		}
+		if ((e.key === 'Delete' || e.key === 'Backspace') && knownSans?.has(m.san) && ondelete) {
+			e.preventDefault();
+			openConfirm(m);
+		}
 	}
 
 	let result = $state<ExplorerResponse | null>(null);
@@ -585,11 +637,19 @@
 				<ul class="space-y-0.5">
 					{#each engineRows as r (r.uci)}
 						<li>
-							<button
-								type="button"
-								onclick={() => onselect?.(r.san)}
-								disabled={!onselect}
-								class="group grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-1.5 pl-1.5 text-left transition-colors enabled:hover:bg-[var(--color-ink-800)] disabled:cursor-default lg:gap-2"
+							<!-- role + tabindex are gated by the same `onselect` condition;
+								 static analysis can't see that, hence the directive below. -->
+							<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+							<div
+								role={onselect ? 'button' : undefined}
+								tabindex={onselect ? 0 : undefined}
+								aria-disabled={!onselect ? 'true' : undefined}
+								onclick={onselect ? () => onselect?.(r.san) : undefined}
+								onkeydown={onselect ? (e) => handleRowKey(e, r) : undefined}
+								oncontextmenu={(e) => openContextMenu(e, r)}
+								class="group grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-1.5 pl-1.5 text-left transition-colors lg:gap-2 {onselect
+									? 'cursor-pointer hover:bg-[var(--color-ink-800)]'
+									: 'cursor-default'}"
 							>
 								<span
 									class="grid grid-cols-[2.25rem_1fr] items-center gap-1 font-mono text-sm text-[var(--color-parchment-100)]"
@@ -597,10 +657,33 @@
 									<span class="flex items-center gap-1">
 										<span class="relative inline-block leading-none whitespace-nowrap">
 											{#if knownSans?.has(r.san)}
-												<Bookmark
-													class="absolute right-full bottom-0 mr-0.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
-													strokeWidth={1.5}
-												/>
+												{#if ondelete}
+													<button
+														type="button"
+														onclick={(e) => {
+															e.stopPropagation();
+															openConfirm(r);
+														}}
+														onkeydown={(e) => {
+															// Don't let Enter/Space on the bookmark also
+															// trigger the row's onselect.
+															if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+														}}
+														title="Delete {r.san} from your tree"
+														aria-label="Delete {r.san} from your tree"
+														class="group/bookmark absolute right-full bottom-0 -m-2 mr-0.5 cursor-pointer p-2 leading-none"
+													>
+														<Bookmark
+															class="size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)] transition-colors group-hover/bookmark:fill-[var(--color-oxblood-300)] group-hover/bookmark:text-[var(--color-oxblood-300)]"
+															strokeWidth={1.5}
+														/>
+													</button>
+												{:else}
+													<Bookmark
+														class="absolute right-full bottom-0 mr-0.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
+														strokeWidth={1.5}
+													/>
+												{/if}
 											{/if}
 											{r.san}
 										</span>
@@ -610,7 +693,7 @@
 								<span class="text-[10px] text-[var(--color-parchment-500)] italic">engine only</span
 								>
 								<span></span>
-							</button>
+							</div>
 						</li>
 					{/each}
 				</ul>
@@ -628,12 +711,19 @@
 					{@const advice = adviceByUci.get(m.uci)}
 					{@const underperform = underperformInfo(m)}
 					<li>
-						<button
-							type="button"
-							onclick={() => onselect?.(m.san)}
+						<!-- role + tabindex are gated by the same `onselect` condition;
+							 static analysis can't see that, hence the directive below. -->
+						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+						<div
+							role={onselect ? 'button' : undefined}
+							tabindex={onselect ? 0 : undefined}
+							aria-disabled={!onselect ? 'true' : undefined}
+							onclick={onselect ? () => onselect?.(m.san) : undefined}
+							onkeydown={onselect ? (e) => handleRowKey(e, m) : undefined}
 							oncontextmenu={(e) => openContextMenu(e, m)}
-							disabled={!onselect}
-							class="group grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-1.5 pl-1.5 text-left transition-colors enabled:hover:bg-[var(--color-ink-800)] disabled:cursor-default lg:gap-2"
+							class="group grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-1.5 pl-1.5 text-left transition-colors lg:gap-2 {onselect
+								? 'cursor-pointer hover:bg-[var(--color-ink-800)]'
+								: 'cursor-default'}"
 						>
 							<!-- Inner grid: SAN / eval in fixed columns so the move
 								 codes and engine evals each line up vertically
@@ -654,13 +744,39 @@
 										 matter the overall row height. -->
 									<span class="relative inline-block leading-none whitespace-nowrap">
 										{#if knownSans?.has(m.san)}
-											<Bookmark
-												class="absolute right-full bottom-0 mr-0.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
-												strokeWidth={1.5}
-												aria-label="Already in your tree"
-											>
-												<title>Already in your tree</title>
-											</Bookmark>
+											{#if ondelete}
+												<!-- The bookmark is the primary delete entry point.
+													 Clicking it opens a confirm dialog that names
+													 the blast radius (the move + its descendants).
+													 Padded hit area extends well past the 10px
+													 visible icon for touch users. -->
+												<button
+													type="button"
+													onclick={(e) => {
+														e.stopPropagation();
+														openConfirm(m);
+													}}
+													onkeydown={(e) => {
+														if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+													}}
+													title="Delete {m.san} from your tree"
+													aria-label="Delete {m.san} from your tree"
+													class="group/bookmark absolute right-full bottom-0 -m-2 mr-0.5 cursor-pointer p-2 leading-none"
+												>
+													<Bookmark
+														class="size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)] transition-colors group-hover/bookmark:fill-[var(--color-oxblood-300)] group-hover/bookmark:text-[var(--color-oxblood-300)]"
+														strokeWidth={1.5}
+													/>
+												</button>
+											{:else}
+												<Bookmark
+													class="absolute right-full bottom-0 mr-0.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
+													strokeWidth={1.5}
+													aria-label="Already in your tree"
+												>
+													<title>Already in your tree</title>
+												</Bookmark>
+											{/if}
 											{#if underperform}
 												<!-- Shown only on saved rows per the design: a
 													 question mark to the left of the bookmark
@@ -779,7 +895,7 @@
 									{totalAll > 0 ? Math.round((totalGames(m) / totalAll) * 100) : 0}%
 								</span>
 							</div>
-						</button>
+						</div>
 					</li>
 				{/each}
 			</ul>
@@ -794,7 +910,9 @@
 
 {#if menuSan}
 	<!-- Context menu for right-click-delete. Backdrop closes on click;
-		 menu is fixed-positioned at the cursor. -->
+		 menu is fixed-positioned at the cursor. The "Delete" entry now
+		 funnels into the same confirm dialog used by bookmark-click so
+		 both paths show the blast-radius preview. -->
 	<div
 		role="presentation"
 		class="fixed inset-0 z-40"
@@ -816,11 +934,54 @@
 		</div>
 		<button
 			type="button"
-			onclick={confirmDelete}
+			onclick={confirmFromMenu}
 			class="flex items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--color-oxblood-300)] transition-colors hover:bg-[var(--color-ink-800)]"
 		>
-			Delete from tree
+			Delete from tree…
 		</button>
+	</div>
+{/if}
+
+{#if confirmSan}
+	<!-- Delete confirmation. Triggered by clicking the bookmark glyph on a
+		 saved row, by Del/Backspace on a focused row, or by the right-click
+		 menu's Delete entry. The blast-radius count comes from the parent
+		 (subtreeSizeBySan) so the user sees how much they're about to drop
+		 in addition to the move itself. -->
+	<div
+		role="presentation"
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+		onclick={(e) => {
+			if (e.target === e.currentTarget) closeConfirm();
+		}}
+		onkeydown={(e) => {
+			if (e.key === 'Escape') closeConfirm();
+		}}
+	>
+		<div
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="explorer-confirm-delete-title"
+			class="ink-panel w-full max-w-sm rounded-[6px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-5 shadow-lg"
+		>
+			<h3 id="explorer-confirm-delete-title" class="eyebrow mb-2 text-[var(--color-parchment-200)]">
+				Delete from tree
+			</h3>
+			<p class="mb-4 font-serif text-sm text-[var(--color-parchment-300)]">
+				{#if confirmCount === 0}
+					Delete <span class="font-mono text-[var(--color-parchment-100)]">{confirmSan}</span>
+					from your tree?
+				{:else}
+					Delete <span class="font-mono text-[var(--color-parchment-100)]">{confirmSan}</span>
+					and the {confirmCount}
+					{confirmCount === 1 ? 'move' : 'moves'} you've prepared beneath it?
+				{/if}
+			</p>
+			<div class="flex justify-end gap-2">
+				<Button variant="secondary" size="sm" onclick={closeConfirm}>Cancel</Button>
+				<Button variant="destructive" size="sm" onclick={commitConfirm}>Delete</Button>
+			</div>
+		</div>
 	</div>
 {/if}
 

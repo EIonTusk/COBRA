@@ -51,7 +51,11 @@
 		sanAtFen
 	} from '$lib/chess/position';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
-	import { pathToFenKey, furthestNonBranchingFenKey } from '$lib/tree/traversal';
+	import {
+		pathToFenKey,
+		furthestNonBranchingFenKey,
+		countDescendantEdges
+	} from '$lib/tree/traversal';
 	import {
 		collectMissingMoves,
 		collectSaveableLeaves,
@@ -191,6 +195,17 @@
 	const knownChildSans = $derived<Set<string>>(
 		new Set((currentNode?.children ?? []).map((e) => e.san))
 	);
+	// Subtree size per saved continuation at this position. The Explorer
+	// surfaces the count in its delete-confirm dialog so the user sees how
+	// much they're about to drop in addition to the move itself.
+	const subtreeSizeBySan = $derived.by<Map<string, number>>(() => {
+		const out = new SvelteMap<string, number>();
+		if (!currentNode) return out;
+		for (const e of currentNode.children) {
+			out.set(e.san, countDescendantEdges(nodes, e.toFenKey));
+		}
+		return out;
+	});
 
 	// Load per-SAN user WDL for the current position whenever rep or
 	// fenKey changes. Scoped to this repertoire's side only — the store
@@ -2051,6 +2066,7 @@
 					onselect={addFromExplorer}
 					ondelete={deleteFromExplorer}
 					knownSans={knownChildSans}
+					{subtreeSizeBySan}
 					{engineEvalByUci}
 					{engineRows}
 					{transposesSans}
