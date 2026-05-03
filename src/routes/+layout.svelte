@@ -2,6 +2,7 @@
 	import './layout.css';
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { base, resolve } from '$app/paths';
 	import { Menu, X, Moon, Sun } from 'lucide-svelte';
 	import { ModeWatcher, mode, toggleMode } from 'mode-watcher';
@@ -13,6 +14,7 @@
 	import { applySoundSettings } from '$lib/ui/sounds';
 	import { getEngine } from '$lib/stockfish/engine';
 	import { appearance } from '$lib/board/appearance.svelte';
+	import { openExternal, isExternalHttpUrl } from '$lib/platform/openExternal';
 	import pkg from '../../package.json';
 
 	const appVersion = pkg.version;
@@ -118,6 +120,110 @@
 		appearance.apply();
 	});
 
+	// Tauri-only: route external link clicks to the OS browser instead of
+	// the in-app WebView. Without this, `<a target="_blank" href="https://…">`
+	// either spawns a sandboxed webview (no saved passwords / cookies) or
+	// navigates the main webview off the app entirely. The opener plugin
+	// hands the URL to the user's real browser. Web builds keep the native
+	// `<a>` behaviour the browser already implements correctly.
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		// Cheap synchronous check — `isTauri()` from @tauri-apps/api/core
+		// just looks for `__TAURI_INTERNALS__` on window. Skip the import
+		// to keep this hot-path tiny.
+		const inTauri = '__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window;
+		if (!inTauri) return;
+		function onClick(e: MouseEvent) {
+			// Let modifier-clicks (cmd/ctrl/middle-click "open in new tab")
+			// fall through to default handling — those users know what they
+			// want; we shouldn't second-guess.
+			if (e.defaultPrevented) return;
+			if (e.button !== 0) return;
+			if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+			const target = e.target instanceof Element ? e.target : null;
+			const a = target?.closest('a');
+			if (!a) return;
+			const href = a.getAttribute('href');
+			if (!href) return;
+			if (!isExternalHttpUrl(href)) return;
+			e.preventDefault();
+			void openExternal(new URL(href, window.location.href).href);
+		}
+		document.addEventListener('click', onClick);
+		return () => document.removeEventListener('click', onClick);
+	});
+
+	// Tauri-only: receive `cobra://…` deep-links from the OS and route the
+	// SvelteKit app to the matching internal page. Currently the only
+	// scheme we handle is the Lichess OAuth callback — the user authorises
+	// in their system browser, Lichess redirects to
+	// `cobra://auth/lichess/callback?code=…&state=…`, the OS hands the URL
+	// to us, and we hop the router onto the existing /auth/lichess/callback
+	// page so it can finish the token exchange and surface success/error.
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		const inTauri = '__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window;
+		if (!inTauri) return;
+
+		let cancelled = false;
+		let unlisten: (() => void) | undefined;
+
+		function dispatch(rawUrls: string[] | null | undefined) {
+			if (!rawUrls) return;
+			for (const raw of rawUrls) {
+				let parsed: URL;
+				try {
+					parsed = new URL(raw);
+				} catch {
+					continue;
+				}
+				if (parsed.protocol !== 'cobra:') continue;
+				// `new URL("cobra://auth/lichess/callback?…")` parses host="auth"
+				// and pathname="/lichess/callback". Stitch them back together
+				// for matching so the path is whole regardless of how the OS
+				// formatted the incoming URL.
+				const fullPath = `${parsed.host}${parsed.pathname}`.replace(/\/+$/, '');
+				if (fullPath !== 'auth/lichess/callback') continue;
+				// Reuse the existing callback page so users see the same
+				// "Linking your account…" UX whether they came from web or
+				// the deep-link. The eslint rule wants the whole string to
+				// be `resolve(...)`-prefixed; we *are* resolving the route,
+				// then tacking on an arbitrary query string the OS handed us.
+				// eslint-disable-next-line svelte/no-navigation-without-resolve
+				void goto(resolve('/auth/lichess/callback') + parsed.search);
+			}
+		}
+
+		(async () => {
+			try {
+				const dl = await import('@tauri-apps/plugin-deep-link');
+				// Cold-start: the app may have just been launched *by* the
+				// callback URL, in which case the URL is queued from before
+				// our listener was registered.
+				try {
+					const startUrls = await dl.getCurrent();
+					if (!cancelled) dispatch(startUrls);
+				} catch (e) {
+					console.warn('[cobra] deep-link getCurrent failed:', e);
+				}
+				if (cancelled) return;
+				const off = await dl.onOpenUrl((urls) => dispatch(urls));
+				if (cancelled) {
+					off();
+				} else {
+					unlisten = off;
+				}
+			} catch (e) {
+				console.warn('[cobra] deep-link plugin unavailable:', e);
+			}
+		})();
+
+		return () => {
+			cancelled = true;
+			if (unlisten) unlisten();
+		};
+	});
+
 	onMount(async () => {
 		// Hourly background mistake scan: fires once per session if the last
 		// scan is stale and a Lichess account is connected. Silent — results
@@ -190,7 +296,7 @@
 
 <div class="flex min-h-screen flex-col">
 	<header
-		class="sticky top-0 z-40 border-b border-[var(--color-ink-800)] bg-[var(--color-ink-950)]/85 backdrop-blur-md"
+		class="safe-pad-top sticky top-0 z-40 border-b border-[var(--color-ink-800)] bg-[var(--color-ink-950)]/85 backdrop-blur-md"
 	>
 		<div class="mx-auto flex h-14 max-w-7xl items-center gap-4 px-4 sm:gap-8 sm:px-6">
 			<!-- Mobile hamburger — visible only below md, toggles the drawer. -->
@@ -266,12 +372,12 @@
 			<button
 				type="button"
 				aria-label="Close menu"
-				class="fixed inset-0 top-14 z-30 bg-[var(--color-ink-950)]/60 backdrop-blur-sm md:hidden"
+				class="safe-top-header fixed inset-0 z-30 bg-[var(--color-ink-950)]/60 backdrop-blur-sm md:hidden"
 				onclick={() => (menuOpen = false)}
 			></button>
 			<nav
 				id="cobra-mobile-nav"
-				class="ot-fade fixed inset-x-0 top-14 z-40 border-b border-[var(--color-ink-800)] bg-[var(--color-ink-950)] shadow-[0_12px_24px_-8px_rgba(0,0,0,0.6)] md:hidden"
+				class="ot-fade safe-top-header fixed inset-x-0 z-40 border-b border-[var(--color-ink-800)] bg-[var(--color-ink-950)] shadow-[0_12px_24px_-8px_rgba(0,0,0,0.6)] md:hidden"
 				aria-label="Mobile"
 			>
 				<ul class="flex flex-col py-2">
@@ -304,7 +410,7 @@
 		{@render children()}
 	</main>
 
-	<footer class="mt-auto border-t border-[var(--color-ink-800)]">
+	<footer class="safe-pad-bottom mt-auto border-t border-[var(--color-ink-800)]">
 		<div
 			class="mx-auto flex max-w-7xl flex-col items-start justify-between gap-3 px-4 py-5 text-xs text-[var(--color-parchment-500)] sm:flex-row sm:items-center sm:gap-4 sm:px-6"
 		>

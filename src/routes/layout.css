@@ -238,6 +238,29 @@ body {
 	margin: 0;
 }
 
+/* Mobile system-bar safe areas.
+   The Android Tauri WebView and iOS WKWebView both render edge-to-edge,
+   so without these utilities our sticky header would draw under the OS
+   status bar and the footer/home-indicator could swallow content.
+   Pages that pin elements top:0 / bottom:0 should reach for these so
+   the OS chrome reads against the app's own surface, not over content. */
+.safe-pad-top {
+	padding-top: env(safe-area-inset-top, 0px);
+}
+.safe-pad-bottom {
+	padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+/* Offset for the mobile drawer / its backdrop: header height (h-14 = 3.5rem)
+   plus whatever the OS reserves for the status bar above it. */
+.safe-top-header {
+	top: calc(3.5rem + env(safe-area-inset-top, 0px));
+}
+/* Toast column anchor: keep notifications below the header *and* the
+   status bar, matching the original 4rem offset on devices with no inset. */
+.safe-top-toaster {
+	top: calc(4rem + env(safe-area-inset-top, 0px));
+}
+
 html {
 	background: var(--color-ink-950);
 	/* A whisper of warmth — subtle noise from radial-gradient atmospherics. */
