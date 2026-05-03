@@ -3,20 +3,39 @@
  *
  * Lichess doesn't require app registration — any URL works as `client_id`
  * and the redirect_uri is trusted as long as it matches what was sent with
- * the authorisation request. We use the app's origin + `/auth/lichess/callback`.
+ * the authorisation request. On the web we use the app's origin +
+ * `/auth/lichess/callback`. In a Tauri build we use a custom scheme
+ * (`cobra://auth/lichess/callback`) so Lichess can hand control back to
+ * the OS, which routes the URL to our app via the deep-link plugin.
  *
- * Flow:
+ * Flow (web):
  *   1. startOAuth()     — generate PKCE verifier + challenge, stash the
- *                         verifier in sessionStorage, redirect to Lichess.
- *   2. (user authorises)
+ *                         verifier, redirect the current tab to Lichess.
+ *   2. (user authorises in the same tab)
  *   3. Lichess redirects back with ?code=...&state=...
- *   4. handleCallback() — swap the code for an access token and persist it
- *                         in AppSettings.
+ *   4. handleCallback() — swap the code for an access token and persist it.
+ *
+ * Flow (Tauri desktop / Android / iOS):
+ *   1. startOAuth()     — same PKCE prep, but open the auth URL in the
+ *                         user's *system* browser (where saved passwords
+ *                         and SSO live). The Tauri app stays in place.
+ *   2. (user authorises in their real browser)
+ *   3. Lichess redirects to `cobra://auth/lichess/callback?...` — the OS
+ *                         hands that to us via the deep-link listener
+ *                         registered in the layout.
+ *   4. The listener navigates the SvelteKit router to
+ *      `/auth/lichess/callback?...`, which calls handleCallback().
+ *
+ * Storage note: the PKCE verifier lives in localStorage (not session) so
+ * it survives Android suspending or killing the app while the user is
+ * over in their browser; we clear it eagerly in handleCallback once it's
+ * been consumed.
  */
 
 import { base } from '$app/paths';
 
 import { getSettings, saveSettings } from '$lib/storage/settings';
+import { openExternal } from '$lib/platform/openExternal';
 import type { LichessOAuthToken } from '$lib/types';
 
 const AUTH_URL = 'https://lichess.org/oauth';
@@ -29,6 +48,19 @@ const STATE_KEY = 'ot:lichess:pkce-state';
 // handleCallback. Lichess grants all-or-nothing: if the callback arrives
 // without an `error` param, the user accepted every scope we requested.
 const SCOPES_KEY = 'ot:lichess:pkce-scopes';
+
+/** Custom URL scheme registered with Tauri's deep-link plugin. Must match
+ *  `plugins.deep-link.{mobile,desktop}.scheme[s]` in `tauri.conf.json`. */
+const TAURI_REDIRECT_URI = 'cobra://auth/lichess/callback';
+/** Lichess accepts any URL as client_id — using the same custom scheme
+ *  keeps web and Tauri requests visually consistent in Lichess's consent
+ *  screen ("authorise cobra://app to…"). */
+const TAURI_CLIENT_ID = 'cobra://app';
+
+function isTauriRuntime(): boolean {
+	if (typeof window === 'undefined') return false;
+	return '__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window;
+}
 
 /**
  * Scopes needed to read and write private Lichess studies from the
@@ -63,12 +95,15 @@ export function tokenHasChallengeScopes(t: LichessOAuthToken | null | undefined)
 
 // Include the SvelteKit `base` path so deployments under a subpath
 // (e.g. GitHub Pages at /COBRA) use the correct callback URL. Lichess
-// echoes this back verbatim, so it must match exactly.
+// echoes this back verbatim, so it must match exactly. In the Tauri
+// build we point at the custom scheme instead — see header docs.
 function redirectUri(): string {
+	if (isTauriRuntime()) return TAURI_REDIRECT_URI;
 	return `${window.location.origin}${base}/auth/lichess/callback`;
 }
 
 function clientId(): string {
+	if (isTauriRuntime()) return TAURI_CLIENT_ID;
 	return `${window.location.origin}${base}/`;
 }
 
@@ -87,16 +122,21 @@ async function generatePkce(): Promise<{ verifier: string; challenge: string }> 
 }
 
 /**
- * Kick off the OAuth flow. Navigates away; callers don't come back from this.
- * `scopes` defaults to none — the Lichess explorer and public game history
- * don't require any special scope.
+ * Kick off the OAuth flow. On the web this navigates the current tab away
+ * to Lichess; in Tauri it instead opens Lichess in the user's system
+ * browser and the Tauri app stays put — see the deep-link handler in the
+ * layout for the return path. `scopes` defaults to none — the Lichess
+ * explorer and public game history don't require any special scope.
  */
 export async function startOAuth(scopes: string[] = []): Promise<void> {
 	const { verifier, challenge } = await generatePkce();
 	const state = base64url(crypto.getRandomValues(new Uint8Array(16)));
-	sessionStorage.setItem(VERIFIER_KEY, verifier);
-	sessionStorage.setItem(STATE_KEY, state);
-	sessionStorage.setItem(SCOPES_KEY, scopes.join(' '));
+	// localStorage (not sessionStorage) so the verifier survives the OS
+	// suspending/killing our app while the user is in their browser.
+	// `handleCallback` clears these on success or failure.
+	localStorage.setItem(VERIFIER_KEY, verifier);
+	localStorage.setItem(STATE_KEY, state);
+	localStorage.setItem(SCOPES_KEY, scopes.join(' '));
 
 	const params = new URLSearchParams({
 		response_type: 'code',
@@ -108,13 +148,27 @@ export async function startOAuth(scopes: string[] = []): Promise<void> {
 	});
 	if (scopes.length > 0) params.set('scope', scopes.join(' '));
 
-	window.location.href = `${AUTH_URL}?${params.toString()}`;
+	const url = `${AUTH_URL}?${params.toString()}`;
+	if (isTauriRuntime()) {
+		// Hand the URL to the OS so it lands in the user's real browser
+		// (where their Lichess login + 2FA lives). The deep-link listener
+		// picks the callback up when Lichess redirects to `cobra://…`.
+		await openExternal(url);
+		return;
+	}
+	window.location.href = url;
 }
 
 export async function handleCallback(code: string, state: string): Promise<void> {
-	const savedVerifier = sessionStorage.getItem(VERIFIER_KEY);
-	const savedState = sessionStorage.getItem(STATE_KEY);
-	const savedScopes = sessionStorage.getItem(SCOPES_KEY) ?? '';
+	// Read from localStorage (where startOAuth wrote them). Older sessions
+	// might have used sessionStorage; fall back so a user mid-flow at the
+	// time of the upgrade doesn't get a "missing verifier" error.
+	const savedVerifier = localStorage.getItem(VERIFIER_KEY) ?? sessionStorage.getItem(VERIFIER_KEY);
+	const savedState = localStorage.getItem(STATE_KEY) ?? sessionStorage.getItem(STATE_KEY);
+	const savedScopes = localStorage.getItem(SCOPES_KEY) ?? sessionStorage.getItem(SCOPES_KEY) ?? '';
+	localStorage.removeItem(VERIFIER_KEY);
+	localStorage.removeItem(STATE_KEY);
+	localStorage.removeItem(SCOPES_KEY);
 	sessionStorage.removeItem(VERIFIER_KEY);
 	sessionStorage.removeItem(STATE_KEY);
 	sessionStorage.removeItem(SCOPES_KEY);

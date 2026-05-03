@@ -41,5 +41,11 @@
 		"linux": {
 			"deb": { "depends": [] }
 		}
+	},
+	"plugins": {
+		"deep-link": {
+			"mobile": [{ "scheme": ["cobra"], "appLink": false }],
+			"desktop": { "schemes": ["cobra"] }
+		}
 	}
 }

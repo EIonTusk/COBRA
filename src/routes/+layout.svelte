@@ -2,6 +2,7 @@
 	import './layout.css';
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { base, resolve } from '$app/paths';
 	import { Menu, X, Moon, Sun } from 'lucide-svelte';
 	import { ModeWatcher, mode, toggleMode } from 'mode-watcher';
@@ -150,6 +151,77 @@
 		}
 		document.addEventListener('click', onClick);
 		return () => document.removeEventListener('click', onClick);
+	});
+
+	// Tauri-only: receive `cobra://…` deep-links from the OS and route the
+	// SvelteKit app to the matching internal page. Currently the only
+	// scheme we handle is the Lichess OAuth callback — the user authorises
+	// in their system browser, Lichess redirects to
+	// `cobra://auth/lichess/callback?code=…&state=…`, the OS hands the URL
+	// to us, and we hop the router onto the existing /auth/lichess/callback
+	// page so it can finish the token exchange and surface success/error.
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		const inTauri = '__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window;
+		if (!inTauri) return;
+
+		let cancelled = false;
+		let unlisten: (() => void) | undefined;
+
+		function dispatch(rawUrls: string[] | null | undefined) {
+			if (!rawUrls) return;
+			for (const raw of rawUrls) {
+				let parsed: URL;
+				try {
+					parsed = new URL(raw);
+				} catch {
+					continue;
+				}
+				if (parsed.protocol !== 'cobra:') continue;
+				// `new URL("cobra://auth/lichess/callback?…")` parses host="auth"
+				// and pathname="/lichess/callback". Stitch them back together
+				// for matching so the path is whole regardless of how the OS
+				// formatted the incoming URL.
+				const fullPath = `${parsed.host}${parsed.pathname}`.replace(/\/+$/, '');
+				if (fullPath !== 'auth/lichess/callback') continue;
+				// Reuse the existing callback page so users see the same
+				// "Linking your account…" UX whether they came from web or
+				// the deep-link. The eslint rule wants the whole string to
+				// be `resolve(...)`-prefixed; we *are* resolving the route,
+				// then tacking on an arbitrary query string the OS handed us.
+				// eslint-disable-next-line svelte/no-navigation-without-resolve
+				void goto(resolve('/auth/lichess/callback') + parsed.search);
+			}
+		}
+
+		(async () => {
+			try {
+				const dl = await import('@tauri-apps/plugin-deep-link');
+				// Cold-start: the app may have just been launched *by* the
+				// callback URL, in which case the URL is queued from before
+				// our listener was registered.
+				try {
+					const startUrls = await dl.getCurrent();
+					if (!cancelled) dispatch(startUrls);
+				} catch (e) {
+					console.warn('[cobra] deep-link getCurrent failed:', e);
+				}
+				if (cancelled) return;
+				const off = await dl.onOpenUrl((urls) => dispatch(urls));
+				if (cancelled) {
+					off();
+				} else {
+					unlisten = off;
+				}
+			} catch (e) {
+				console.warn('[cobra] deep-link plugin unavailable:', e);
+			}
+		})();
+
+		return () => {
+			cancelled = true;
+			if (unlisten) unlisten();
+		};
 	});
 
 	onMount(async () => {
