@@ -186,6 +186,42 @@ export function chooserForOpeningName(
 	return familyChooser(ecoFamily(eco));
 }
 
+/**
+ * Split a PGN `[Opening]` tag into family root + full "Family: Main
+ * variation" label. Lichess / chess.com both populate this header with
+ * their canonical naming (e.g. `"Sicilian Defense: Najdorf Variation,
+ * English Attack"`), which is our ground truth for distinguishing
+ * QGA/QGD/Slav etc. — finer than `ecoFamily()`, which collapses all of
+ * D20-D69 into a single "Queen's Gambit" bucket.
+ *
+ * The family root is everything before the first `:` — the primary
+ * grouping key, so all Najdorf sub-lines stay together under "Sicilian
+ * Defense". The label keeps the main variation (before the first comma
+ * of the post-colon segment) so callers can break a row down by its
+ * top variations. When the header is missing we fall back to the
+ * coarse ECO family and no variation. The fallback is a string so the
+ * return type is uniform across both code paths.
+ */
+export function parseOpeningName(
+	openingName: string | null | undefined,
+	eco: string | null | undefined
+): { family: string; label: string } {
+	if (openingName && openingName.trim().length > 0) {
+		const name = openingName.trim();
+		const colonIdx = name.indexOf(':');
+		if (colonIdx < 0) return { family: name, label: name };
+		const family = name.slice(0, colonIdx).trim();
+		const detail = name.slice(colonIdx + 1).trim();
+		const mainVariation = detail.split(',')[0].trim();
+		return {
+			family,
+			label: mainVariation ? `${family}: ${mainVariation}` : family
+		};
+	}
+	const coarse = ecoFamily(eco);
+	return { family: coarse, label: coarse };
+}
+
 /** Map ECO code to family. Returns 'Unknown' for missing/malformed input. */
 export function ecoFamily(eco: string | null | undefined): OpeningFamily {
 	if (!eco) return 'Unknown';

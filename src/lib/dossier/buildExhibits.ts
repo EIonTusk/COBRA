@@ -12,7 +12,7 @@ import { analysePieceAffinity } from './pieceAffinity';
 import { analyseStructureTaste } from './structureTaste';
 import { analyseExchangePropensity } from './exchangePropensity';
 import { analysePlanTaste } from './planTaste';
-import { analyseOpeningFit } from './openingFit';
+import { buildOpeningProfile } from './openingProfile';
 import { analyseEndgameSubtypes } from './endgameSubtypes';
 import { analyseTacticalMotifs } from './tacticalMotifs';
 import { analyseCalculationDepth } from './calculationDepth';
@@ -36,7 +36,7 @@ export function buildExhibits(result: DossierScanResult) {
 		structureTaste: analyseStructureTaste(result.classified),
 		exchangePropensity: analyseExchangePropensity(result.classified),
 		planTaste: analysePlanTaste(result.classified),
-		openingFit: analyseOpeningFit(result.classified, evalMoves),
+		openingFit: buildOpeningProfile(result.classified, evalMoves),
 		endgameSubtypes: analyseEndgameSubtypes(result.classified, evalMoves),
 		tacticalMotifs: analyseTacticalMotifs(evalMoves),
 		calculationDepth: analyseCalculationDepth(result.classified, evalMoves),

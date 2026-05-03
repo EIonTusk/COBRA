@@ -23,7 +23,7 @@
 import type { ClassifiedGame, Phase } from './classify';
 import type { EvalMoveResult } from './evalAxes';
 import type { Color } from '$lib/types';
-import { ecoFamily, chooserForOpeningName } from './openings';
+import { chooserForOpeningName, parseOpeningName } from './openings';
 
 export type OpeningVerdict = 'strong' | 'weak' | 'neutral';
 /**
@@ -135,7 +135,7 @@ export function buildOpeningProfile(
 	// can credit CP loss to both the family and its variation.
 	const gameKeys = new Map<string, { fam: string; vari: string | null }>();
 	for (const g of classified) {
-		const { family, label } = parseOpening(g.openingName, g.eco);
+		const { family, label } = parseOpeningName(g.openingName, g.eco);
 		const famK = familyKey(family, g.color);
 		let famAcc = fam.get(famK);
 		if (!famAcc) {
@@ -279,39 +279,6 @@ function tallyGame(
 
 function phaseStats(moves: number, cpSum: number): OpeningPhaseStats {
 	return { moves, avgCpLoss: moves > 0 ? cpSum / moves : 0 };
-}
-
-/**
- * Split a PGN `[Opening]` tag into family root + full "Family: Main
- * variation" label. Lichess / chess.com populate this header with their
- * canonical naming (e.g. `"Sicilian Defense: Najdorf Variation, English
- * Attack"`), which is our ground truth.
- *
- * The family root is everything before the first `:` — our primary
- * grouping key, so all Najdorf sub-lines stay together under "Sicilian
- * Defense". The label keeps the main variation (before the first comma
- * of the post-colon segment) so each row can break itself down by its
- * top variations. When the header is missing we fall back to the
- * coarse ECO family and no variation.
- */
-function parseOpening(
-	openingName: string | null,
-	eco: string | null
-): { family: string; label: string } {
-	if (openingName && openingName.trim().length > 0) {
-		const name = openingName.trim();
-		const colonIdx = name.indexOf(':');
-		if (colonIdx < 0) return { family: name, label: name };
-		const family = name.slice(0, colonIdx).trim();
-		const detail = name.slice(colonIdx + 1).trim();
-		const mainVariation = detail.split(',')[0].trim();
-		return {
-			family,
-			label: mainVariation ? `${family}: ${mainVariation}` : family
-		};
-	}
-	const coarse = ecoFamily(eco);
-	return { family: coarse, label: coarse };
 }
 
 function verdictFor(wrDelta: number, cpDelta: number | null): OpeningVerdict {
