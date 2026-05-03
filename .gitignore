@@ -38,6 +38,10 @@ CLAUDE.md
 # Local-only secrets provisioning script (generates the Android release keystore)
 scripts/setup-android-signing.sh
 
+# Android signing keystores — never commit private signing material
+*.keystore
+*.jks
+
 # Stockfish assets (fetched by scripts/prep-stockfish.mjs, too large for git)
 static/stockfish/*.wasm
 static/stockfish/*.js
