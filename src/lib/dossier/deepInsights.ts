@@ -12,6 +12,7 @@ import { analyseStructureTaste, structureLabel } from './structureTaste';
 import { analyseExchangePropensity } from './exchangePropensity';
 import { analysePlanTaste } from './planTaste';
 import { analyseOpeningFit } from './openingFit';
+import { buildSpaceControl } from './spaceControl';
 import { analyseEndgameSubtypes, endgameFamilyLabel } from './endgameSubtypes';
 import { analyseTacticalMotifs, motifLabel } from './tacticalMotifs';
 import { analyseCalculationDepth } from './calculationDepth';
@@ -297,6 +298,66 @@ export function buildDeepInsightCards(
 			detail: `${fit} fit · ${misfit} misfit · ${s.rows.length - fit - misfit} neutral across ${s.rows.length} family rows.`,
 			needsEngine: false,
 			severity: openingSeverity
+		});
+	}
+	{
+		const sc = buildSpaceControl(result.classified);
+		let headline = 'Not enough positions sampled to assess space control.';
+		let detail: string | undefined;
+		let scSeverity: Severity = 'inconclusive';
+		if (sc) {
+			// Pick whichever perspective has the stronger "advanced space"
+			// signal — the classic space zone, squares your pieces project
+			// beyond your own back ranks. Diff arrays are in canonical chess
+			// coordinates so white's advanced half is ranks 5–8 and black's
+			// is ranks 1–4.
+			const perspectives: Array<{ name: 'white' | 'black'; diff: number[] }> = [];
+			if (sc.white) perspectives.push({ name: 'white', diff: sc.white.diff });
+			if (sc.black) perspectives.push({ name: 'black', diff: sc.black.diff });
+			const scored = perspectives.map((p) => {
+				let s = 0;
+				for (let sq = 0; sq < 64; sq++) {
+					const advanced = p.name === 'white' ? sq >> 3 >= 4 : sq >> 3 < 4;
+					if (advanced) s += p.diff[sq];
+				}
+				return { ...p, advancedAvg: s / 32 };
+			});
+			scored.sort((a, b) => Math.abs(b.advancedAvg) - Math.abs(a.advancedAvg));
+			const lead = scored[0];
+			if (lead) {
+				const colorWord = lead.name === 'white' ? 'White' : 'Black';
+				let peakSq = 0;
+				let peakAbs = 0;
+				for (let sq = 0; sq < 64; sq++) {
+					const a = Math.abs(lead.diff[sq]);
+					if (a > peakAbs) {
+						peakAbs = a;
+						peakSq = sq;
+					}
+				}
+				const peakName = `${'abcdefgh'[peakSq & 7]}${(peakSq >> 3) + 1}`;
+				const peakSign = lead.diff[peakSq] >= 0 ? '+' : '';
+				if (lead.advancedAvg >= 0.05) {
+					headline = `As ${colorWord} you contest more advanced space than peers (${signedPp(lead.advancedAvg)} avg on ranks 5–8).`;
+				} else if (lead.advancedAvg <= -0.05) {
+					headline = `As ${colorWord} you contest less advanced space than peers (${signedPp(lead.advancedAvg)} avg on ranks 5–8).`;
+				} else {
+					headline = `As ${colorWord} your space footprint matches peers (${signedPp(lead.advancedAvg)} avg).`;
+				}
+				detail = `Largest single-square gap (${colorWord}): ${peakName} ${peakSign}${(lead.diff[peakSq] * 100).toFixed(1)}pp · ${sc.totalPositions.toLocaleString()} positions sampled.`;
+				scSeverity = 'observation';
+			}
+		}
+		cards.push({
+			slug: 'space-control',
+			title: 'Space control',
+			group: 'preferences',
+			headline,
+			detail,
+			needsEngine: false,
+			severity: scSeverity,
+			sampleSize: sc?.totalPositions,
+			sampleMin: 50
 		});
 	}
 
@@ -1034,6 +1095,7 @@ const SLUG_DENOMINATOR: Record<string, string> = {
 	'exchange-propensity': 'moves',
 	'plan-taste': 'games',
 	'opening-fit': 'games',
+	'space-control': 'positions',
 	'endgame-subtypes': 'endgames',
 	'tactical-motifs': 'blunders',
 	'calculation-depth': 'moves',

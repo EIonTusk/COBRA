@@ -649,6 +649,7 @@
 		'narrative',
 		'opening-fit',
 		'opponent-strength',
+		'space-control',
 		'piece-affinity',
 		'plan-taste',
 		'progression',
@@ -674,6 +675,8 @@
 				return 'Middlegame destination wing distribution';
 			case 'opening-fit':
 				return 'ECO families ranked by fit to your axes';
+			case 'space-control':
+				return 'Per-square attacker diff vs opponents at this rating band';
 			case 'endgame-subtypes':
 				return 'Conversion & defense rate by endgame family';
 			case 'tactical-motifs':
