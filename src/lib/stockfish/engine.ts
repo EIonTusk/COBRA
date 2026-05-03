@@ -62,7 +62,7 @@ export interface EngineError {
 export class Engine {
 	private sf: StockfishWebInstance | null = null;
 	private handlers: Array<(info: EngineInfo) => void> = [];
-	private bestmoveHandlers: Array<() => void> = [];
+	private bestmoveHandlers: Array<(bestmove: string) => void> = [];
 	private readyokHandlers: Array<() => void> = [];
 	private errorHandlers: Array<(e: EngineError) => void> = [];
 	private readyPromise: Promise<void> | null = null;
@@ -174,7 +174,7 @@ export class Engine {
 	 * legal-move positions can finish without ever emitting an info line
 	 * at the requested depth.
 	 */
-	onBestmove(handler: () => void): () => void {
+	onBestmove(handler: (bestmove: string) => void): () => void {
 		this.bestmoveHandlers.push(handler);
 		return () => {
 			this.bestmoveHandlers = this.bestmoveHandlers.filter((h) => h !== handler);
@@ -332,6 +332,7 @@ export class Engine {
 				if (settled) return;
 				settled = true;
 				off();
+				console.warn('[stockfish] awaitIdle timeout — bestmove not received in', timeoutMs, 'ms');
 				// Force the flag — engine may have died but we shouldn't
 				// jam every subsequent search waiting on a bestmove that
 				// will never come.
@@ -390,8 +391,17 @@ export class Engine {
 			// prior call resolved via the depth path) would fire on this
 			// listener and false-resolve the new search before its first
 			// info ever arrived.
-			const offBest = this.onBestmove(() => {
+			const offBest = this.onBestmove((bestmove) => {
 				if (resolved) return;
+				// Terminal-position synthesis (mirror analyseMulti): no
+				// info + bestmove (none)/0000 means the position is
+				// checkmate or stalemate. Return mate 0 from STM POV.
+				if (!receivedInfoForThisSearch && (bestmove === '(none)' || bestmove === '0000')) {
+					resolved = true;
+					cleanup();
+					resolve({ depth: 0, scoreMate: 0, pv: [] });
+					return;
+				}
 				if (!receivedInfoForThisSearch) return;
 				resolved = true;
 				cleanup();
@@ -534,8 +544,37 @@ export class Engine {
 				}
 			});
 
-			const offBest = this.onBestmove(() => {
+			const offBest = this.onBestmove((bestmove) => {
 				if (resolved) return;
+				// Terminal position (checkmate / stalemate): Stockfish
+				// emits `bestmove (none)` (or `0000`) without ANY info
+				// lines because there's nothing to search. Synthesise a
+				// result so callers (dossier scoring) get a usable score
+				// instead of hanging on the 20s timeout.
+				if (!receivedInfo && (bestmove === '(none)' || bestmove === '0000')) {
+					// Determine mate vs stalemate from the FEN: in a king-
+					// in-check position with no legal moves, it's mate;
+					// otherwise stalemate. We don't have a chess engine
+					// available here, so we use a cheap heuristic: assume
+					// mate (the much more common terminal state hit in
+					// game analysis), and represent it as `mate 0` from
+					// side-to-move's POV (STM is mated). Stalemate gets
+					// the same score in dossier accuracy aggregates
+					// (both = "game over"); the half-point distinction
+					// would only matter for outcome-classification, and
+					// the dossier already takes outcome from the PGN.
+					const synthetic: EngineInfo = {
+						depth: 0,
+						scoreMate: 0,
+						pv: []
+					};
+					latest.set(1, synthetic);
+					finalise();
+					return;
+				}
+				// Otherwise honour bestmove only if we actually got info
+				// for this search — that's the "engine completed naturally
+				// before reaching target depth" path.
 				if (!receivedInfo) return;
 				finalise();
 			});
@@ -580,11 +619,16 @@ export class Engine {
 			// any handler that immediately starts a new search sees the
 			// correct state.
 			this.isSearching = false;
+			// `bestmove (none)` / `bestmove 0000` = position is terminal
+			// (checkmate or stalemate); pass the raw payload so callers
+			// can synthesise a result instead of waiting for info that
+			// will never come.
+			const bestmoveText = line.slice('bestmove '.length).split(' ')[0] ?? '';
 			// Snapshot then dispatch — handlers commonly unsubscribe themselves.
 			const snapshot = this.bestmoveHandlers.slice();
 			for (const h of snapshot) {
 				try {
-					h();
+					h(bestmoveText);
 				} catch (e) {
 					const msg = e instanceof Error ? e.message : String(e);
 					console.warn('[stockfish] bestmove handler threw:', e);
