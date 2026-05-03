@@ -13,7 +13,8 @@
  */
 
 import type { ClassifiedGame, MoveFeatures, Phase } from './classify';
-import { ecoFamily, type OpeningFamily } from './openings';
+import type { Color } from '$lib/types';
+import { parseOpeningName } from './openings';
 
 export type { ClassifiedGame } from './classify';
 export type { OpeningFamily } from './openings';
@@ -48,7 +49,15 @@ export type ResultKey = 'win' | 'loss' | 'draw';
 export type ClockBucket = 'low' | 'mid' | 'high';
 
 export interface OpeningProfile extends AxisRates {
-	family: OpeningFamily;
+	/**
+	 * Family root taken from the PGN `[Opening]` header (e.g. `"Queen's
+	 * Gambit Declined"`, `"Queen's Gambit Accepted"`, `"Slav Defense"`).
+	 * Falls back to the coarse `OpeningFamily` ECO bucket when the header
+	 * is missing — rare on Lichess/chess.com PGNs but possible on imports.
+	 */
+	family: string;
+	/** Side the user played. Splits e.g. "QGD as White" from "QGD as Black". */
+	color: Color;
 	games: number;
 	moves: number;
 	wins: number;
@@ -77,9 +86,13 @@ export interface DossierFingerprint {
 	 */
 	byClock: Record<ClockBucket, AxisRates & { moves: number }>;
 	/**
-	 * Per-opening-family axes + win rate, sorted by game count desc. Lets
-	 * the user see which families they actually score in vs which they
-	 * just play often. Families with <5 games are folded into "Other".
+	 * Per-(family, color) axes + win rate, sorted by game count desc.
+	 * Family is the PGN `[Opening]` header root, so QGA, QGD, Slav etc.
+	 * stay distinct (they all share the coarse ECO `Queen's Gambit`
+	 * bucket otherwise). Each cell is also color-split so you can tell
+	 * "QGD as White" from "QGD as Black" — different repertoires,
+	 * different win-rate signals. Cells are not folded; downstream
+	 * consumers apply their own min-games threshold.
 	 */
 	byOpening: OpeningProfile[];
 	tension: TensionStats;
@@ -345,7 +358,7 @@ export function fingerprintFromGames(games: ClassifiedGame[]): DossierFingerprin
 		mid: emptyAcc(),
 		high: emptyAcc()
 	};
-	const byOpening = new Map<OpeningFamily, OpeningAcc>();
+	const byOpening = new Map<string, OpeningAcc>();
 	const results = { win: 0, loss: 0, draw: 0 };
 
 	let ratingSum = 0;
@@ -369,11 +382,12 @@ export function fingerprintFromGames(games: ClassifiedGame[]): DossierFingerprin
 		speedAcc.games += 1;
 		const resultAcc = byResult[g.result];
 		resultAcc.games += 1;
-		const family = ecoFamily(g.eco);
-		let openingAcc = byOpening.get(family);
+		const { family } = parseOpeningName(g.openingName, g.eco);
+		const openingKey = `${g.color}|${family}`;
+		let openingAcc = byOpening.get(openingKey);
 		if (!openingAcc) {
-			openingAcc = emptyOpeningAcc(family);
-			byOpening.set(family, openingAcc);
+			openingAcc = emptyOpeningAcc(family, g.color);
+			byOpening.set(openingKey, openingAcc);
 		}
 		openingAcc.games += 1;
 		if (g.result === 'win') openingAcc.wins += 1;
@@ -467,24 +481,26 @@ function finalizeClock(a: Acc): AxisRates & { moves: number } {
 }
 
 interface OpeningAcc extends Acc {
-	family: OpeningFamily;
+	family: string;
+	color: Color;
 	games: number;
 	wins: number;
 	losses: number;
 	draws: number;
 }
 
-function emptyOpeningAcc(family: OpeningFamily): OpeningAcc {
-	return { ...emptyAcc(), family, games: 0, wins: 0, losses: 0, draws: 0 };
+function emptyOpeningAcc(family: string, color: Color): OpeningAcc {
+	return { ...emptyAcc(), family, color, games: 0, wins: 0, losses: 0, draws: 0 };
 }
 
-function finalizeOpenings(map: Map<OpeningFamily, OpeningAcc>): OpeningProfile[] {
+function finalizeOpenings(map: Map<string, OpeningAcc>): OpeningProfile[] {
 	const profiles: OpeningProfile[] = [];
 	for (const a of map.values()) {
 		const safe = a.moves || 1;
 		const decided = a.wins + a.losses + a.draws;
 		profiles.push({
 			family: a.family,
+			color: a.color,
 			games: a.games,
 			moves: a.moves,
 			wins: a.wins,
