@@ -400,9 +400,12 @@ jobs:
           fi
           echo "✓ alias found"
           # Probe the key password by exporting the entry into a throwaway
-          # PKCS12 — importkeystore fails if -srckeypass is wrong.
-          TMP_P12="$(mktemp --suffix=.p12)"
-          trap 'rm -f "$TMP_P12"' EXIT
+          # PKCS12 — importkeystore fails if -srckeypass is wrong. Use `mktemp -u`
+          # so the destination path does not pre-exist; keytool refuses to write to
+          # an existing destination ("Keystore file exists, but is empty").
+          TMP_P12="$(mktemp -u --suffix=.p12)"
+          PROBE_LOG="$(mktemp)"
+          trap 'rm -f "$TMP_P12" "$PROBE_LOG"' EXIT
           if ! keytool -importkeystore -noprompt \
               -srckeystore "$KS" \
               -srcalias "$ANDROID_KEY_ALIAS" \
@@ -411,8 +414,10 @@ jobs:
               -destkeystore "$TMP_P12" -deststoretype PKCS12 \
               -deststorepass:env ANDROID_KEYSTORE_PASSWORD \
               -destkeypass:env ANDROID_KEY_PASSWORD \
-              >/dev/null 2>&1; then
-            echo "::error::ANDROID_KEY_PASSWORD does not decrypt the private key. If the keystore was created without a separate key password (keytool default), set ANDROID_KEY_PASSWORD equal to ANDROID_KEYSTORE_PASSWORD."
+              >"$PROBE_LOG" 2>&1; then
+            echo "::error::ANDROID_KEY_PASSWORD does not decrypt the private key. If the keystore was created without a separate key password (keytool default, including PKCS12), set ANDROID_KEY_PASSWORD equal to ANDROID_KEYSTORE_PASSWORD."
+            echo "--- keytool output ---"
+            cat "$PROBE_LOG"
             exit 1
           fi
           echo "✓ key password decrypts private key"
