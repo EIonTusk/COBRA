@@ -41,6 +41,25 @@ export interface StructureSummary {
 	avgPawnIslandsOpp: number;
 	/** Win-rate delta: how much your win rate changes in *chosen* structures vs overall. */
 	overallWinRate: number;
+	/**
+	 * Per-structure aggregates from the optional comparison pool (e.g. cached
+	 * masters baseline). `winRate` is included for completeness but is not
+	 * meaningful when masters are mixed across W/L; consumers should lean on
+	 * `games` and `share` only. Present only when `opts.comparison` was passed.
+	 */
+	comparisonByStructure?: StructureBucket[];
+	comparisonTotalGames?: number;
+}
+
+export interface StructureTasteOpts {
+	/**
+	 * Pool of comparison games (typically the cached masters baseline) used to
+	 * derive per-structure shares alongside the user's. Each comparison game
+	 * is classified the same way the user's are (snapshot at the first
+	 * middlegame move; same heuristics). The user-side aggregates are
+	 * unaffected; this only adds a parallel `comparisonByStructure` block.
+	 */
+	comparison?: ClassifiedGame[];
 }
 
 const LABELS: Record<Structure, string> = {
@@ -59,7 +78,40 @@ export function structureLabel(k: Structure): string {
 	return LABELS[k];
 }
 
-export function analyseStructureTaste(games: ClassifiedGame[]): StructureSummary {
+export function analyseStructureTaste(
+	games: ClassifiedGame[],
+	opts: StructureTasteOpts = {}
+): StructureSummary {
+	const user = aggregateStructures(games);
+	const summary: StructureSummary = {
+		totalGames: user.totalGames,
+		byStructure: user.byStructure,
+		openFileAverage: user.samples > 0 ? user.openFileSum / user.samples : 0,
+		avgPawnIslandsUser: user.samples > 0 ? user.islandSumUser / user.samples : 0,
+		avgPawnIslandsOpp: user.samples > 0 ? user.islandSumOpp / user.samples : 0,
+		overallWinRate: user.totalGames > 0 ? user.winsOverall / user.totalGames : 0
+	};
+
+	if (opts.comparison && opts.comparison.length > 0) {
+		const cmp = aggregateStructures(opts.comparison);
+		summary.comparisonByStructure = cmp.byStructure;
+		summary.comparisonTotalGames = cmp.totalGames;
+	}
+
+	return summary;
+}
+
+interface StructureAggregate {
+	byStructure: StructureBucket[];
+	totalGames: number;
+	samples: number;
+	openFileSum: number;
+	islandSumUser: number;
+	islandSumOpp: number;
+	winsOverall: number;
+}
+
+function aggregateStructures(games: ClassifiedGame[]): StructureAggregate {
 	const counts = new Map<
 		Structure,
 		{ wins: number; losses: number; draws: number; games: number }
@@ -104,15 +156,14 @@ export function analyseStructureTaste(games: ClassifiedGame[]): StructureSummary
 		}))
 		.sort((a, b) => b.games - a.games);
 
-	const overallWinRate = totalGames > 0 ? winsOverall / totalGames : 0;
-
 	return {
-		totalGames,
 		byStructure,
-		openFileAverage: samples > 0 ? openFileSum / samples : 0,
-		avgPawnIslandsUser: samples > 0 ? islandSumUser / samples : 0,
-		avgPawnIslandsOpp: samples > 0 ? islandSumOpp / samples : 0,
-		overallWinRate
+		totalGames,
+		samples,
+		openFileSum,
+		islandSumUser,
+		islandSumOpp,
+		winsOverall
 	};
 }
 
