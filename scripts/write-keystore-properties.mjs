@@ -34,14 +34,30 @@ const outputPath = resolve(
 // Java .properties value escaping. `\` is the escape character, leading
 // whitespace is stripped unless escaped, and raw newlines terminate the logical
 // line. `:` / `=` / `#` / `!` inside a value are fine — they only need escaping
-// when they appear in a key. Backslash-doubling must happen first so the
-// escape sequences we introduce below aren't re-doubled.
+// when they appear in a key.
+//
+// Critically, Properties.load(InputStream) decodes the file as ISO-8859-1, but
+// Node's writeFileSync defaults to UTF-8. Any non-Latin-1 character in the
+// password (umlauts, em-dashes, currency symbols, …) would round-trip wrong
+// and surface as "Given final block not properly padded" during signing.
+// Emit any non-printable-ASCII char as \uXXXX so the file is pure ASCII and
+// what Java reads matches what we wrote. Surrogate pairs are emitted as two
+// \uXXXX escapes — Java reassembles them as a single supplementary char.
 function escapeValue(v) {
-	let s = v
-		.replace(/\\/g, '\\\\')
-		.replace(/\n/g, '\\n')
-		.replace(/\r/g, '\\r')
-		.replace(/\t/g, '\\t');
+	let s = '';
+	for (let i = 0; i < v.length; i++) {
+		const c = v[i];
+		const code = v.charCodeAt(i);
+		if (c === '\\') s += '\\\\';
+		else if (c === '\n') s += '\\n';
+		else if (c === '\r') s += '\\r';
+		else if (c === '\t') s += '\\t';
+		else if (code < 0x20 || code > 0x7e) {
+			s += '\\u' + code.toString(16).padStart(4, '0');
+		} else {
+			s += c;
+		}
+	}
 	if (/^\s/.test(s)) s = '\\' + s;
 	return s;
 }

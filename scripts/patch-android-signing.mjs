@@ -72,13 +72,29 @@ const valBlock = [
 lines.splice(lastImportIdx + 1, firstDeclIdx - (lastImportIdx + 1), ...valBlock);
 gradle = lines.join('\n');
 
+// PKCS12 keystores (default in modern keytool, JDK 18+) use a single
+// password for both the store and the individual key entries; supplying
+// a different `keypass` on creation is silently coerced to the store
+// password. So Gradle's `KeyStore.getKey(alias, keyPass)` only works
+// when keyPass equals storePass for those keystores. JKS keystores can
+// in theory have a different keypass per entry, but the common case
+// (and what we ship CI for) is a single password.
+//
+// Use storePassword for keyPassword unconditionally. This eliminates a
+// common, opaque foot-gun: keytool's `-importkeystore -srckeypass:env X`
+// probe accepts a wrong X for PKCS12 (it falls back to srcstorepass), so
+// a divergent ANDROID_KEY_PASSWORD secret slips past the "Verify
+// keystore credentials" CI step and only surfaces during signing as
+// "Given final block not properly padded" from Gradle. JKS users with a
+// genuine separate keypass can fork the script — that's a rare enough
+// case to not be worth a config knob.
 const signingBlock = `    signingConfigs {
         create("release") {
             if (keystorePropertiesFile.exists()) {
                 keyAlias = keystoreProperties["keyAlias"] as String
-                keyPassword = keystoreProperties["keyPassword"] as String
                 storeFile = file(keystoreProperties["storeFile"] as String)
                 storePassword = keystoreProperties["storePassword"] as String
+                keyPassword = keystoreProperties["storePassword"] as String
             }
         }
     }
