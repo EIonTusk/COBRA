@@ -3,6 +3,7 @@
 	import { resolve } from '$app/paths';
 
 	import DossierSubpageShell from '$lib/dossier/DossierSubpageShell.svelte';
+	import MastersBaselinePanel from '$lib/dossier/MastersBaselinePanel.svelte';
 	import SquareHeatBoard from '$lib/dossier/SquareHeatBoard.svelte';
 	import { loadDossierReport } from '$lib/storage/dossierReport';
 	import {
@@ -11,18 +12,7 @@
 		type SpaceControlPerspective,
 		type SpaceControlSlice
 	} from '$lib/dossier/spaceControl';
-	import {
-		buildMastersBaseline,
-		targetsHash,
-		type MastersFetchProgress
-	} from '$lib/dossier/mastersBaseline';
-	import {
-		loadMastersBaseline,
-		saveMastersBaseline,
-		clearMastersBaseline,
-		type LoadedMastersBaseline
-	} from '$lib/storage/mastersBaseline';
-	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
+	import type { LoadedMastersBaseline } from '$lib/storage/mastersBaseline';
 	import type { DossierScanResult } from '$lib/dossier/scan';
 	import type { Phase } from '$lib/dossier/classify';
 
@@ -49,61 +39,12 @@
 	// of switching baselines per module, not page-globally.
 	let compareMode = $state<'peers' | 'masters'>('peers');
 	let mastersBaseline = $state<LoadedMastersBaseline | null>(null);
-	let mastersFetching = $state(false);
-	let mastersProgress = $state<MastersFetchProgress | null>(null);
-	let mastersError = $state<string | null>(null);
-	let lichessToken = $state<string>('');
 
 	onMount(async () => {
 		const saved = await loadDossierReport();
 		if (saved?.payload) result = saved.payload as DossierScanResult;
-		mastersBaseline = await loadMastersBaseline();
-		const settings = await getSettings();
-		lichessToken = effectiveLichessToken(settings);
 		loaded = true;
 	});
-
-	async function fetchMasters() {
-		if (!result || mastersFetching) return;
-		if (!lichessToken) {
-			mastersError =
-				'A Lichess API token is required for the masters DB. Add one in Settings → Lichess.';
-			return;
-		}
-		mastersFetching = true;
-		mastersError = null;
-		mastersProgress = null;
-		try {
-			const baseline = await buildMastersBaseline(result.classified, {
-				token: lichessToken,
-				onProgress: (p) => {
-					mastersProgress = p;
-				}
-			});
-			const hash = targetsHash(result.classified);
-			await saveMastersBaseline(hash, {
-				games: baseline.games,
-				coverage: baseline.coverage
-			});
-			mastersBaseline = {
-				fetchedAt: baseline.fetchedAt,
-				targetsHash: hash,
-				games: baseline.games,
-				coverage: baseline.coverage
-			};
-		} catch (e) {
-			mastersError = e instanceof Error ? e.message : String(e);
-		} finally {
-			mastersFetching = false;
-			mastersProgress = null;
-		}
-	}
-
-	async function refreshMasters() {
-		await clearMastersBaseline();
-		mastersBaseline = null;
-		await fetchMasters();
-	}
 
 	const summary = $derived.by(() => {
 		if (!result) return null;
@@ -118,17 +59,6 @@
 	const sourceWord = $derived(
 		compareMode === 'masters' ? 'masters playing the same colour' : 'your same-rating opponents'
 	);
-
-	function formatTimeAgo(ts: number): string {
-		const diffMs = Date.now() - ts;
-		const min = Math.floor(diffMs / 60_000);
-		if (min < 1) return 'just now';
-		if (min < 60) return `${min} min ago`;
-		const hr = Math.floor(min / 60);
-		if (hr < 24) return `${hr} hr ago`;
-		const day = Math.floor(hr / 24);
-		return `${day} day${day === 1 ? '' : 's'} ago`;
-	}
 
 	function squareName(sq: number): string {
 		return `${FILES[sq & 7]}${(sq >> 3) + 1}`;
@@ -282,7 +212,7 @@
 							: 'text-[var(--color-parchment-400)] hover:text-[var(--color-parchment-200)]'} {!mastersBaseline
 							? 'opacity-60'
 							: ''}"
-						disabled={!mastersBaseline && !mastersFetching}
+						disabled={!mastersBaseline}
 						onclick={() => (compareMode = 'masters')}
 					>
 						Masters{!mastersBaseline ? ' (not loaded)' : ''}
@@ -290,72 +220,8 @@
 				</div>
 			</div>
 
-			<div
-				class="mt-3 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-950)] px-3 py-2.5 text-xs"
-			>
-				{#if mastersFetching}
-					<div class="flex items-baseline justify-between gap-3">
-						<span class="text-[var(--color-parchment-200)]">
-							Fetching masters baseline…
-							{#if mastersProgress}
-								<span class="font-mono text-[var(--color-parchment-400)]">
-									{mastersProgress.done}/{mastersProgress.total} families · {mastersProgress.gamesFetched}
-									games
-								</span>
-							{/if}
-						</span>
-					</div>
-					{#if mastersProgress?.currentFamily}
-						<div class="mt-1 font-mono text-[10px] text-[var(--color-parchment-500)]">
-							Current: {mastersProgress.currentFamily} ({mastersProgress.currentColor})
-						</div>
-					{/if}
-				{:else if mastersBaseline}
-					<div class="flex flex-wrap items-baseline justify-between gap-3">
-						<span class="text-[var(--color-parchment-300)]">
-							Masters baseline:
-							<span class="font-mono text-[var(--color-parchment-100)]"
-								>{mastersBaseline.games.length}</span
-							>
-							games across
-							<span class="font-mono text-[var(--color-parchment-100)]"
-								>{mastersBaseline.coverage.length}</span
-							>
-							openings · fetched {formatTimeAgo(mastersBaseline.fetchedAt)}
-						</span>
-						<button
-							type="button"
-							class="text-[var(--color-parchment-400)] underline hover:text-[var(--color-parchment-200)] disabled:opacity-50"
-							onclick={refreshMasters}
-							disabled={!lichessToken}
-						>
-							refresh
-						</button>
-					</div>
-				{:else}
-					<div class="flex flex-wrap items-baseline justify-between gap-3">
-						<span class="text-[var(--color-parchment-300)]">
-							Pull master games matching your repertoire as a directional reference (≈1 min,
-							requires Lichess token).
-						</span>
-						<button
-							type="button"
-							class="rounded border border-[var(--color-brass-300)]/40 bg-[var(--color-brass-300)]/10 px-3 py-1 text-[var(--color-parchment-100)] hover:bg-[var(--color-brass-300)]/20 disabled:opacity-50"
-							onclick={fetchMasters}
-							disabled={!lichessToken}
-						>
-							Fetch baseline
-						</button>
-					</div>
-					{#if !lichessToken}
-						<div class="mt-1 text-[10px] text-[var(--color-parchment-500)]">
-							Add a Lichess personal API token in Settings to enable.
-						</div>
-					{/if}
-				{/if}
-				{#if mastersError}
-					<div class="mt-1.5 text-amber-300">{mastersError}</div>
-				{/if}
+			<div class="mt-3">
+				<MastersBaselinePanel {result} bind:baseline={mastersBaseline} />
 			</div>
 		</section>
 

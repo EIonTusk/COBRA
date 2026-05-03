@@ -1,13 +1,19 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { SvelteMap } from 'svelte/reactivity';
 
 	import DossierSubpageShell from '$lib/dossier/DossierSubpageShell.svelte';
+	import MastersBaselinePanel from '$lib/dossier/MastersBaselinePanel.svelte';
 	import { loadDossierReport } from '$lib/storage/dossierReport';
 	import { analyseOpeningFit } from '$lib/dossier/openingFit';
+	import { fingerprintFromGames, type OpeningProfile } from '$lib/dossier/fingerprint';
+	import type { OpeningFamily } from '$lib/dossier/openings';
 	import type { DossierScanResult } from '$lib/dossier/scan';
+	import type { LoadedMastersBaseline } from '$lib/storage/mastersBaseline';
 
 	let loaded = $state(false);
 	let result = $state<DossierScanResult | null>(null);
+	let mastersBaseline = $state<LoadedMastersBaseline | null>(null);
 
 	onMount(async () => {
 		const saved = await loadDossierReport();
@@ -18,6 +24,18 @@
 	const summary = $derived(
 		result ? analyseOpeningFit(result.classified, result.evalAxes?.allMoves ?? null) : null
 	);
+
+	// Per-family axes for masters playing the user's colour in the user's
+	// chosen openings. Keyed by `OpeningFamily` (the same coarse ECO bucket
+	// the user's `byOpening` rows use), so a row-level lookup just matches
+	// on family. Empty map when the masters baseline hasn't been fetched.
+	const mastersByFamily = $derived.by(() => {
+		const map = new SvelteMap<OpeningFamily, OpeningProfile>();
+		if (!mastersBaseline?.games.length) return map;
+		const fp = fingerprintFromGames(mastersBaseline.games);
+		for (const o of fp.byOpening) map.set(o.family, o);
+		return map;
+	});
 
 	function pct(x: number, digits = 1) {
 		return `${(x * 100).toFixed(digits)}%`;
@@ -33,6 +51,15 @@
 		if (v === 'fit') return 'border-emerald-500/50 bg-emerald-950/15';
 		if (v === 'misfit') return 'border-amber-300/40 bg-amber-950/15';
 		return 'border-[var(--color-ink-800)] bg-[var(--color-ink-950)]';
+	}
+
+	function deltaClass(d: number) {
+		if (d > 0.03) return 'text-emerald-400';
+		if (d < -0.03) return 'text-amber-300';
+		return 'text-[var(--color-parchment-500)]';
+	}
+	function signedPp(d: number) {
+		return `${d >= 0 ? '+' : ''}${(d * 100).toFixed(1)}`;
 	}
 </script>
 
@@ -141,9 +168,14 @@
 				</div>
 				<p class="mt-1 text-xs text-[var(--color-parchment-500)]">
 					Per-ECO bucketing — what you actually score in vs what you just play often, with axis
-					rates for each family. Families with &lt;5 games fold into "Other". Axis deltas are vs
-					your overall; direction colour fires at ≥3pp.
+					rates for each family. Families with &lt;5 games fold into "Other". The "vs you" delta
+					compares this family against your overall; "vs masters" compares against masters playing
+					your colour in the same family (only families you chose qualify for the masters
+					comparison).
 				</p>
+				<div class="mt-3">
+					<MastersBaselinePanel {result} bind:baseline={mastersBaseline} />
+				</div>
 				<div class="mt-3 overflow-x-auto">
 					<table class="w-full border-collapse text-sm">
 						<thead class="text-left text-xs text-[var(--color-parchment-500)]">
@@ -159,71 +191,61 @@
 						</thead>
 						<tbody>
 							{#each big as o (o.family)}
-								<tr class="border-t border-[var(--color-ink-800)]">
+								{@const m = mastersByFamily.get(o.family) ?? null}
+								{@const mGames = m?.games ?? 0}
+								<tr class="border-t border-[var(--color-ink-800)] align-top">
 									<td class="py-2 pr-4 font-medium">{o.family}</td>
 									<td class="py-2 pr-4 font-mono">{o.games}</td>
 									<td class="py-2 pr-4 font-mono text-xs">
 										{o.wins}/{o.losses}/{o.draws}
 									</td>
 									<td class="py-2 pr-4 font-mono">
-										{pct(o.winRate, 1)}
-										<span
-											class="ml-1 text-xs {o.winRate - overallWR > 0.03
-												? 'text-emerald-400'
-												: o.winRate - overallWR < -0.03
-													? 'text-amber-300'
-													: 'text-[var(--color-parchment-500)]'}"
-										>
-											{o.winRate - overallWR >= 0 ? '+' : ''}{(
-												(o.winRate - overallWR) *
-												100
-											).toFixed(1)}
-										</span>
+										<div>{pct(o.winRate, 1)}</div>
+										<div class="text-xs {deltaClass(o.winRate - overallWR)}">
+											{signedPp(o.winRate - overallWR)} vs you
+										</div>
 									</td>
 									<td class="py-2 pr-4 font-mono">
-										{pct(o.forcing, 1)}
-										<span
-											class="ml-1 text-xs {o.forcing - ref.forcing > 0.03
-												? 'text-emerald-400'
-												: o.forcing - ref.forcing < -0.03
-													? 'text-amber-300'
-													: 'text-[var(--color-parchment-500)]'}"
-										>
-											{o.forcing - ref.forcing >= 0 ? '+' : ''}{(
-												(o.forcing - ref.forcing) *
-												100
-											).toFixed(1)}
-										</span>
+										<div>{pct(o.forcing, 1)}</div>
+										<div class="text-xs {deltaClass(o.forcing - ref.forcing)}">
+											{signedPp(o.forcing - ref.forcing)} vs you
+										</div>
+										{#if m}
+											<div
+												class="text-xs {deltaClass(o.forcing - m.forcing)}"
+												title="{mGames} master games"
+											>
+												{signedPp(o.forcing - m.forcing)} vs masters
+											</div>
+										{/if}
 									</td>
 									<td class="py-2 pr-4 font-mono">
-										{pct(o.pawnPlay, 1)}
-										<span
-											class="ml-1 text-xs {o.pawnPlay - ref.pawnPlay > 0.03
-												? 'text-emerald-400'
-												: o.pawnPlay - ref.pawnPlay < -0.03
-													? 'text-amber-300'
-													: 'text-[var(--color-parchment-500)]'}"
-										>
-											{o.pawnPlay - ref.pawnPlay >= 0 ? '+' : ''}{(
-												(o.pawnPlay - ref.pawnPlay) *
-												100
-											).toFixed(1)}
-										</span>
+										<div>{pct(o.pawnPlay, 1)}</div>
+										<div class="text-xs {deltaClass(o.pawnPlay - ref.pawnPlay)}">
+											{signedPp(o.pawnPlay - ref.pawnPlay)} vs you
+										</div>
+										{#if m}
+											<div
+												class="text-xs {deltaClass(o.pawnPlay - m.pawnPlay)}"
+												title="{mGames} master games"
+											>
+												{signedPp(o.pawnPlay - m.pawnPlay)} vs masters
+											</div>
+										{/if}
 									</td>
 									<td class="py-2 pr-4 font-mono">
-										{pct(o.queenside, 1)}
-										<span
-											class="ml-1 text-xs {o.queenside - ref.queenside > 0.03
-												? 'text-emerald-400'
-												: o.queenside - ref.queenside < -0.03
-													? 'text-amber-300'
-													: 'text-[var(--color-parchment-500)]'}"
-										>
-											{o.queenside - ref.queenside >= 0 ? '+' : ''}{(
-												(o.queenside - ref.queenside) *
-												100
-											).toFixed(1)}
-										</span>
+										<div>{pct(o.queenside, 1)}</div>
+										<div class="text-xs {deltaClass(o.queenside - ref.queenside)}">
+											{signedPp(o.queenside - ref.queenside)} vs you
+										</div>
+										{#if m}
+											<div
+												class="text-xs {deltaClass(o.queenside - m.queenside)}"
+												title="{mGames} master games"
+											>
+												{signedPp(o.queenside - m.queenside)} vs masters
+											</div>
+										{/if}
 									</td>
 								</tr>
 							{/each}
