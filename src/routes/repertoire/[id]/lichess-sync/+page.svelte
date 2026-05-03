@@ -93,7 +93,10 @@
 
 	async function reconnectForScopes() {
 		// startOAuth navigates away; we don't come back to this function.
-		await startOAuth([...STUDY_SCOPES]);
+		// Bring the user back to this sync page after the round-trip rather
+		// than dropping them on /settings.
+		const returnTo = page.url.pathname + page.url.search + page.url.hash;
+		await startOAuth([...STUDY_SCOPES], returnTo);
 	}
 
 	async function loadStudies() {

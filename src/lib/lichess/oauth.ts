@@ -48,6 +48,12 @@ const STATE_KEY = 'ot:lichess:pkce-state';
 // handleCallback. Lichess grants all-or-nothing: if the callback arrives
 // without an `error` param, the user accepted every scope we requested.
 const SCOPES_KEY = 'ot:lichess:pkce-scopes';
+// Path-and-hash to navigate to after a successful callback. Set by
+// `startOAuth` when the caller knows where the user started (e.g. clicking
+// "Sign in with Lichess" from the explorer in /repertoire/.../edit), and
+// consumed by the callback page. Falls back to /settings when unset so the
+// "Connect Lichess" button on the Settings page itself behaves as before.
+const RETURN_KEY = 'ot:lichess:return-to';
 
 /** Custom URL scheme registered with Tauri's deep-link plugin. Must match
  *  `plugins.deep-link.{mobile,desktop}.scheme[s]` in `tauri.conf.json`. */
@@ -107,6 +113,34 @@ function clientId(): string {
 	return `${window.location.origin}${base}/`;
 }
 
+/**
+ * Reject anything that isn't a same-origin path. The post-OAuth callback
+ * eventually feeds this string into `goto()`, so we have to defend against
+ * open-redirect attacks where an attacker plants `?return=//evil.com` on a
+ * link to /settings and waits for the victim to complete OAuth.
+ *
+ * Rules:
+ *   - Must start with a single `/` (so `https://evil.com`, `javascript:…`,
+ *     bare paths like `evil` are all rejected).
+ *   - Must NOT start with `//` (protocol-relative — `//evil.com/x` resolves
+ *     to https://evil.com/x) or `/\` (some browsers normalise the backslash
+ *     to `/`, giving the same protocol-relative escape).
+ *   - When resolved against the current origin must produce the same origin
+ *     — defence-in-depth in case a parser quirk slips past the prefix check.
+ */
+export function isSafeReturnPath(raw: unknown): raw is string {
+	if (typeof raw !== 'string' || raw.length === 0) return false;
+	if (raw[0] !== '/') return false;
+	if (raw.startsWith('//') || raw.startsWith('/\\')) return false;
+	if (typeof window === 'undefined') return false;
+	try {
+		const resolved = new URL(raw, window.location.origin);
+		return resolved.origin === window.location.origin;
+	} catch {
+		return false;
+	}
+}
+
 function base64url(bytes: Uint8Array): string {
 	let str = '';
 	for (const b of bytes) str += String.fromCharCode(b);
@@ -128,7 +162,7 @@ async function generatePkce(): Promise<{ verifier: string; challenge: string }> 
  * layout for the return path. `scopes` defaults to none — the Lichess
  * explorer and public game history don't require any special scope.
  */
-export async function startOAuth(scopes: string[] = []): Promise<void> {
+export async function startOAuth(scopes: string[] = [], returnTo?: string): Promise<void> {
 	const { verifier, challenge } = await generatePkce();
 	const state = base64url(crypto.getRandomValues(new Uint8Array(16)));
 	// localStorage (not sessionStorage) so the verifier survives the OS
@@ -137,6 +171,18 @@ export async function startOAuth(scopes: string[] = []): Promise<void> {
 	localStorage.setItem(VERIFIER_KEY, verifier);
 	localStorage.setItem(STATE_KEY, state);
 	localStorage.setItem(SCOPES_KEY, scopes.join(' '));
+	// Stash the desired post-OAuth landing page if the caller supplied a
+	// safe same-origin path; otherwise clear any stale value so a previous
+	// flow doesn't bleed into this one (e.g. the user kicked off from /edit,
+	// abandoned, then later connected from /settings). Validating at write
+	// time as well as read time means even if an attacker poisons the
+	// localStorage stash through some other vector, the most they can plant
+	// is a same-origin path.
+	if (returnTo !== undefined && isSafeReturnPath(returnTo)) {
+		localStorage.setItem(RETURN_KEY, returnTo);
+	} else {
+		localStorage.removeItem(RETURN_KEY);
+	}
 
 	const params = new URLSearchParams({
 		response_type: 'code',
@@ -252,4 +298,18 @@ export async function disconnectOAuth(): Promise<void> {
 
 export function tokenIsFresh(t: LichessOAuthToken | null | undefined): boolean {
 	return !!t && t.expiresAt > Date.now();
+}
+
+/**
+ * Read-and-clear the post-OAuth return URL stashed by `startOAuth`. Returns
+ * `null` if none was set (in which case the caller should fall back to a
+ * sensible default like /settings) or if the stash isn't a same-origin
+ * path. The strictness here is the load-bearing defence against open-
+ * redirect attacks via a poisoned `?return=` query param — see
+ * `isSafeReturnPath`.
+ */
+export function consumeOAuthReturnTo(): string | null {
+	const raw = localStorage.getItem(RETURN_KEY);
+	localStorage.removeItem(RETURN_KEY);
+	return isSafeReturnPath(raw) ? raw : null;
 }
