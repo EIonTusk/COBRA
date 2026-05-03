@@ -1,6 +1,6 @@
 [package]
 name = "cobra"
-version = "0.10.1"
+version = "0.10.2"
 description = "COBRA — Chess Opening Builder and Repertoire Analyzer"
 authors = ["EIonTusk"]
 edition = "2021"
