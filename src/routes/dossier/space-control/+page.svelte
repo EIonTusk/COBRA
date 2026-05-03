@@ -17,6 +17,14 @@
 	const PHASES: Phase[] = ['opening', 'middle', 'end'];
 	const MUTE_THRESHOLD = 0.05;
 
+	// Mirror SquareHeatBoard's internal layout constants so the legend's
+	// gradient bar height matches just the 8×8 squares, not the coord-label
+	// strip beneath them. Used as a CSS fraction.
+	const BOARD_SQ = 56;
+	const BOARD_COORD_PAD = 18;
+	const BOARD_TOTAL = BOARD_SQ * 8 + BOARD_COORD_PAD;
+	const GRID_HEIGHT = BOARD_SQ * 8;
+
 	let loaded = $state(false);
 	let result = $state<DossierScanResult | null>(null);
 	// Per-perspective phase position. 0 = opening, 0.5 = middle, 1 = end.
@@ -241,19 +249,53 @@
 				</div>
 
 				<div class="mx-auto mt-4 max-w-[32rem]">
-					<div class="flex items-stretch gap-3">
-						<div class="flex items-stretch py-1">
+					<div class="flex items-stretch gap-2">
+						<!-- Legend wrapper stretches to full board height; inner
+						     legend is capped at GRID/BOARD_TOTAL so it lines up
+						     with the squares, not the file-label strip. -->
+						<div class="flex self-stretch">
 							<div
-								class="flex flex-col justify-between pr-2 text-right font-mono text-[10px] text-[var(--color-parchment-400)]"
+								class="flex"
+								style="height: calc(100% * {GRID_HEIGHT} / {BOARD_TOTAL}); align-self: flex-start;"
 							>
-								<span>+{tickFmt(p.max)}</span>
-								<span>0</span>
-								<span>{tickFmt(-p.max)}</span>
+								<div
+									class="flex flex-col justify-between pr-1.5 text-right font-mono text-[10px] text-[var(--color-parchment-400)]"
+								>
+									<span>+{tickFmt(p.max)}</span>
+									<span>0</span>
+									<span>{tickFmt(-p.max)}</span>
+								</div>
+								<svg
+									viewBox="0 0 12 100"
+									preserveAspectRatio="none"
+									class="block w-3 self-stretch rounded-sm"
+									aria-hidden="true"
+								>
+									<defs>
+										<linearGradient
+											id="space-legend-{p.color}"
+											x1="0"
+											y1="0"
+											x2="0"
+											y2="100"
+											gradientUnits="userSpaceOnUse"
+										>
+											<stop offset="0%" stop-color="rgb(194,88,18)" />
+											<stop offset="50%" stop-color="rgb(232,227,212)" />
+											<stop offset="100%" stop-color="rgb(25,84,130)" />
+										</linearGradient>
+									</defs>
+									<rect
+										x="0"
+										y="0"
+										width="12"
+										height="100"
+										fill="url(#space-legend-{p.color})"
+										stroke="rgba(0,0,0,0.15)"
+										stroke-width="0.5"
+									/>
+								</svg>
 							</div>
-							<div
-								class="w-3 self-stretch rounded-sm border border-[rgba(0,0,0,0.15)]"
-								style="background: linear-gradient(to top, rgb(25,84,130) 0%, rgb(232,227,212) 50%, rgb(194,88,18) 100%)"
-							></div>
 						</div>
 
 						<div class="min-w-0 flex-1">
