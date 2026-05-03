@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { SvelteSet } from 'svelte/reactivity';
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { base } from '$app/paths';
+	import { page } from '$app/state';
 	import { ExternalLink, AlertTriangle, Check } from 'lucide-svelte';
 
 	import { getSettings, saveSettings, defaultSettings } from '$lib/storage/settings';
@@ -14,6 +15,7 @@
 		tokenIsFresh,
 		tokenHasStudyScopes,
 		tokenHasChallengeScopes,
+		isSafeReturnPath,
 		ALL_SCOPES
 	} from '$lib/lichess/oauth';
 	import {
@@ -77,6 +79,18 @@
 	let showToken = $state(false);
 	let newAccountSource = $state<'lichess' | 'chesscom'>('lichess');
 	let newAccountUsername = $state('');
+
+	// When another page sends the user here to connect (e.g. the offline
+	// banner on the repertoire edit page), it tacks `?return=<path>` onto
+	// the URL so the callback can land them back where they started instead
+	// of stranding them on /settings. Validate same-origin here so an
+	// attacker-crafted `?return=//evil.com` link can't turn the OAuth
+	// callback into an open redirect; oauth.ts re-validates at write/read
+	// time, but rejecting at the entry point is the cleaner story.
+	const lichessReturnTo = $derived.by(() => {
+		const r = page.url.searchParams.get('return');
+		return isSafeReturnPath(r) ? r : undefined;
+	});
 
 	function addScanAccount() {
 		if (!settings) return;
@@ -153,6 +167,19 @@
 		savedSnapshot = JSON.stringify(s);
 		storedBaselines = await listStoredBaselines();
 		setRuntimeBaselines(storedBaselines);
+
+		// Hash-anchor scroll fixup: the page body is gated by `{#if settings}`,
+		// so the target section (e.g. `#lichess`) doesn't exist on first paint.
+		// SvelteKit's built-in scroll-on-navigate has already given up by the
+		// time settings load resolves, so we re-attempt the scroll ourselves
+		// once the DOM catches up. Using `scrollIntoView` honours the section's
+		// `scroll-mt-*` so it lands clear of the sticky header.
+		const hash = window.location.hash.replace(/^#/, '');
+		if (hash) {
+			await tick();
+			const el = document.getElementById(hash);
+			el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+		}
 	});
 
 	// Live-apply sound prefs as the user drags the volume slider or toggles
@@ -513,7 +540,7 @@
 			<Separator />
 
 			<!-- Lichess section -->
-			<section style:--i="4">
+			<section id="lichess" class="scroll-mt-24" style:--i="4">
 				<div class="mb-4 flex items-baseline gap-3">
 					<h2 class="font-serif text-2xl">Lichess</h2>
 					<span class="eyebrow text-[var(--color-parchment-500)]">Explorer &amp; account</span>
@@ -551,7 +578,11 @@
 					</div>
 					{#if tokenIsFresh(settings.lichessOAuth)}
 						{#if !tokenHasStudyScopes(settings.lichessOAuth) || !tokenHasChallengeScopes(settings.lichessOAuth)}
-							<Button variant="primary" size="sm" onclick={() => startOAuth([...ALL_SCOPES])}>
+							<Button
+								variant="primary"
+								size="sm"
+								onclick={() => startOAuth([...ALL_SCOPES], lichessReturnTo)}
+							>
 								Reconnect
 							</Button>
 						{/if}
@@ -567,7 +598,11 @@
 							Disconnect
 						</Button>
 					{:else}
-						<Button variant="primary" size="sm" onclick={() => startOAuth([...ALL_SCOPES])}>
+						<Button
+							variant="primary"
+							size="sm"
+							onclick={() => startOAuth([...ALL_SCOPES], lichessReturnTo)}
+						>
 							Connect Lichess
 						</Button>
 					{/if}

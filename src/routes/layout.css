@@ -471,10 +471,47 @@ h3 {
 	animation: ot-scale-in 400ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }
 
+/* Dropdown / popover entrance: a subtle slide-down from the trigger plus
+   a small scale, anchored at top-right (matches a menu opening downwards
+   from a button at the right edge of its row). Faster than the page-level
+   entrances above — UI controls should feel snappy, not theatrical. */
+@keyframes ot-menu-pop {
+	from {
+		opacity: 0;
+		transform: translateY(-4px) scale(0.97);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+}
+.ot-menu-pop {
+	transform-origin: top right;
+	animation: ot-menu-pop 160ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
 /* Stagger children: add .stagger, set --i on each child. */
 .stagger > * {
 	animation: ot-fade-up 520ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
 	animation-delay: calc(var(--i, 0) * 45ms);
+}
+
+/* Lighter stagger variant for menu items: shorter distance, smaller delay,
+   so a dropdown finishes its cascade quickly enough to feel like one
+   gesture instead of a page transition. */
+@keyframes ot-menu-item-in {
+	from {
+		opacity: 0;
+		transform: translateY(-3px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+.stagger-menu > * {
+	animation: ot-menu-item-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+	animation-delay: calc(var(--i, 0) * 22ms + 60ms);
 }
 
 @keyframes drill-shrink {
