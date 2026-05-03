@@ -22,16 +22,13 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: 'npm'
@@ -69,9 +66,9 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: 'npm'
@@ -92,7 +89,7 @@ jobs:
       - name: Generate icons
         run: npx tauri icon src-tauri/icons/source.png --output src-tauri/icons
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: tauri-icons
           path: src-tauri/icons
@@ -118,9 +115,9 @@ jobs:
             args: ''
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: 'npm'
@@ -160,7 +157,7 @@ jobs:
       - name: Prep Stockfish assets
         run: npm run prep:stockfish
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: tauri-icons
           path: src-tauri/icons
@@ -191,9 +188,9 @@ jobs:
     needs: icons
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: 'npm'
@@ -217,7 +214,7 @@ jobs:
       - name: Prep Stockfish assets
         run: npm run prep:stockfish
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: tauri-icons
           path: src-tauri/icons
@@ -291,7 +288,7 @@ jobs:
           done < <(find src-tauri/gen/apple/build -type d -name '*.app' -print0 2>/dev/null)
           ls -la dist || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ios-artifacts
           path: dist/*
@@ -323,9 +320,9 @@ jobs:
     env:
       NDK_VERSION: '26.3.11579264'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: 'npm'
@@ -363,7 +360,7 @@ jobs:
       - name: Prep Stockfish assets
         run: npm run prep:stockfish
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: tauri-icons
           path: src-tauri/icons
@@ -477,7 +474,7 @@ jobs:
           done < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print0 2>/dev/null)
           ls -la dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: android-apks
           path: dist/*.apk
