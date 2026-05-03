@@ -69,6 +69,14 @@ export class Engine {
 	private sideToMove: 'white' | 'black' = 'white';
 	private currentFen: string | null = null;
 	private currentMultiPV = 1;
+	/**
+	 * True between a `go *` and the corresponding `bestmove`.
+	 * Stockfish silently drops `setoption` while a search is running, so
+	 * any new search has to wait for `bestmove` from the previous one
+	 * before re-configuring (e.g. switching MultiPV from 3 to 1 between
+	 * the dossier's before- and after-position evals).
+	 */
+	private isSearching = false;
 
 	isReady(): boolean {
 		return this.sf !== null;
@@ -206,6 +214,7 @@ export class Engine {
 		if (this.currentFen !== null) this.sf.uci('stop');
 		this.currentFen = fen;
 		this.sf.uci(`position fen ${fen}`);
+		this.isSearching = true;
 		const searchmovesPart =
 			searchmoves && searchmoves.length > 0 ? ` searchmoves ${searchmoves.join(' ')}` : '';
 		this.sf.uci(`go depth ${depth}${searchmovesPart}`);
@@ -227,6 +236,7 @@ export class Engine {
 		if (this.currentFen !== null) this.sf.uci('stop');
 		this.currentFen = fen;
 		this.sf.uci(`position fen ${fen}`);
+		this.isSearching = true;
 		const searchmovesPart =
 			searchmoves && searchmoves.length > 0 ? ` searchmoves ${searchmoves.join(' ')}` : '';
 		this.sf.uci(`go infinite${searchmovesPart}`);
@@ -246,6 +256,7 @@ export class Engine {
 		if (this.currentFen !== null) this.sf.uci('stop');
 		this.currentFen = fen;
 		this.sf.uci(`position fen ${fen}`);
+		this.isSearching = true;
 		const searchmovesPart =
 			searchmoves && searchmoves.length > 0 ? ` searchmoves ${searchmoves.join(' ')}` : '';
 		this.sf.uci(`go movetime ${movetimeMs}${searchmovesPart}`);
@@ -267,22 +278,66 @@ export class Engine {
 
 	/**
 	 * UCI `isready` synchronisation. Sends `isready`, resolves on the
-	 * next `readyok` line.
-	 *
-	 * Stockfish processes commands in order, but `setoption` is silently
-	 * dropped while a search is running. Without an `isready` between a
-	 * `stop()` and the next `setoption MultiPV …` + `go`, the new search
-	 * can race and start with stale options — which manifested as
-	 * "analyseMulti timed out before any info arrived" in the dossier
-	 * scan when MultiPV settings collided with a not-yet-finished prior
-	 * search. Awaiting `sync()` between batches forces the engine to
-	 * drain its queue first.
+	 * next `readyok`. Useful for waiting on slow non-search operations
+	 * like NNUE load or Hash resize. **Does not wait for a running
+	 * search to finish** — Stockfish replies `readyok` immediately even
+	 * mid-`go`. For "wait until the engine has finished its current
+	 * search" use `awaitIdle()` instead.
 	 */
 	async sync(): Promise<void> {
 		if (!this.sf) return;
 		return new Promise<void>((resolve) => {
 			this.readyokHandlers.push(resolve);
 			this.sf!.uci('isready');
+		});
+	}
+
+	/**
+	 * Wait for the engine to finish its current search and emit
+	 * `bestmove`. Resolves immediately when no search is in flight.
+	 *
+	 * This is the synchronisation primitive that prevents the
+	 * `setoption MultiPV value N` mid-search drop. The dossier scan
+	 * alternates MultiPV between 3 (before-position) and 1 (after-
+	 * position) on every move; without waiting for the previous
+	 * search's bestmove, the next setoption arrives while Stockfish is
+	 * still searching and is silently ignored, which on certain inputs
+	 * caused the next `go` to never emit a single info line within the
+	 * timeout — surfacing as "analyseMulti timed out before any info
+	 * arrived" in the user's console.
+	 *
+	 * The fallback `setTimeout` exists because we can't tell from JS
+	 * whether the engine truly emitted bestmove or got stuck. 1.5s is
+	 * generous for the worst case Stockfish takes to wind down a
+	 * stopped search at multi-thread + 64MB hash.
+	 */
+	async awaitIdle(timeoutMs: number = 1500): Promise<void> {
+		if (!this.sf) return;
+		if (!this.isSearching) return;
+		// Make sure the engine is being asked to stop — `analyseMulti`'s
+		// `finalise` already calls `this.stop()` before returning, but a
+		// caller that arrived here without that path (e.g. an interrupted
+		// scan) needs the kick.
+		this.sf.uci('stop');
+		return new Promise<void>((resolve) => {
+			let settled = false;
+			const off = this.onBestmove(() => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				off();
+				resolve();
+			});
+			const timer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				off();
+				// Force the flag — engine may have died but we shouldn't
+				// jam every subsequent search waiting on a bestmove that
+				// will never come.
+				this.isSearching = false;
+				resolve();
+			}, timeoutMs);
 		});
 	}
 
@@ -298,9 +353,11 @@ export class Engine {
 	 * never settle. Always `await` between calls.
 	 */
 	async analyse(fen: string, depth: number = 18, timeoutMs: number = 20000): Promise<EngineInfo> {
-		// Mirror analyseMulti — drain pending engine traffic first so the
-		// new search isn't racing a previous bestmove / stop pair.
-		await this.sync();
+		// Wait for any prior search to fully finish (bestmove emitted)
+		// before starting this one. Without this guard the new go can
+		// race the previous search's tail and Stockfish doesn't emit
+		// info reliably.
+		await this.awaitIdle();
 		return new Promise<EngineInfo>((resolve, reject) => {
 			let resolved = false;
 			let lastInfo: EngineInfo | null = null;
@@ -406,12 +463,19 @@ export class Engine {
 		if (depth == null && movetimeMs == null) {
 			throw new Error('analyseMulti needs depth or movetimeMs');
 		}
+		// Wait for the previous search to fully finish before changing
+		// MultiPV. Stockfish silently drops `setoption` mid-search; if
+		// the dossier scan called `setMultiPV(1)` here while the prior
+		// `setMultiPV(3) + go` was still running, the value-1 was lost,
+		// the next `go` searched at value 3, and on certain inputs no
+		// info ever surfaced — surfacing as "analyseMulti timed out
+		// before any info arrived". Awaiting idle first eliminates the
+		// race; the setoption then lands while the engine is quiescent.
+		await this.awaitIdle();
 		this.setMultiPV(multiPV);
-		// Drain any in-flight stop/setoption traffic before subscribing +
-		// kicking off the new search. Eliminates the race that produced
-		// "no info arrived" timeouts when this analyseMulti started while
-		// the previous one's bestmove was still being processed by the
-		// engine queue.
+		// `isready` after `setoption` so we know the option was
+		// acknowledged (Stockfish processes setoption synchronously
+		// when idle, but the readyok round-trip is cheap insurance).
 		await this.sync();
 
 		return new Promise<MultiInfoResult>((resolve, reject) => {
@@ -512,6 +576,10 @@ export class Engine {
 
 	private onLine(line: string): void {
 		if (line.startsWith('bestmove')) {
+			// Engine is now idle — clear the flag BEFORE dispatching so
+			// any handler that immediately starts a new search sees the
+			// correct state.
+			this.isSearching = false;
 			// Snapshot then dispatch — handlers commonly unsubscribe themselves.
 			const snapshot = this.bestmoveHandlers.slice();
 			for (const h of snapshot) {
