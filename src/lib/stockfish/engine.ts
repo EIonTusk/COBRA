@@ -62,12 +62,21 @@ export interface EngineError {
 export class Engine {
 	private sf: StockfishWebInstance | null = null;
 	private handlers: Array<(info: EngineInfo) => void> = [];
-	private bestmoveHandlers: Array<() => void> = [];
+	private bestmoveHandlers: Array<(bestmove: string) => void> = [];
+	private readyokHandlers: Array<() => void> = [];
 	private errorHandlers: Array<(e: EngineError) => void> = [];
 	private readyPromise: Promise<void> | null = null;
 	private sideToMove: 'white' | 'black' = 'white';
 	private currentFen: string | null = null;
 	private currentMultiPV = 1;
+	/**
+	 * True between a `go *` and the corresponding `bestmove`.
+	 * Stockfish silently drops `setoption` while a search is running, so
+	 * any new search has to wait for `bestmove` from the previous one
+	 * before re-configuring (e.g. switching MultiPV from 3 to 1 between
+	 * the dossier's before- and after-position evals).
+	 */
+	private isSearching = false;
 
 	isReady(): boolean {
 		return this.sf !== null;
@@ -126,8 +135,28 @@ export class Engine {
 			}
 			const buf = new Uint8Array(await res.arrayBuffer());
 			sf.setNnueBuffer(buf, 0);
-			sf.uci('isready');
+
+			// Performance options. lila-stockfish-web defaults to 1 thread
+			// and 16 MB hash, which makes the dossier scan crawl and triggers
+			// "no info arrived" timeouts on complex positions. Bump both to
+			// numbers that match what Lichess analysis itself uses in the
+			// browser. `hardwareConcurrency` is widely supported (workers
+			// included); the Math.min cap protects users on extreme machines
+			// where running too many threads against a small NNUE wastes
+			// CPU on synchronisation.
+			const cores =
+				typeof navigator !== 'undefined' && typeof navigator.hardwareConcurrency === 'number'
+					? navigator.hardwareConcurrency
+					: 4;
+			const threads = Math.max(1, Math.min(cores, 8));
+			sf.uci(`setoption name Threads value ${threads}`);
+			sf.uci(`setoption name Hash value 64`);
+
 			this.sf = sf;
+			// Block until Stockfish has acknowledged init + the setoptions
+			// above. Without this, the first analyseMulti can race the
+			// option apply and search at depth 1 with stale Threads=1.
+			await this.sync();
 		})();
 		return this.readyPromise;
 	}
@@ -145,7 +174,7 @@ export class Engine {
 	 * legal-move positions can finish without ever emitting an info line
 	 * at the requested depth.
 	 */
-	onBestmove(handler: () => void): () => void {
+	onBestmove(handler: (bestmove: string) => void): () => void {
 		this.bestmoveHandlers.push(handler);
 		return () => {
 			this.bestmoveHandlers = this.bestmoveHandlers.filter((h) => h !== handler);
@@ -185,6 +214,7 @@ export class Engine {
 		if (this.currentFen !== null) this.sf.uci('stop');
 		this.currentFen = fen;
 		this.sf.uci(`position fen ${fen}`);
+		this.isSearching = true;
 		const searchmovesPart =
 			searchmoves && searchmoves.length > 0 ? ` searchmoves ${searchmoves.join(' ')}` : '';
 		this.sf.uci(`go depth ${depth}${searchmovesPart}`);
@@ -206,6 +236,7 @@ export class Engine {
 		if (this.currentFen !== null) this.sf.uci('stop');
 		this.currentFen = fen;
 		this.sf.uci(`position fen ${fen}`);
+		this.isSearching = true;
 		const searchmovesPart =
 			searchmoves && searchmoves.length > 0 ? ` searchmoves ${searchmoves.join(' ')}` : '';
 		this.sf.uci(`go infinite${searchmovesPart}`);
@@ -225,6 +256,7 @@ export class Engine {
 		if (this.currentFen !== null) this.sf.uci('stop');
 		this.currentFen = fen;
 		this.sf.uci(`position fen ${fen}`);
+		this.isSearching = true;
 		const searchmovesPart =
 			searchmoves && searchmoves.length > 0 ? ` searchmoves ${searchmoves.join(' ')}` : '';
 		this.sf.uci(`go movetime ${movetimeMs}${searchmovesPart}`);
@@ -250,6 +282,72 @@ export class Engine {
 	}
 
 	/**
+	 * UCI `isready` synchronisation. Sends `isready`, resolves on the
+	 * next `readyok`. Useful for waiting on slow non-search operations
+	 * like NNUE load or Hash resize. **Does not wait for a running
+	 * search to finish** — Stockfish replies `readyok` immediately even
+	 * mid-`go`. For "wait until the engine has finished its current
+	 * search" use `awaitIdle()` instead.
+	 */
+	async sync(): Promise<void> {
+		if (!this.sf) return;
+		return new Promise<void>((resolve) => {
+			this.readyokHandlers.push(resolve);
+			this.sf!.uci('isready');
+		});
+	}
+
+	/**
+	 * Wait for the engine to finish its current search and emit
+	 * `bestmove`. Resolves immediately when no search is in flight.
+	 *
+	 * This is the synchronisation primitive that prevents the
+	 * `setoption MultiPV value N` mid-search drop. The dossier scan
+	 * alternates MultiPV between 3 (before-position) and 1 (after-
+	 * position) on every move; without waiting for the previous
+	 * search's bestmove, the next setoption arrives while Stockfish is
+	 * still searching and is silently ignored, which on certain inputs
+	 * caused the next `go` to never emit a single info line within the
+	 * timeout — surfacing as "analyseMulti timed out before any info
+	 * arrived" in the user's console.
+	 *
+	 * The fallback `setTimeout` exists because we can't tell from JS
+	 * whether the engine truly emitted bestmove or got stuck. 1.5s is
+	 * generous for the worst case Stockfish takes to wind down a
+	 * stopped search at multi-thread + 64MB hash.
+	 */
+	async awaitIdle(timeoutMs: number = 1500): Promise<void> {
+		if (!this.sf) return;
+		if (!this.isSearching) return;
+		// Make sure the engine is being asked to stop — `analyseMulti`'s
+		// `finalise` already calls `this.stop()` before returning, but a
+		// caller that arrived here without that path (e.g. an interrupted
+		// scan) needs the kick.
+		this.sf.uci('stop');
+		return new Promise<void>((resolve) => {
+			let settled = false;
+			const off = this.onBestmove(() => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				off();
+				resolve();
+			});
+			const timer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				off();
+				console.warn('[stockfish] awaitIdle timeout — bestmove not received in', timeoutMs, 'ms');
+				// Force the flag — engine may have died but we shouldn't
+				// jam every subsequent search waiting on a bestmove that
+				// will never come.
+				this.isSearching = false;
+				resolve();
+			}, timeoutMs);
+		});
+	}
+
+	/**
 	 * One-shot eval. Runs `go depth N` against the given FEN and resolves
 	 * with the first info line that reaches the requested depth. Use for
 	 * batch analyses (e.g. computing centipawn loss across a list of
@@ -260,7 +358,12 @@ export class Engine {
 	 * search via `go()`'s internal `stop` and the earlier promise will
 	 * never settle. Always `await` between calls.
 	 */
-	async analyse(fen: string, depth: number = 18, timeoutMs: number = 8000): Promise<EngineInfo> {
+	async analyse(fen: string, depth: number = 18, timeoutMs: number = 20000): Promise<EngineInfo> {
+		// Wait for any prior search to fully finish (bestmove emitted)
+		// before starting this one. Without this guard the new go can
+		// race the previous search's tail and Stockfish doesn't emit
+		// info reliably.
+		await this.awaitIdle();
 		return new Promise<EngineInfo>((resolve, reject) => {
 			let resolved = false;
 			let lastInfo: EngineInfo | null = null;
@@ -293,8 +396,17 @@ export class Engine {
 			// prior call resolved via the depth path) would fire on this
 			// listener and false-resolve the new search before its first
 			// info ever arrived.
-			const offBest = this.onBestmove(() => {
+			const offBest = this.onBestmove((bestmove) => {
 				if (resolved) return;
+				// Terminal-position synthesis (mirror analyseMulti): no
+				// info + bestmove (none)/0000 means the position is
+				// checkmate or stalemate. Return mate 0 from STM POV.
+				if (!receivedInfoForThisSearch && (bestmove === '(none)' || bestmove === '0000')) {
+					resolved = true;
+					cleanup();
+					resolve({ depth: 0, scoreMate: 0, pv: [] });
+					return;
+				}
 				if (!receivedInfoForThisSearch) return;
 				resolved = true;
 				cleanup();
@@ -359,11 +471,27 @@ export class Engine {
 		const multiPV = Math.max(1, Math.min(20, Math.floor(opts.multiPV ?? 3)));
 		const depth = opts.depth;
 		const movetimeMs = opts.movetimeMs;
-		const timeoutMs = opts.timeoutMs ?? 8000;
+		// 20s default — the dossier scan hits genuinely complex positions
+		// where multi-PV depth-14 in WASM can take >8s. Callers wanting a
+		// tighter budget pass `timeoutMs` explicitly.
+		const timeoutMs = opts.timeoutMs ?? 20000;
 		if (depth == null && movetimeMs == null) {
 			throw new Error('analyseMulti needs depth or movetimeMs');
 		}
+		// Wait for the previous search to fully finish before changing
+		// MultiPV. Stockfish silently drops `setoption` mid-search; if
+		// the dossier scan called `setMultiPV(1)` here while the prior
+		// `setMultiPV(3) + go` was still running, the value-1 was lost,
+		// the next `go` searched at value 3, and on certain inputs no
+		// info ever surfaced — surfacing as "analyseMulti timed out
+		// before any info arrived". Awaiting idle first eliminates the
+		// race; the setoption then lands while the engine is quiescent.
+		await this.awaitIdle();
 		this.setMultiPV(multiPV);
+		// `isready` after `setoption` so we know the option was
+		// acknowledged (Stockfish processes setoption synchronously
+		// when idle, but the readyok round-trip is cheap insurance).
+		await this.sync();
 
 		return new Promise<MultiInfoResult>((resolve, reject) => {
 			let resolved = false;
@@ -421,8 +549,37 @@ export class Engine {
 				}
 			});
 
-			const offBest = this.onBestmove(() => {
+			const offBest = this.onBestmove((bestmove) => {
 				if (resolved) return;
+				// Terminal position (checkmate / stalemate): Stockfish
+				// emits `bestmove (none)` (or `0000`) without ANY info
+				// lines because there's nothing to search. Synthesise a
+				// result so callers (dossier scoring) get a usable score
+				// instead of hanging on the 20s timeout.
+				if (!receivedInfo && (bestmove === '(none)' || bestmove === '0000')) {
+					// Determine mate vs stalemate from the FEN: in a king-
+					// in-check position with no legal moves, it's mate;
+					// otherwise stalemate. We don't have a chess engine
+					// available here, so we use a cheap heuristic: assume
+					// mate (the much more common terminal state hit in
+					// game analysis), and represent it as `mate 0` from
+					// side-to-move's POV (STM is mated). Stalemate gets
+					// the same score in dossier accuracy aggregates
+					// (both = "game over"); the half-point distinction
+					// would only matter for outcome-classification, and
+					// the dossier already takes outcome from the PGN.
+					const synthetic: EngineInfo = {
+						depth: 0,
+						scoreMate: 0,
+						pv: []
+					};
+					latest.set(1, synthetic);
+					finalise();
+					return;
+				}
+				// Otherwise honour bestmove only if we actually got info
+				// for this search — that's the "engine completed naturally
+				// before reaching target depth" path.
 				if (!receivedInfo) return;
 				finalise();
 			});
@@ -463,15 +620,38 @@ export class Engine {
 
 	private onLine(line: string): void {
 		if (line.startsWith('bestmove')) {
+			// Engine is now idle — clear the flag BEFORE dispatching so
+			// any handler that immediately starts a new search sees the
+			// correct state.
+			this.isSearching = false;
+			// `bestmove (none)` / `bestmove 0000` = position is terminal
+			// (checkmate or stalemate); pass the raw payload so callers
+			// can synthesise a result instead of waiting for info that
+			// will never come.
+			const bestmoveText = line.slice('bestmove '.length).split(' ')[0] ?? '';
 			// Snapshot then dispatch — handlers commonly unsubscribe themselves.
 			const snapshot = this.bestmoveHandlers.slice();
 			for (const h of snapshot) {
 				try {
-					h();
+					h(bestmoveText);
 				} catch (e) {
 					const msg = e instanceof Error ? e.message : String(e);
 					console.warn('[stockfish] bestmove handler threw:', e);
 					this.emitError({ kind: 'handler', message: `bestmove handler threw: ${msg}` });
+				}
+			}
+			return;
+		}
+		if (line === 'readyok') {
+			// `isready` synchronisation. Snapshot then drain — every pending
+			// `sync()` waiter resolves on the next readyok.
+			const snapshot = this.readyokHandlers.slice();
+			this.readyokHandlers = [];
+			for (const h of snapshot) {
+				try {
+					h();
+				} catch (e) {
+					console.warn('[stockfish] readyok handler threw:', e);
 				}
 			}
 			return;
