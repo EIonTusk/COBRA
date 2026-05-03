@@ -36,6 +36,7 @@ import {
 	accuracyFromWpLoss,
 	classifyByWpLoss,
 	bucketHistogram,
+	stmPovToUserPov,
 	type MoveQuality,
 	type MoveQualityBucket
 } from './sota';
@@ -539,9 +540,15 @@ export async function analyseEvalAxes(
 			);
 		}
 
-		const sign = game.color === 'white' ? 1 : -1;
-		let userEvalBeforeCp = scoreToCp(before) * sign;
-		let userEvalAfterCp = scoreToCp(after) * sign;
+		// Engine cp/mate arrives in side-to-move POV (UCI standard, what
+		// `lila-stockfish-web` emits). At `move.fenBefore` STM is the user
+		// (they're about to move) → STM-POV = user-POV directly. At
+		// `fenAfter` STM is the opponent → STM-POV must be negated to land
+		// in user-POV. Routing both through `stmPovToUserPov` keeps the
+		// conversion explicit so it can't be undone by a future refactor.
+		const stmAfter: Color = game.color === 'white' ? 'black' : 'white';
+		let userEvalBeforeCp = stmPovToUserPov(scoreToCp(before), game.color, game.color);
+		let userEvalAfterCp = stmPovToUserPov(scoreToCp(after), stmAfter, game.color);
 
 		// Tablebase override: ≤7 pieces → ground truth from Syzygy. CP
 		// eval from Stockfish is an approximation; WDL is law.
@@ -550,12 +557,14 @@ export async function analyseEvalAxes(
 			try {
 				tablebase = await lookupTablebase(move.fenBefore, opts.signal);
 				if (tablebase) {
-					// Tablebase WDL is from side-to-move at fenBefore POV. Flip
-					// to user POV just like Stockfish CP above.
-					userEvalBeforeCp = wdlToCp(tablebase.wdl) * sign;
+					// `wdlToCp` returns the WDL from the side-to-move's POV at
+					// the FEN it was looked up against — same convention as
+					// engine cp, so the same conversion applies.
+					userEvalBeforeCp = stmPovToUserPov(wdlToCp(tablebase.wdl), game.color, game.color);
 					if (isTablebaseEligible(fenAfter)) {
 						const tbAfter = await lookupTablebase(fenAfter, opts.signal);
-						if (tbAfter) userEvalAfterCp = wdlToCp(tbAfter.wdl) * sign;
+						if (tbAfter)
+							userEvalAfterCp = stmPovToUserPov(wdlToCp(tbAfter.wdl), stmAfter, game.color);
 					}
 				}
 			} catch {
@@ -593,14 +602,16 @@ export async function analyseEvalAxes(
 		if (moveWasForcing) state.volatileMoves += 1;
 
 		// Top-K alternatives (excludes the bestmove itself for brevity; the
-		// bestUci above already covers PV[0]).
+		// bestUci above already covers PV[0]). These PVs were searched from
+		// `move.fenBefore`, so STM-POV = user-POV — same path as `before`.
 		const alternatives: EvalMoveResult['alternatives'] = [];
 		for (const line of beforeMulti.lines.slice(1)) {
 			if (!hasScore(line) || !line.pv[0]) continue;
 			alternatives.push({
 				uci: line.pv[0],
-				cp: scoreToCp(line) * sign,
-				mate: line.scoreMate != null ? line.scoreMate * sign : null
+				cp: stmPovToUserPov(scoreToCp(line), game.color, game.color),
+				mate:
+					line.scoreMate != null ? stmPovToUserPov(line.scoreMate, game.color, game.color) : null
 			});
 		}
 

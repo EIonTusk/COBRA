@@ -728,8 +728,12 @@
 	): Promise<{ pv: string[]; stmCp: number } | null> {
 		const engine = getEngine();
 		if (!engine.isReady()) return null;
-		const stm = colorToMove(fen);
-		const sign = stm === 'black' ? -1 : 1;
+		// Engine emits cp/mate in side-to-move POV (UCI standard). `fen`
+		// here is the position AFTER the user's wrong move, so STM is the
+		// opponent — and `gradeFromCp` interprets positive as "good for
+		// whoever is on move at `fen`" (= the opponent just got handed an
+		// advantage = the user's move was bad). So engine's raw output is
+		// already in the POV `gradeFromCp` expects; no flip needed.
 		return await new Promise<{ pv: string[]; stmCp: number } | null>((resolve) => {
 			let best: { pv: string[]; stmCp: number } | null = null;
 			let settled = false;
@@ -737,9 +741,9 @@
 				if (!info.pv.length) return;
 				if (info.scoreMate !== undefined) {
 					const mateCp = info.scoreMate > 0 ? 10000 : -10000;
-					best = { pv: info.pv.slice(), stmCp: mateCp * sign };
+					best = { pv: info.pv.slice(), stmCp: mateCp };
 				} else if (info.scoreCp !== undefined) {
-					best = { pv: info.pv.slice(), stmCp: info.scoreCp * sign };
+					best = { pv: info.pv.slice(), stmCp: info.scoreCp };
 				}
 			});
 			const timer = setTimeout(() => {

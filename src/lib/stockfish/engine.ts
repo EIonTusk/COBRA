@@ -231,9 +231,14 @@ export class Engine {
 	}
 
 	/**
-	 * Side-to-move inferred from the most recent `go()` call. Used by
-	 * callers that want to flip engine evals into the user's POV when
-	 * they already know the FEN they requested.
+	 * Side-to-move inferred from the most recent `go()` call.
+	 *
+	 * `info.scoreCp` and `info.scoreMate` arrive in **side-to-move POV**
+	 * per the UCI standard (positive = good for whoever is on move at the
+	 * analysed FEN). Callers that want a different POV — e.g. white-POV
+	 * for display alongside Lichess cloud-eval, or user-POV for dossier
+	 * scoring — must flip using this side. See `stmPovToUserPov` in
+	 * `src/lib/dossier/sota.ts` for the canonical user-POV conversion.
 	 */
 	get lastSideToMove(): 'white' | 'black' {
 		return this.sideToMove;
