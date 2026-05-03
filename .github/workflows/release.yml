@@ -89,7 +89,7 @@ jobs:
       - name: Generate icons
         run: npx tauri icon src-tauri/icons/source.png --output src-tauri/icons
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: tauri-icons
           path: src-tauri/icons
@@ -157,7 +157,7 @@ jobs:
       - name: Prep Stockfish assets
         run: npm run prep:stockfish
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: tauri-icons
           path: src-tauri/icons
@@ -214,7 +214,7 @@ jobs:
       - name: Prep Stockfish assets
         run: npm run prep:stockfish
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: tauri-icons
           path: src-tauri/icons
@@ -288,7 +288,7 @@ jobs:
           done < <(find src-tauri/gen/apple/build -type d -name '*.app' -print0 2>/dev/null)
           ls -la dist || true
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: ios-artifacts
           path: dist/*
@@ -360,7 +360,7 @@ jobs:
       - name: Prep Stockfish assets
         run: npm run prep:stockfish
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: tauri-icons
           path: src-tauri/icons
@@ -474,7 +474,7 @@ jobs:
           done < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print0 2>/dev/null)
           ls -la dist
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: android-apks
           path: dist/*.apk
