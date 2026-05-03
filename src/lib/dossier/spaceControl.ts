@@ -111,7 +111,22 @@ function makePhaseAcc(): PhaseAcc {
 	return { opening: makeAcc(), middle: makeAcc(), end: makeAcc() };
 }
 
-export function buildSpaceControl(games: ClassifiedGame[]): SpaceControlReport | null {
+export interface BuildSpaceControlOpts {
+	/**
+	 * Optional pool of games to use for the *opponent* footprint instead of
+	 * the in-scan opposite-colour user games. Each comparison game contributes
+	 * to the colour matching `g.color` (its "user" colour after classifyGame).
+	 * Used for the masters overlay: pass a `ClassifiedGame[]` of masters
+	 * playing each colour and the diff becomes "you vs masters" rather than
+	 * "you vs your peers".
+	 */
+	comparison?: ClassifiedGame[];
+}
+
+export function buildSpaceControl(
+	games: ClassifiedGame[],
+	opts: BuildSpaceControlOpts = {}
+): SpaceControlReport | null {
 	const userWhite = makePhaseAcc();
 	const oppBlack = makePhaseAcc();
 	const userBlack = makePhaseAcc();
@@ -119,6 +134,7 @@ export function buildSpaceControl(games: ClassifiedGame[]): SpaceControlReport |
 
 	let totalSamples = 0;
 	let contributing = 0;
+	const useExternalComparison = !!opts.comparison;
 
 	for (const g of games) {
 		let gContrib = 0;
@@ -134,15 +150,37 @@ export function buildSpaceControl(games: ClassifiedGame[]): SpaceControlReport |
 
 			if (g.color === 'white') {
 				accumulate(userWhite[m.phase], wCounts, bCounts);
-				accumulate(oppBlack[m.phase], bCounts, wCounts);
+				if (!useExternalComparison) accumulate(oppBlack[m.phase], bCounts, wCounts);
 			} else {
 				accumulate(userBlack[m.phase], bCounts, wCounts);
-				accumulate(oppWhite[m.phase], wCounts, bCounts);
+				if (!useExternalComparison) accumulate(oppWhite[m.phase], wCounts, bCounts);
 			}
 			totalSamples += 1;
 			gContrib += 1;
 		}
 		if (gContrib > 0) contributing += 1;
+	}
+
+	if (opts.comparison) {
+		for (const g of opts.comparison) {
+			for (const m of g.moves) {
+				const setupR = parseFen(m.fenBefore);
+				if (setupR.isErr) continue;
+				const posR = Chess.fromSetup(setupR.value);
+				if (posR.isErr) continue;
+				const pos = posR.value;
+
+				const wCounts = attackerCounts(pos, 'white');
+				const bCounts = attackerCounts(pos, 'black');
+
+				// Comparison game's "user" colour matches the opp side we want.
+				if (g.color === 'white') {
+					accumulate(oppWhite[m.phase], wCounts, bCounts);
+				} else {
+					accumulate(oppBlack[m.phase], bCounts, wCounts);
+				}
+			}
+		}
 	}
 
 	if (totalSamples < MIN_TOTAL) return null;

@@ -154,6 +154,25 @@ describe('buildSpaceControl', () => {
 		}
 	});
 
+	it('uses external comparison pool when provided (masters overlay)', () => {
+		// 50 user-white startpos games — the in-scan opp pool would naturally
+		// have zero samples (no black games). With an external comparison of
+		// 30 startpos "master-as-white" games, oppWhite should populate from
+		// that pool instead, even though no in-scan opposite-colour data exists.
+		const userGames = [syntheticGame('white', rep(STARTPOS, 50))];
+		const masters = [syntheticGame('white', rep(STARTPOS, 30))];
+		const r = buildSpaceControl(userGames, { comparison: masters });
+		expect(r).not.toBeNull();
+		if (!r || !r.white) return;
+
+		// Both pools sourced from the same FEN → diff is zero.
+		expect(r.white.user.samples).toBe(50);
+		expect(r.white.opponent.samples).toBe(30);
+		expect(r.white.diff[A3]).toBeCloseTo(0);
+		// And black perspective should be null because neither pool has black data.
+		expect(r.black).toBeNull();
+	});
+
 	it('drops phase buckets below MIN_PER_PHASE', () => {
 		// 30 opening samples on each side (overall passes), 5 middle on each.
 		// Opening bucket should populate; middle should be null; end null.
