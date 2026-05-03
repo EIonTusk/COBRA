@@ -155,12 +155,31 @@ export async function scanDossierAcrossAccounts(
 				// scan and matches the actual size of the analysed corpus.
 				// Per-account `scanned` is recorded in `perAccount` so the
 				// audit log still has the raw throughput.
+				const accountMax = opts.maxGamesPerAccount ?? 100;
 				let scanned = 0;
+				let kept = 0;
 				for await (const game of stream) {
 					scanned += 1;
+					if (kept >= accountMax) {
+						// Defensive: the upstream stream (Lichess `max=` /
+						// chess.com client-side cap) should already enforce
+						// this, but we've seen Lichess occasionally over-yield
+						// in practice. Stop iterating here so the progress
+						// counter doesn't sail past the user's configured
+						// limit. Log once per overshoot so the symptom is
+						// visible if it's a genuine upstream bug rather than
+						// our miscount.
+						console.warn(
+							`[dossier scan] stream for ${account.source}/${account.username} yielded > ${accountMax} games; capping. (scanned=${scanned}, kept=${kept})`
+						);
+						break;
+					}
 					if (game.variant !== 'standard') continue;
 					const c = classifyGame(game, account.username);
-					if (c) classified.push(c);
+					if (c) {
+						classified.push(c);
+						kept += 1;
+					}
 					opts.onProgress?.(account, classified.length);
 				}
 				perAccount.push({ account, scanned });
