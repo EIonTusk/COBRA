@@ -14,9 +14,11 @@
 	let settings = $state<AppSettings | null>(null);
 
 	let gameCap = $state(20);
+	let source = $state<'lichess' | 'masters'>('lichess');
 	let running = $state(false);
 	let progress = $state('');
 	let summary = $state<ConsensusSummary | null>(null);
+	let summarySource = $state<'lichess' | 'masters' | null>(null);
 	let error = $state<string | null>(null);
 	let controller: AbortController | null = null;
 
@@ -31,9 +33,11 @@
 		if (!result || running) return;
 		error = null;
 		summary = null;
+		summarySource = null;
 		running = true;
 		controller = new AbortController();
 		const token = settings ? effectiveLichessToken(settings) : '';
+		const ranSource = source;
 		try {
 			const games = [...result.classified]
 				.sort((a, b) => b.playedAt - a.playedAt)
@@ -41,10 +45,12 @@
 			summary = await analyseConsensus(games, {
 				token: token || undefined,
 				signal: controller.signal,
+				source: ranSource,
 				onProgress: (done, total) => {
 					progress = `${done}/${total}`;
 				}
 			});
+			summarySource = ranSource;
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -64,7 +70,7 @@
 
 <DossierSubpageShell
 	title="Consensus alignment"
-	subtitle="For each of your non-opening moves, the Lichess Explorer is queried for what players at your rating + speed actually played. Your move's share of that crowd = alignment. A consensus miss is when the crowd had a clear majority pick and you didn't play it."
+	subtitle="For each of your non-opening moves, the Lichess Explorer is queried for what others actually played in the same position. Your move's share of that pool = alignment. A consensus miss is when the comparison pool had a clear majority pick and you didn't play it. Switch the comparison pool below: peers (your rating + speed) or masters (OTB)."
 	{loaded}
 	hasReport={!!result}
 >
@@ -88,6 +94,31 @@
 						class="w-24 rounded border border-[var(--color-ink-700)] bg-[var(--color-ink-950)] px-2 py-1"
 					/>
 				</label>
+				<div class="flex flex-col gap-1">
+					<span class="text-[var(--color-parchment-500)]">Compare against</span>
+					<div class="inline-flex rounded border border-[var(--color-ink-800)]">
+						<button
+							type="button"
+							class="px-3 py-1 transition-colors {source === 'lichess'
+								? 'bg-[var(--color-brass-300)]/20 text-[var(--color-parchment-100)]'
+								: 'text-[var(--color-parchment-400)] hover:text-[var(--color-parchment-200)]'}"
+							disabled={running}
+							onclick={() => (source = 'lichess')}
+						>
+							Peers
+						</button>
+						<button
+							type="button"
+							class="px-3 py-1 transition-colors {source === 'masters'
+								? 'bg-[var(--color-brass-300)]/20 text-[var(--color-parchment-100)]'
+								: 'text-[var(--color-parchment-400)] hover:text-[var(--color-parchment-200)]'}"
+							disabled={running}
+							onclick={() => (source = 'masters')}
+						>
+							Masters
+						</button>
+					</div>
+				</div>
 				<Button onclick={run} disabled={running}>
 					{running ? `Analysing ${progress}…` : 'Run consensus pass'}
 				</Button>
@@ -107,10 +138,15 @@
 		</section>
 
 		{#if summary}
+			{@const ranAgainst =
+				summarySource === 'masters' ? 'masters (OTB explorer)' : 'peers (rating + speed)'}
 			<section
 				class="mt-6 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-900)] px-4 py-4"
 			>
 				<div class="text-xs tracking-wider text-[var(--color-brass-300)] uppercase">Summary</div>
+				<div class="mt-1 text-[10px] text-[var(--color-parchment-500)]">
+					Compared against {ranAgainst}.
+				</div>
 				<div class="mt-3 grid grid-cols-3 gap-3 text-xs">
 					<div
 						class="rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-950)] px-3 py-2"
@@ -133,7 +169,7 @@
 				</div>
 				<p class="mt-2 text-[10px] text-[var(--color-parchment-500)]">
 					Skipped {summary.movesSkippedOpening} opening moves and {summary.movesSkippedSparse} moves with
-					sparse peer data.
+					sparse {summarySource === 'masters' ? 'master' : 'peer'} data.
 				</p>
 			</section>
 
@@ -145,8 +181,8 @@
 						Consensus misses
 					</div>
 					<p class="mt-1 text-xs text-[var(--color-parchment-500)]">
-						Positions where the crowd had a clear majority pick and you didn't play it. Click a row
-						to open it in Lichess analysis.
+						Positions where the {summarySource === 'masters' ? 'masters DB' : 'crowd'} had a clear majority
+						pick and you didn't play it. Click a row to open it in Lichess analysis.
 					</p>
 					<ul class="mt-3 grid gap-1 text-xs">
 						{#each summary.misses.slice(0, 30) as m (m.gameId + m.ply)}
@@ -167,7 +203,8 @@
 									</span>
 									<span class="font-mono text-[var(--color-parchment-400)]">
 										align {pct(m.alignment)}{#if m.topAlternative}
-											· crowd picked {m.topAlternative.san} ({pct(m.topAlternative.share)}){/if}
+											· {summarySource === 'masters' ? 'masters' : 'crowd'} picked {m.topAlternative
+												.san} ({pct(m.topAlternative.share)}){/if}
 									</span>
 								</a>
 							</li>

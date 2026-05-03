@@ -66,6 +66,13 @@ export interface ConsensusOpts {
 	maxMisses?: number;
 	signal?: AbortSignal;
 	onProgress?: (done: number, total: number) => void;
+	/**
+	 * Explorer dataset to compare against. `'lichess'` (default) is the
+	 * peer-rating crowd; `'masters'` switches to the OTB masters DB, which
+	 * tells you "how often did you pick the move strong players pick?". The
+	 * masters DB ignores speed/rating filters, so those become no-ops.
+	 */
+	source?: 'lichess' | 'masters';
 }
 
 function inferSpeeds(games: ClassifiedGame[]): ExplorerOpts['speeds'] {
@@ -98,7 +105,11 @@ export async function analyseConsensus(
 	games: ClassifiedGame[],
 	opts: ConsensusOpts = {}
 ): Promise<ConsensusSummary> {
-	const minPlays = opts.minPlays ?? 50;
+	// Masters-DB positions have far fewer games than the crowd at the same
+	// FEN — the masters dataset has tens of games where the crowd has
+	// thousands. Drop the default minPlays floor accordingly so we don't
+	// skip every middlegame position when source='masters'.
+	const minPlays = opts.minPlays ?? (opts.source === 'masters' ? 5 : 50);
 	const skipOpeningPly = opts.skipOpeningPly ?? 16;
 	const missAlignmentMax = opts.missAlignmentMax ?? 0.1;
 	const missTopShareMin = opts.missTopShareMin ?? 0.4;
@@ -134,7 +145,7 @@ export async function analyseConsensus(
 		try {
 			stats = await getExplorerStats(
 				m.fenBefore,
-				{ speeds, ratings, signal: opts.signal },
+				{ speeds, ratings, signal: opts.signal, source: opts.source },
 				opts.token
 			);
 		} catch {
