@@ -190,7 +190,7 @@
 
 <div class="flex min-h-screen flex-col">
 	<header
-		class="sticky top-0 z-40 border-b border-[var(--color-ink-800)] bg-[var(--color-ink-950)]/85 backdrop-blur-md"
+		class="safe-pad-top sticky top-0 z-40 border-b border-[var(--color-ink-800)] bg-[var(--color-ink-950)]/85 backdrop-blur-md"
 	>
 		<div class="mx-auto flex h-14 max-w-7xl items-center gap-4 px-4 sm:gap-8 sm:px-6">
 			<!-- Mobile hamburger — visible only below md, toggles the drawer. -->
@@ -266,12 +266,12 @@
 			<button
 				type="button"
 				aria-label="Close menu"
-				class="fixed inset-0 top-14 z-30 bg-[var(--color-ink-950)]/60 backdrop-blur-sm md:hidden"
+				class="safe-top-header fixed inset-0 z-30 bg-[var(--color-ink-950)]/60 backdrop-blur-sm md:hidden"
 				onclick={() => (menuOpen = false)}
 			></button>
 			<nav
 				id="cobra-mobile-nav"
-				class="ot-fade fixed inset-x-0 top-14 z-40 border-b border-[var(--color-ink-800)] bg-[var(--color-ink-950)] shadow-[0_12px_24px_-8px_rgba(0,0,0,0.6)] md:hidden"
+				class="ot-fade safe-top-header fixed inset-x-0 z-40 border-b border-[var(--color-ink-800)] bg-[var(--color-ink-950)] shadow-[0_12px_24px_-8px_rgba(0,0,0,0.6)] md:hidden"
 				aria-label="Mobile"
 			>
 				<ul class="flex flex-col py-2">
@@ -304,7 +304,7 @@
 		{@render children()}
 	</main>
 
-	<footer class="mt-auto border-t border-[var(--color-ink-800)]">
+	<footer class="safe-pad-bottom mt-auto border-t border-[var(--color-ink-800)]">
 		<div
 			class="mx-auto flex max-w-7xl flex-col items-start justify-between gap-3 px-4 py-5 text-xs text-[var(--color-parchment-500)] sm:flex-row sm:items-center sm:gap-4 sm:px-6"
 		>

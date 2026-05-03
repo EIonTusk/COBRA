@@ -24,7 +24,7 @@
 </script>
 
 <div
-	class="pointer-events-none fixed top-16 right-3 z-[60] flex w-[min(92vw,360px)] flex-col gap-2 sm:right-5"
+	class="safe-top-toaster pointer-events-none fixed right-3 z-[60] flex w-[min(92vw,360px)] flex-col gap-2 sm:right-5"
 	aria-live="polite"
 	aria-atomic="false"
 >

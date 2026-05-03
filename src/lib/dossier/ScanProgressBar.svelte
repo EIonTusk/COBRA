@@ -22,7 +22,7 @@
 
 {#if visible}
 	<div
-		class="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--color-ink-700)] bg-[var(--color-ink-900)]/95 shadow-[0_-8px_24px_-8px_rgba(0,0,0,0.5)] backdrop-blur-md"
+		class="safe-pad-bottom fixed inset-x-0 bottom-0 z-40 border-t border-[var(--color-ink-700)] bg-[var(--color-ink-900)]/95 shadow-[0_-8px_24px_-8px_rgba(0,0,0,0.5)] backdrop-blur-md"
 		role="status"
 		aria-live="polite"
 	>
