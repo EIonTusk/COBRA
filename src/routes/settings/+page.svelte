@@ -1028,7 +1028,7 @@
 						<ExternalLink class="size-3 text-[var(--color-parchment-500)]" strokeWidth={1.75} />
 					</a>
 					<a
-						href="https://github.com/EIonTusk/COBRA/issues/new?labels=bug"
+						href="https://github.com/EIonTusk/COBRA/issues/new?labels=bug&template=bug_report.md"
 						target="_blank"
 						rel="noopener"
 						class="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-4 text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-brass-300)]/50 hover:bg-[var(--color-ink-850)]"
