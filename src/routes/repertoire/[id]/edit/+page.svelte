@@ -625,6 +625,14 @@
 		explorerShapes = [];
 
 		const fen = currentFen;
+		// lila-stockfish-web emits cp/mate from the side-to-move POV (UCI
+		// convention); Lichess cloud-eval already returns white's POV. Flip
+		// local engine output to white's POV so both sources agree before
+		// they hit `combinedByUci`. Without this, "+0.22" at the start
+		// position became "-0.20" after e4 — the eval looked sign-flipped
+		// when really it was just being re-rendered in black's POV because
+		// Black was now on move.
+		const localFlip = fen.split(' ')[1] === 'b' ? -1 : 1;
 		const knownUcis = new Set<string>((currentNode?.children ?? []).map((e) => e.uci));
 		const localSettings = settings;
 		const token = localSettings ? effectiveLichessToken(localSettings) : null;
@@ -646,8 +654,13 @@
 				engineUnsub?.();
 				engineUnsub = engine.onInfo((info) => {
 					if (!info.multipv) return;
+					const flipped: EngineInfo = {
+						...info,
+						scoreCp: info.scoreCp !== undefined ? info.scoreCp * localFlip : undefined,
+						scoreMate: info.scoreMate !== undefined ? info.scoreMate * localFlip : undefined
+					};
 					const map = new SvelteMap(engineByMultipv);
-					map.set(info.multipv, info);
+					map.set(info.multipv, flipped);
 					engineByMultipv = map;
 				});
 			} catch {
@@ -1502,7 +1515,13 @@
 		botOpponent = 'stockfish';
 		botStockfishLevel = 5;
 		botMaiaRating = 1500;
-		botColor = rep.color;
+		// Default to whichever side is on move at the launch FEN. Lichess
+		// starts the game from `currentFen`, so picking `rep.color` while
+		// the position has the opposite side to move means the bot plays
+		// first — and for some custom-FEN paths the user reports being
+		// silently assigned the other colour, which presents as "I'm white
+		// but it's black to play and my clock is ticking and I can't move".
+		botColor = sideToMove;
 		botError = null;
 		botMissingScope = false;
 		botDialogOpen = true;
@@ -1542,8 +1561,13 @@
 			// the recorded colour from the PGN header if needed.
 			const gameId = gameIdFromUrl(url);
 			if (gameId && rep) {
+				// Reconciliation overwrites this from the PGN headers once the
+				// game finishes, so the worst case for a random-colour pick is
+				// a wrong label in the spar list until then. Use side-to-move
+				// rather than `rep.color` so the placeholder lines up with
+				// what Lichess most often serves for a custom FEN.
 				const userColorForRecord =
-					botColor === 'random' ? rep.color : (botColor as 'white' | 'black');
+					botColor === 'random' ? sideToMove : (botColor as 'white' | 'black');
 				const opponentLabel =
 					botOpponent === 'stockfish' ? `Stockfish L${botStockfishLevel}` : `Maia ${botMaiaRating}`;
 				const strength = botOpponent === 'stockfish' ? botStockfishLevel : botMaiaRating;
