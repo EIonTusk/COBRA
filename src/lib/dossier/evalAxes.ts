@@ -544,11 +544,9 @@ export async function analyseEvalAxes(
 		// `lila-stockfish-web` emits). At `move.fenBefore` STM is the user
 		// (they're about to move) → STM-POV = user-POV directly. At
 		// `fenAfter` STM is the opponent → STM-POV must be negated to land
-		// in user-POV. Routing both through `stmPovToUserPov` keeps the
-		// conversion explicit so it can't be undone by a future refactor.
-		const stmAfter: Color = game.color === 'white' ? 'black' : 'white';
-		let userEvalBeforeCp = stmPovToUserPov(scoreToCp(before), game.color, game.color);
-		let userEvalAfterCp = stmPovToUserPov(scoreToCp(after), stmAfter, game.color);
+		// in user-POV. Routed through `enginePairToUserPov` (a pure
+		// helper) so the conversion is testable in isolation.
+		let { userEvalBeforeCp, userEvalAfterCp } = enginePairToUserPov(before, after, game.color);
 
 		// Tablebase override: ≤7 pieces → ground truth from Syzygy. CP
 		// eval from Stockfish is an approximation; WDL is law.
@@ -560,6 +558,7 @@ export async function analyseEvalAxes(
 					// `wdlToCp` returns the WDL from the side-to-move's POV at
 					// the FEN it was looked up against — same convention as
 					// engine cp, so the same conversion applies.
+					const stmAfter: Color = game.color === 'white' ? 'black' : 'white';
 					userEvalBeforeCp = stmPovToUserPov(wdlToCp(tablebase.wdl), game.color, game.color);
 					if (isTablebaseEligible(fenAfter)) {
 						const tbAfter = await lookupTablebase(fenAfter, opts.signal);
@@ -849,6 +848,35 @@ function scoreToCp(info: EngineInfo): number {
 		return info.scoreMate > 0 ? MATE_CP : -MATE_CP;
 	}
 	return info.scoreCp ?? 0;
+}
+
+/**
+ * Convert a (engine before, engine after) pair to user-POV centipawns
+ * and the resulting non-negative cpLoss.
+ *
+ * `before` is analysed at a position where the user is to move, so its
+ * raw STM-POV score is already user-POV. `after` is at a position where
+ * the opponent is to move (the user just moved), so its STM-POV score
+ * must be negated.
+ *
+ * Exported so a unit test can pin the conversion against worked
+ * examples — the regression that motivated this helper (PR #38) was a
+ * sign flip that only manifested on the after-position, hence quietly
+ * doubled cpLoss on every move at black-to-move boundaries.
+ */
+export function enginePairToUserPov(
+	before: EngineInfo,
+	after: EngineInfo,
+	userColor: Color
+): { userEvalBeforeCp: number; userEvalAfterCp: number; cpLoss: number } {
+	const stmAfter: Color = userColor === 'white' ? 'black' : 'white';
+	const userEvalBeforeCp = stmPovToUserPov(scoreToCp(before), userColor, userColor);
+	const userEvalAfterCp = stmPovToUserPov(scoreToCp(after), stmAfter, userColor);
+	return {
+		userEvalBeforeCp,
+		userEvalAfterCp,
+		cpLoss: Math.max(0, userEvalBeforeCp - userEvalAfterCp)
+	};
 }
 
 /**
