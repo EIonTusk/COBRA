@@ -225,6 +225,14 @@ jobs:
       - name: Initialize iOS project
         run: npx tauri ios init --ci
 
+      # Re-run `tauri icon` after init: the CLI only writes mobile icons
+      # into the gen project when gen/<platform>/ already exists, so the
+      # earlier icons-job run only filled src-tauri/icons/<platform>/.
+      # Running it again here drops the launcher icons straight into the
+      # Xcode AppIcon.appiconset.
+      - name: Place app icons into iOS project
+        run: npx tauri icon src-tauri/icons/source.png --output src-tauri/icons
+
       - name: Configure signing
         id: signing
         env:
@@ -362,6 +370,14 @@ jobs:
 
       - name: Initialize Android project
         run: npx tauri android init --ci
+
+      # Re-run `tauri icon` after init: the CLI only writes mobile icons
+      # into the gen project when gen/<platform>/ already exists, so the
+      # earlier icons-job run only filled src-tauri/icons/android/ as a
+      # fallback. Running it again here drops the mipmap PNGs and the
+      # adaptive-icon XML straight into gen/android/app/src/main/res/.
+      - name: Place app icons into Android project
+        run: npx tauri icon src-tauri/icons/source.png --output src-tauri/icons
 
       - name: Configure signing
         id: signing
