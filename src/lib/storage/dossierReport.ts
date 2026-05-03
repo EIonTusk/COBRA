@@ -17,10 +17,17 @@ const KEY = 'latest';
 /**
  * Bump this when the Style scan-result shape changes in a way that
  * breaks the page's render path (e.g. a new required field on
- * EvalAxesSummary). Reports with an older version are dropped on load
- * rather than crashing the page.
+ * EvalAxesSummary), OR when the underlying scoring math changes such
+ * that previously-cached reports would be misleading to display.
+ * Reports with an older version are dropped on load rather than
+ * crashing the page.
+ *
+ * v2 (2026-05): engine cp values were being read in the wrong POV at
+ * black-to-move positions, inflating cpLoss / depressing accuracy on
+ * normal moves and demoting blunders. v1 reports are silently
+ * abandoned so users get correct numbers on next scan.
  */
-export const DOSSIER_REPORT_VERSION = 1;
+export const DOSSIER_REPORT_VERSION = 2;
 
 /**
  * Session-scoped override used by /dossier/shared to inject a decoded
