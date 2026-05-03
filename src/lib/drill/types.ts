@@ -46,7 +46,7 @@ export interface DrillEntry {
 	segIdx: number;
 }
 
-export type MoveQuality = 'correct' | 'playable' | 'dubious' | 'mistake' | 'blunder';
+export type { MoveQuality } from './grade';
 
 export type DrillPhase =
 	| 'loading'
