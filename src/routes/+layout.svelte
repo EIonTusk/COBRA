@@ -13,6 +13,7 @@
 	import { applySoundSettings } from '$lib/ui/sounds';
 	import { getEngine } from '$lib/stockfish/engine';
 	import { appearance } from '$lib/board/appearance.svelte';
+	import { openExternal, isExternalHttpUrl } from '$lib/platform/openExternal';
 	import pkg from '../../package.json';
 
 	const appVersion = pkg.version;
@@ -116,6 +117,39 @@
 	// One effect, lives for the session — the layout never unmounts.
 	$effect(() => {
 		appearance.apply();
+	});
+
+	// Tauri-only: route external link clicks to the OS browser instead of
+	// the in-app WebView. Without this, `<a target="_blank" href="https://…">`
+	// either spawns a sandboxed webview (no saved passwords / cookies) or
+	// navigates the main webview off the app entirely. The opener plugin
+	// hands the URL to the user's real browser. Web builds keep the native
+	// `<a>` behaviour the browser already implements correctly.
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		// Cheap synchronous check — `isTauri()` from @tauri-apps/api/core
+		// just looks for `__TAURI_INTERNALS__` on window. Skip the import
+		// to keep this hot-path tiny.
+		const inTauri = '__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window;
+		if (!inTauri) return;
+		function onClick(e: MouseEvent) {
+			// Let modifier-clicks (cmd/ctrl/middle-click "open in new tab")
+			// fall through to default handling — those users know what they
+			// want; we shouldn't second-guess.
+			if (e.defaultPrevented) return;
+			if (e.button !== 0) return;
+			if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+			const target = e.target instanceof Element ? e.target : null;
+			const a = target?.closest('a');
+			if (!a) return;
+			const href = a.getAttribute('href');
+			if (!href) return;
+			if (!isExternalHttpUrl(href)) return;
+			e.preventDefault();
+			void openExternal(new URL(href, window.location.href).href);
+		}
+		document.addEventListener('click', onClick);
+		return () => document.removeEventListener('click', onClick);
 	});
 
 	onMount(async () => {
