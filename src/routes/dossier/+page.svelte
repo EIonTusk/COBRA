@@ -56,8 +56,10 @@
 		BASELINE_META,
 		pickBaseline,
 		primarySpeed,
-		setRuntimeBaselines
+		setRuntimeBaselines,
+		fingerprintFromGames
 	} from '$lib/dossier/fingerprint';
+	import { loadMastersBaseline, type LoadedMastersBaseline } from '$lib/storage/mastersBaseline';
 	// The v1 archetype module is still used by the library page, but /dossier
 	// now derives its own profile from v2 data via buildDossierProfile below.
 	import { leakToStoredMistake } from '$lib/dossier/leakDrills';
@@ -174,6 +176,12 @@
 
 	let viewingShared = $state(false);
 
+	// Cached masters baseline. Loaded silently on mount; if the user
+	// hasn't fetched one yet, this stays null and downstream cards
+	// (tension, etc.) just hide their "vs masters" overlays. The fetch
+	// UI lives on dossier subpages where it's contextually relevant.
+	let mastersBaseline = $state<LoadedMastersBaseline | null>(null);
+
 	onMount(async () => {
 		settings = await getSettings();
 		accounts = collectAccountsFromSettings(settings);
@@ -191,6 +199,8 @@
 		// runtime cache so pickBaseline() picks them on first render.
 		storedBaselines = await listStoredBaselines();
 		setRuntimeBaselines(storedBaselines);
+
+		mastersBaseline = await loadMastersBaseline();
 
 		// Restore the most recent report so the diagnostic sections
 		// render on navigation without forcing a fresh scan. If /dossier/shared
@@ -543,6 +553,23 @@
 		return {
 			release: result.fingerprint.tension.releaseRate - activeBaseline.tension.releaseRate,
 			create: result.fingerprint.tension.creationRate - activeBaseline.tension.creationRate
+		};
+	});
+
+	// Masters tension benchmark — null until the user fetches a masters
+	// baseline from one of the subpages. Recomputed from the cached
+	// ClassifiedGame[] so we get the same release/creation accounting
+	// as the user's own fingerprint without a custom aggregator.
+	const mastersTension = $derived.by(() => {
+		if (!mastersBaseline?.games.length) return null;
+		const fp = fingerprintFromGames(mastersBaseline.games);
+		if (fp.tension.tensionedMoves < 25) return null;
+		return {
+			releaseRate: fp.tension.releaseRate,
+			creationRate: fp.tension.creationRate,
+			tensionedMoves: fp.tension.tensionedMoves,
+			totalMoves: fp.totalUserMoves,
+			games: mastersBaseline.games.length
 		};
 	});
 
@@ -1017,6 +1044,7 @@
 								fingerprint={fp}
 								{activeBaseline}
 								{tensionDelta}
+								{mastersTension}
 								anchor={s.anchor}
 								sectionNum={s.num}
 								cardIdx={s.cards.length + 1}

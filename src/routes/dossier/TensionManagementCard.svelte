@@ -7,6 +7,19 @@
 		fingerprint: DossierFingerprint;
 		activeBaseline: PickedBaseline;
 		tensionDelta: { release: number; create: number };
+		/**
+		 * Tension rates from the cached masters baseline (master playing the
+		 * user's colour in their chosen openings). null when no baseline is
+		 * cached or the sample is too thin — in that case the masters row is
+		 * hidden entirely and the card behaves identically to before.
+		 */
+		mastersTension: {
+			releaseRate: number;
+			creationRate: number;
+			tensionedMoves: number;
+			totalMoves: number;
+			games: number;
+		} | null;
 		/** Anchor prefix for the card id, e.g. `'section-3'`. */
 		anchor: string;
 		/** Section number — drives the exhibit numbering. */
@@ -15,7 +28,24 @@
 		cardIdx: number;
 	}
 
-	let { fingerprint, activeBaseline, tensionDelta, anchor, sectionNum, cardIdx }: Props = $props();
+	let {
+		fingerprint,
+		activeBaseline,
+		tensionDelta,
+		mastersTension,
+		anchor,
+		sectionNum,
+		cardIdx
+	}: Props = $props();
+
+	const mastersDelta = $derived(
+		mastersTension
+			? {
+					release: fingerprint.tension.releaseRate - mastersTension.releaseRate,
+					create: fingerprint.tension.creationRate - mastersTension.creationRate
+				}
+			: null
+	);
 
 	const fpTension = $derived(fingerprint.tension);
 
@@ -66,7 +96,8 @@
 			<span class="text-[var(--color-parchment-200)]">Tension management.</span>
 			Counts pawn–pawn contact pairs and how you treat them: release rate is how often you resolve tension
 			when it's on the board; creation rate is how often you introduce new contact yourself. Both compared
-			against your same-rating peer baseline.
+			against your same-rating peer baseline{#if mastersTension}, with a directional masters
+				reference when one is cached{/if}.
 		</p>
 
 		<figure
@@ -102,6 +133,22 @@
 							{signedPctFmt(tensionDelta.release, 1)}
 						</span>
 					</div>
+					{#if mastersTension && mastersDelta}
+						<div
+							class="mt-0.5 flex items-baseline justify-between text-[10px] text-[var(--color-parchment-500)]"
+						>
+							<span>masters {pct(mastersTension.releaseRate)}</span>
+							<span
+								class="font-mono {mastersDelta.release > 0.025
+									? 'text-emerald-300'
+									: mastersDelta.release < -0.025
+										? 'text-amber-300'
+										: ''}"
+							>
+								{signedPctFmt(mastersDelta.release, 1)}
+							</span>
+						</div>
+					{/if}
 				</div>
 				<div class="rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-900)] p-2">
 					<div class="text-[10px] text-[var(--color-parchment-500)]">Creation rate</div>
@@ -126,10 +173,31 @@
 							{signedPctFmt(tensionDelta.create, 1)}
 						</span>
 					</div>
+					{#if mastersTension && mastersDelta}
+						<div
+							class="mt-0.5 flex items-baseline justify-between text-[10px] text-[var(--color-parchment-500)]"
+						>
+							<span>masters {pct(mastersTension.creationRate)}</span>
+							<span
+								class="font-mono {mastersDelta.create > 0.015
+									? 'text-emerald-300'
+									: mastersDelta.create < -0.015
+										? 'text-amber-300'
+										: ''}"
+							>
+								{signedPctFmt(mastersDelta.create, 1)}
+							</span>
+						</div>
+					{/if}
 				</div>
 			</div>
 			<div class="mt-2 text-[10px] text-[var(--color-parchment-500)]">
-				{fpTension.tensionedMoves.toLocaleString()} moves with pawn contact on the board.
+				{fpTension.tensionedMoves.toLocaleString()} moves with pawn contact on the board.{#if mastersTension}
+					<span>
+						Masters baseline: {mastersTension.tensionedMoves.toLocaleString()} contact moves across
+						{mastersTension.games} master games.
+					</span>
+				{/if}
 			</div>
 		</figure>
 	</div>
