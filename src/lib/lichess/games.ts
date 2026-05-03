@@ -4,6 +4,32 @@
  * database — consumers iterate incrementally and can display progress.
  */
 
+/**
+ * Thrown when Lichess returns 429. Carries the parsed `Retry-After`
+ * header (or Lichess's documented 60s default if the header is absent)
+ * so callers can decide whether to wait, back off, or abort the rest
+ * of a batch — hammering through more requests during a cooldown just
+ * extends it.
+ */
+export class LichessRateLimitedError extends Error {
+	constructor(public retryAfterMs: number) {
+		super(`Rate limited by Lichess (Retry-After ${Math.round(retryAfterMs / 1000)}s).`);
+		this.name = 'LichessRateLimitedError';
+	}
+}
+
+/**
+ * Lichess sends `Retry-After` as an integer number of seconds. Returns
+ * the documented 60s default when the header is missing or unparseable
+ * — Lichess's published policy is "wait a full minute before resuming".
+ */
+function parseRetryAfter(header: string | null): number {
+	if (!header) return 60_000;
+	const seconds = Number.parseInt(header.trim(), 10);
+	if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+	return 60_000;
+}
+
 export interface LichessPlayer {
 	user?: { name: string; id?: string; title?: string | null };
 	rating?: number;
@@ -64,6 +90,16 @@ export async function* streamUserGames(
 	if (opts.variant === 'standard') params.set('perfType', 'bullet,blitz,rapid,classical');
 	if (opts.since !== undefined) params.set('since', String(opts.since));
 
+	// Defense in depth: an empty token sends `Authorization: Bearer ` to
+	// Lichess, which they treat as malformed-anonymous and rate-limit far
+	// more aggressively than a properly authenticated request. Callers
+	// should already gate on token presence; this throw makes the bug
+	// loud rather than silently returning 429 storms.
+	if (!opts.token) {
+		throw new Error(
+			'streamUserGames requires a Lichess token (anonymous calls trip 429 rate limits immediately).'
+		);
+	}
 	const url = `https://lichess.org/api/games/user/${encodeURIComponent(username)}?${params}`;
 	const res = await fetch(url, {
 		headers: {
@@ -73,7 +109,9 @@ export async function* streamUserGames(
 		signal: opts.signal
 	});
 	if (res.status === 404) throw new Error(`Lichess user "${username}" not found.`);
-	if (res.status === 429) throw new Error('Rate limited by Lichess. Wait a minute and retry.');
+	if (res.status === 429) {
+		throw new LichessRateLimitedError(parseRetryAfter(res.headers.get('Retry-After')));
+	}
 	if (!res.ok || !res.body) throw new Error(`Lichess API: HTTP ${res.status}`);
 
 	const reader = res.body.getReader();
