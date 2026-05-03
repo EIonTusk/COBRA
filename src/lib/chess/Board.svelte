@@ -20,6 +20,15 @@
 		/** Overlay shapes (arrows / circles) rendered on top of the board. */
 		shapes?: DrawShape[];
 		onmove?: (orig: Key, dest: Key, metadata: MoveMetadata) => void;
+		/**
+		 * One-shot toggle the parent can flip on (via `bind:`) to suppress the
+		 * sound on the next fen change — used when the runner snaps the board
+		 * to a new question position, where playing a "move" sound would
+		 * sound like a phantom delayed move. Internally also flipped on after
+		 * a user-initiated drag so the round-trip fen update doesn't double-
+		 * sound.
+		 */
+		skipNextFenSound?: boolean;
 	}
 
 	let {
@@ -33,7 +42,8 @@
 		viewOnly = false,
 		coordinates = false,
 		shapes,
-		onmove
+		onmove,
+		skipNextFenSound = $bindable(false)
 	}: Props = $props();
 
 	let el: HTMLDivElement;
@@ -41,10 +51,8 @@
 
 	// Track the fen we've already sounded for so we can detect programmatic
 	// moves (opponent replies, refutation PV playback) that don't go through
-	// chessground's `events.after`. `skipNextFenSound` suppresses the sound
-	// for user-initiated moves, since `events.after` already played it.
+	// chessground's `events.after`.
 	let lastSoundedFen = '';
-	let skipNextFenSound = false;
 
 	function countPieces(f: string): number {
 		const board = f.split(' ', 1)[0] ?? '';
