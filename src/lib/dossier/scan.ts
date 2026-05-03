@@ -187,6 +187,13 @@ export async function scanDossierAcrossAccounts(
 		try {
 			evalAxes = await analyseEvalAxes(classified, {
 				depth: effectiveDepth,
+				// Adaptive scoring: every move gets a cheap shallow pass; only
+				// positions where the engine itself is unsure (top-1 vs top-2
+				// gap < ambiguityGap) get the full deep re-pass. Cuts the
+				// average per-move work to roughly the shallow-only budget
+				// while preserving precision exactly where it matters for
+				// cpLoss / blunder classification.
+				adaptive: true,
 				signal: opts.signal,
 				onProgress: opts.onEvalProgress,
 				lichessToken: token ?? undefined,

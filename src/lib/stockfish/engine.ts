@@ -63,6 +63,7 @@ export class Engine {
 	private sf: StockfishWebInstance | null = null;
 	private handlers: Array<(info: EngineInfo) => void> = [];
 	private bestmoveHandlers: Array<() => void> = [];
+	private readyokHandlers: Array<() => void> = [];
 	private errorHandlers: Array<(e: EngineError) => void> = [];
 	private readyPromise: Promise<void> | null = null;
 	private sideToMove: 'white' | 'black' = 'white';
@@ -126,8 +127,28 @@ export class Engine {
 			}
 			const buf = new Uint8Array(await res.arrayBuffer());
 			sf.setNnueBuffer(buf, 0);
-			sf.uci('isready');
+
+			// Performance options. lila-stockfish-web defaults to 1 thread
+			// and 16 MB hash, which makes the dossier scan crawl and triggers
+			// "no info arrived" timeouts on complex positions. Bump both to
+			// numbers that match what Lichess analysis itself uses in the
+			// browser. `hardwareConcurrency` is widely supported (workers
+			// included); the Math.min cap protects users on extreme machines
+			// where running too many threads against a small NNUE wastes
+			// CPU on synchronisation.
+			const cores =
+				typeof navigator !== 'undefined' && typeof navigator.hardwareConcurrency === 'number'
+					? navigator.hardwareConcurrency
+					: 4;
+			const threads = Math.max(1, Math.min(cores, 8));
+			sf.uci(`setoption name Threads value ${threads}`);
+			sf.uci(`setoption name Hash value 64`);
+
 			this.sf = sf;
+			// Block until Stockfish has acknowledged init + the setoptions
+			// above. Without this, the first analyseMulti can race the
+			// option apply and search at depth 1 with stale Threads=1.
+			await this.sync();
 		})();
 		return this.readyPromise;
 	}
@@ -245,6 +266,27 @@ export class Engine {
 	}
 
 	/**
+	 * UCI `isready` synchronisation. Sends `isready`, resolves on the
+	 * next `readyok` line.
+	 *
+	 * Stockfish processes commands in order, but `setoption` is silently
+	 * dropped while a search is running. Without an `isready` between a
+	 * `stop()` and the next `setoption MultiPV …` + `go`, the new search
+	 * can race and start with stale options — which manifested as
+	 * "analyseMulti timed out before any info arrived" in the dossier
+	 * scan when MultiPV settings collided with a not-yet-finished prior
+	 * search. Awaiting `sync()` between batches forces the engine to
+	 * drain its queue first.
+	 */
+	async sync(): Promise<void> {
+		if (!this.sf) return;
+		return new Promise<void>((resolve) => {
+			this.readyokHandlers.push(resolve);
+			this.sf!.uci('isready');
+		});
+	}
+
+	/**
 	 * One-shot eval. Runs `go depth N` against the given FEN and resolves
 	 * with the first info line that reaches the requested depth. Use for
 	 * batch analyses (e.g. computing centipawn loss across a list of
@@ -255,7 +297,10 @@ export class Engine {
 	 * search via `go()`'s internal `stop` and the earlier promise will
 	 * never settle. Always `await` between calls.
 	 */
-	async analyse(fen: string, depth: number = 18, timeoutMs: number = 8000): Promise<EngineInfo> {
+	async analyse(fen: string, depth: number = 18, timeoutMs: number = 20000): Promise<EngineInfo> {
+		// Mirror analyseMulti — drain pending engine traffic first so the
+		// new search isn't racing a previous bestmove / stop pair.
+		await this.sync();
 		return new Promise<EngineInfo>((resolve, reject) => {
 			let resolved = false;
 			let lastInfo: EngineInfo | null = null;
@@ -354,11 +399,20 @@ export class Engine {
 		const multiPV = Math.max(1, Math.min(20, Math.floor(opts.multiPV ?? 3)));
 		const depth = opts.depth;
 		const movetimeMs = opts.movetimeMs;
-		const timeoutMs = opts.timeoutMs ?? 8000;
+		// 20s default — the dossier scan hits genuinely complex positions
+		// where multi-PV depth-14 in WASM can take >8s. Callers wanting a
+		// tighter budget pass `timeoutMs` explicitly.
+		const timeoutMs = opts.timeoutMs ?? 20000;
 		if (depth == null && movetimeMs == null) {
 			throw new Error('analyseMulti needs depth or movetimeMs');
 		}
 		this.setMultiPV(multiPV);
+		// Drain any in-flight stop/setoption traffic before subscribing +
+		// kicking off the new search. Eliminates the race that produced
+		// "no info arrived" timeouts when this analyseMulti started while
+		// the previous one's bestmove was still being processed by the
+		// engine queue.
+		await this.sync();
 
 		return new Promise<MultiInfoResult>((resolve, reject) => {
 			let resolved = false;
@@ -467,6 +521,20 @@ export class Engine {
 					const msg = e instanceof Error ? e.message : String(e);
 					console.warn('[stockfish] bestmove handler threw:', e);
 					this.emitError({ kind: 'handler', message: `bestmove handler threw: ${msg}` });
+				}
+			}
+			return;
+		}
+		if (line === 'readyok') {
+			// `isready` synchronisation. Snapshot then drain — every pending
+			// `sync()` waiter resolves on the next readyok.
+			const snapshot = this.readyokHandlers.slice();
+			this.readyokHandlers = [];
+			for (const h of snapshot) {
+				try {
+					h();
+				} catch (e) {
+					console.warn('[stockfish] readyok handler threw:', e);
 				}
 			}
 			return;
