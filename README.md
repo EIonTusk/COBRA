@@ -266,6 +266,29 @@ You'll see the _All caught up_ screen. Two buttons matter:
   habit and want to re-learn the whole tree from zero. Positions stay;
   only the schedule resets.
 
+### Line walk (default)
+
+When a card from late in a line is due, the drill walks each earlier
+user move first instead of teleporting straight to the due position.
+Prefix moves don't count towards FSRS — getting them right is a free
+pass, getting them wrong replays the segment without a lapse. This
+preserves move-sequence memory: you rehearse the line as a line, not as
+isolated flashcards.
+
+Already-graduated prefix and suffix moves are animated through rather
+than drilled — controlled by the _Animate past well-learned moves_
+threshold in Settings. You can disable line walks entirely with the
+_Walk every move of a line_ toggle if you'd rather drill the due card
+on its own.
+
+### Quick drill (across every repertoire)
+
+**Home → Drill** (or `/drill`) merges due cards from _all_ your
+repertoires into a single session. White repertoires come first, then
+black, so a session won't ping-pong between sides. The session cap and
+daily-new-card cap apply to the merged total — so once today's quota
+is spent, later repertoires drop out and you'll see them tomorrow.
+
 ### Special drill modes
 
 - `?mode=mistakes` — queue cards you've recently gotten wrong.
@@ -397,6 +420,16 @@ rescan from the page.
 
 When you answer the position correctly in retrain mode, the mistake is
 marked _corrected_ and drops off the list automatically.
+
+### Opponent prep
+
+**Home → Opponent prep**, or `/opponent-prep`. Pulls a specific Lichess
+player's recent games, walks each one against the repertoire you pick,
+and surfaces the opponent moves _at every level_ that your tree
+doesn't answer yet — ranked by how often the opponent plays them.
+Click a gap to jump straight into the editor at that position with the
+prep walk pre-loaded so you can fill them in one after another. Useful
+the night before a game against someone whose Lichess handle you know.
 
 ---
 
@@ -583,6 +616,14 @@ subsequent pushes / pulls are one click.
 - **Session cap** — maximum cards per drill session.
 - **Intro animation speed** — how fast the board plays the buildup to
   each card. `Off` jumps straight to the position.
+- **Walk every move of a line** — toggle line-walk mode. On (default)
+  the drill walks every earlier user move before the due card; off
+  drills the due card directly.
+- **Animate past well-learned moves** — stability threshold (in days)
+  above which line-walk prefix/suffix moves play out as animation
+  rather than as drill cards.
+- **Appearance** — board theme + piece set. The choice applies to
+  every board in the app; click a tile to preview, _Save_ to commit.
 - **Explorer filters** — time controls, rating buckets.
 - **FSRS parameters** — for the curious. Defaults work fine.
 - **Export library** — downloads a single JSON containing every
@@ -677,7 +718,8 @@ accidentally duplicate-drill them.
 
 IndexedDB stores: `repertoires`, `nodes`, `cards`, `idea_cards`,
 `settings`, `explorer_stats`, `mistakes`, `empirical_gaps`, `baselines`,
-`style_reports`. Schema is at v12; migrations are additive.
+`style_reports`, `dossier_scan_checkpoint`, `spar_games`, `position_wdl`.
+Schema is at v15; migrations are additive.
 
 ---
 
