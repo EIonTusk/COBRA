@@ -148,28 +148,20 @@ export async function scanDossierAcrossAccounts(
 								signal: opts.signal
 							});
 
-				// `scanned` counts every game pulled from the stream (the
-				// raw API throughput); `kept` counts games that survived
-				// the variant filter AND classified. The progress callback
-				// reports `kept` because that matches the user's mental
-				// model of "games gathered for the dossier" — `scanned`
-				// can momentarily overshoot the limit (e.g. a chess.com
-				// monthly archive yielding more games before the
-				// client-side cap kicks in, or a Lichess perfType-misclass
-				// game that gets dropped by `variant !== 'standard'`),
-				// which previously made the counter visibly jump above
-				// the configured max and then snap back to the limit.
+				// `scanned` counts every game pulled from the stream (raw API
+				// throughput); the progress callback reports the cumulative
+				// `classified.length` across ALL accounts so the displayed
+				// counter is monotonically non-decreasing across the whole
+				// scan and matches the actual size of the analysed corpus.
+				// Per-account `scanned` is recorded in `perAccount` so the
+				// audit log still has the raw throughput.
 				let scanned = 0;
-				let kept = 0;
 				for await (const game of stream) {
 					scanned += 1;
 					if (game.variant !== 'standard') continue;
 					const c = classifyGame(game, account.username);
-					if (c) {
-						classified.push(c);
-						kept += 1;
-					}
-					opts.onProgress?.(account, kept);
+					if (c) classified.push(c);
+					opts.onProgress?.(account, classified.length);
 				}
 				perAccount.push({ account, scanned });
 			} catch (e) {
