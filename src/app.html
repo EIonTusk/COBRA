@@ -8,18 +8,50 @@
 		<!--
 			Bootstrap diagnostic overlay. Loads before any module so it can
 			catch errors in module evaluation, SW registration, or anything
-			else that fires before Svelte mounts. Invisible until an error
-			is captured — then it pins itself to the bottom of the screen
-			with a scrollable log. On platforms where there's no console
-			to read (Android Tauri WebView), this is the only signal users
-			and devs get when the app fails to start.
+			else that fires before Svelte mounts. Pins a scrollable log to
+			the bottom of the screen with a × to dismiss.
+
+			Persists captures to localStorage so a hard crash (native panic,
+			WebView process kill, deep-link cold-restart) doesn't erase the
+			trail — the next launch reads them back and renders them with a
+			[prev] prefix. Crucial on Android Tauri specifically because the
+			OS may relaunch the process when a deep-link intent arrives.
+
+			App code can call `__cobraDiag.log('message')` to add tagged
+			trace entries (used by the deep-link handler in +layout.svelte
+			to make each step visible without flooding the dev console).
 		-->
 		<script>
 			(function () {
-				if (window.__cobraDiag) return;
-				window.__cobraDiag = true;
+				if (window.__cobraDiag && window.__cobraDiag.version) return;
+				var STORAGE_KEY = 'cobra:diag';
+				var MAX_ENTRIES = 200;
 				var entries = [];
 				var box = null;
+				function persist() {
+					try {
+						localStorage.setItem(STORAGE_KEY, JSON.stringify(entries.slice(-MAX_ENTRIES)));
+					} catch (_) {
+						/* quota / unavailable — best-effort */
+					}
+				}
+				function loadPrevious() {
+					try {
+						var raw = localStorage.getItem(STORAGE_KEY);
+						if (!raw) return [];
+						var arr = JSON.parse(raw);
+						return Array.isArray(arr) ? arr : [];
+					} catch (_) {
+						return [];
+					}
+				}
+				function clearPersisted() {
+					try {
+						localStorage.removeItem(STORAGE_KEY);
+					} catch (_) {
+						/* ignore */
+					}
+				}
 				function makeBox() {
 					if (box) return box;
 					box = document.createElement('div');
@@ -42,7 +74,7 @@
 					};
 					box.appendChild(close);
 					var hdr = document.createElement('div');
-					hdr.textContent = 'COBRA diagnostic — JS errors captured below';
+					hdr.textContent = 'COBRA diagnostic — JS errors and trace';
 					hdr.style.cssText = 'color:#fa8;margin-bottom:4px;font-weight:600';
 					box.appendChild(hdr);
 					if (document.body) {
@@ -54,22 +86,43 @@
 					}
 					return box;
 				}
+				function colorFor(kind) {
+					if (kind === 'error' || kind === 'unhandled') return '#fdd';
+					if (kind === 'trace') return '#bce';
+					return '#fea';
+				}
+				function append(line, kind) {
+					var b = makeBox();
+					if (!b) return;
+					var el = document.createElement('div');
+					el.style.cssText =
+						'border-top:1px solid #533;padding-top:4px;margin-top:4px;color:' + colorFor(kind);
+					el.textContent = line;
+					b.appendChild(el);
+					b.scrollTop = b.scrollHeight;
+				}
 				function add(kind, msg, where) {
 					try {
 						var ts = new Date().toISOString().slice(11, 23);
 						var line = '[' + ts + '] ' + kind + ': ' + msg + (where ? '\n  at ' + where : '');
-						entries.push(line);
-						var b = makeBox();
-						if (!b) return;
-						var el = document.createElement('div');
-						el.style.cssText =
-							'border-top:1px solid #533;padding-top:4px;margin-top:4px;color:' +
-							(kind === 'error' || kind === 'unhandled' ? '#fdd' : '#fea');
-						el.textContent = line;
-						b.appendChild(el);
+						entries.push({ kind: kind, line: line });
+						persist();
+						append(line, kind);
 					} catch (_) {
 						/* never let the diagnostic itself throw */
 					}
+				}
+				// Surface previous-session captures (typically present after
+				// a hard crash that relaunched the process). Entries get a
+				// [prev] prefix so they're distinguishable from this session.
+				var prev = loadPrevious();
+				if (prev.length) {
+					add('trace', 'previous session left ' + prev.length + ' entries');
+					for (var p = 0; p < prev.length; p += 1) {
+						var e = prev[p];
+						if (e && e.line) append('[prev] ' + e.line, e.kind || 'trace');
+					}
+					clearPersisted();
 				}
 				window.addEventListener(
 					'error',
@@ -108,19 +161,25 @@
 					}
 					return origErr.apply(console, arguments);
 				};
-				// Expose a manual peek for cases where the user can't see the
-				// overlay (e.g. CSS broke). Devs in chrome://inspect can run
-				// `__cobraDiag.dump()` to copy/paste the captured log.
 				window.__cobraDiag = {
-					version: 1,
+					version: 2,
 					entries: entries,
+					/** Append a tagged trace entry from app code. */
+					log: function (msg) {
+						add('trace', String(msg));
+					},
 					show: function () {
 						makeBox();
 					},
 					dump: function () {
-						return entries.join('\n');
+						return entries
+							.map(function (en) {
+								return en.line;
+							})
+							.join('\n');
 					}
 				};
+				add('trace', 'overlay armed (UA=' + navigator.userAgent.slice(0, 120) + ')');
 			})();
 		</script>
 		%sveltekit.head%

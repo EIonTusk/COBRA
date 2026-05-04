@@ -167,55 +167,99 @@
 		const inTauri = '__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window;
 		if (!inTauri) return;
 
+		// Trace via the diagnostic overlay. `__cobraDiag` is set up by the
+		// inline script in app.html; entries persist across crashes / cold
+		// restarts via localStorage, which is essential here because an
+		// incoming deep-link intent can relaunch the process and erase the
+		// in-memory log. Defensive `?.` chain so a stripped overlay (web
+		// build, future refactor) doesn't make this throw.
+		const trace = (msg: string) => {
+			try {
+				(window as unknown as { __cobraDiag?: { log?: (m: string) => void } }).__cobraDiag?.log?.(
+					msg
+				);
+			} catch {
+				/* ignore */
+			}
+		};
+
+		trace('deep-link effect armed');
+
 		let cancelled = false;
 		let unlisten: (() => void) | undefined;
 
-		function dispatch(rawUrls: string[] | null | undefined) {
+		function dispatch(rawUrls: string[] | null | undefined, source: string) {
+			trace(`dispatch[${source}] urls=${rawUrls ? rawUrls.length : 0}`);
 			if (!rawUrls) return;
 			for (const raw of rawUrls) {
+				trace(`dispatch[${source}] raw=${raw}`);
 				let parsed: URL;
 				try {
 					parsed = new URL(raw);
-				} catch {
+				} catch (e) {
+					trace(`dispatch[${source}] URL parse threw: ${e instanceof Error ? e.message : e}`);
 					continue;
 				}
-				if (parsed.protocol !== `${TAURI_DEEP_LINK_SCHEME}:`) continue;
+				if (parsed.protocol !== `${TAURI_DEEP_LINK_SCHEME}:`) {
+					trace(`dispatch[${source}] skip — protocol=${parsed.protocol}`);
+					continue;
+				}
 				// `new URL("<scheme>://auth/lichess/callback?…")` parses host="auth"
 				// and pathname="/lichess/callback". Stitch them back together
 				// for matching so the path is whole regardless of how the OS
 				// formatted the incoming URL.
 				const fullPath = `${parsed.host}${parsed.pathname}`.replace(/\/+$/, '');
+				trace(`dispatch[${source}] fullPath=${fullPath}`);
 				if (fullPath !== 'auth/lichess/callback') continue;
-				// Reuse the existing callback page so users see the same
-				// "Linking your account…" UX whether they came from web or
-				// the deep-link. The eslint rule wants the whole string to
-				// be `resolve(...)`-prefixed; we *are* resolving the route,
-				// then tacking on an arbitrary query string the OS handed us.
-				// eslint-disable-next-line svelte/no-navigation-without-resolve
-				void goto(resolve('/auth/lichess/callback') + parsed.search);
+				const target = resolve('/auth/lichess/callback') + parsed.search;
+				trace(`dispatch[${source}] navigating → ${target.slice(0, 80)}`);
+				try {
+					// Reuse the existing callback page so users see the same
+					// "Linking your account…" UX whether they came from web or
+					// the deep-link. The eslint rule wants the whole string to
+					// be `resolve(...)`-prefixed; we *are* resolving the route,
+					// then tacking on an arbitrary query string the OS handed us.
+					// eslint-disable-next-line svelte/no-navigation-without-resolve
+					void goto(target);
+				} catch (e) {
+					trace(`dispatch[${source}] goto threw: ${e instanceof Error ? e.message : e}`);
+				}
 			}
 		}
 
 		(async () => {
 			try {
+				trace('importing @tauri-apps/plugin-deep-link');
 				const dl = await import('@tauri-apps/plugin-deep-link');
+				trace('deep-link plugin imported');
 				// Cold-start: the app may have just been launched *by* the
 				// callback URL, in which case the URL is queued from before
 				// our listener was registered.
 				try {
+					trace('calling getCurrent()');
 					const startUrls = await dl.getCurrent();
-					if (!cancelled) dispatch(startUrls);
+					trace(`getCurrent() returned ${startUrls ? startUrls.length : 'null'} url(s)`);
+					if (!cancelled) dispatch(startUrls, 'getCurrent');
 				} catch (e) {
+					const msg = e instanceof Error ? e.message : String(e);
+					trace(`getCurrent threw: ${msg}`);
 					console.warn('[cobra] deep-link getCurrent failed:', e);
 				}
 				if (cancelled) return;
-				const off = await dl.onOpenUrl((urls) => dispatch(urls));
+				trace('registering onOpenUrl listener');
+				const off = await dl.onOpenUrl((urls) => {
+					trace(`onOpenUrl fired: ${urls ? urls.length : 0} url(s)`);
+					dispatch(urls, 'onOpenUrl');
+				});
+				trace('onOpenUrl listener registered');
 				if (cancelled) {
 					off();
 				} else {
 					unlisten = off;
 				}
 			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				trace(`deep-link plugin unavailable: ${msg}`);
 				console.warn('[cobra] deep-link plugin unavailable:', e);
 			}
 		})();
