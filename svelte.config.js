@@ -6,6 +6,17 @@ import adapter from '@sveltejs/adapter-static';
 // workflow sets.
 const base = process.env.COBRA_BASE_PATH ?? '';
 
+// Tauri builds set TAURI_ENV_PLATFORM. We use this to opt out of
+// SvelteKit's auto-registration of src/service-worker.ts. On Android,
+// Chromium refuses to register a SW against `http://tauri.localhost`
+// (subdomains of localhost are not secure-context for SW purposes over
+// plain HTTP), and the resulting registration error is noise — there
+// is no offline gap to fill in a packaged app, and no GH-Pages COOP/COEP
+// shim to need. (The PWA plugin in vite.config.ts is also disabled in
+// Tauri builds; this covers SvelteKit's *own* SW auto-register, which
+// runs independently of @vite-pwa.)
+const isTauriBuild = !!process.env.TAURI_ENV_PLATFORM;
+
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
 	compilerOptions: {
@@ -22,6 +33,9 @@ const config = {
 		}),
 		paths: {
 			base
+		},
+		serviceWorker: {
+			register: !isTauriBuild
 		},
 		alias: {
 			$lib: 'src/lib'

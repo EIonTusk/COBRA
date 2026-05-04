@@ -278,10 +278,17 @@
 		work on GH Pages), and those headers only apply to responses that
 		go *through* the SW — which doesn't happen until the first time
 		the page is controlled.
+
+		Skipped in Tauri (desktop and mobile): the PWA isn't registered
+		there (see vite.config.ts), so `serviceWorker.ready` would resolve
+		never. On Android Tauri WebView the URL is `http://tauri.localhost`,
+		which Chromium refuses to register a SW against, so this script
+		would also surface a noisy console.error in the diagnostic overlay.
 	-->
 	<script>
 		(function () {
 			if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
+			if ('__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window) return;
 			if (window.crossOriginIsolated) return;
 			if (navigator.serviceWorker.controller) return;
 			navigator.serviceWorker.ready.then(function () {
