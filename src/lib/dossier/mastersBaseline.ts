@@ -29,7 +29,7 @@ import type { LichessGameMeta } from '$lib/lichess/games';
 import type { Color } from '$lib/types';
 
 import { classifyGame, type ClassifiedGame } from './classify';
-import { chooserForOpeningName } from './openings';
+import { structuralChooserForOpeningName } from './openings';
 import type { MastersBaselineCoverage } from '$lib/storage/mastersBaseline';
 
 export interface MastersBaseline {
@@ -51,7 +51,8 @@ export interface MastersBuildOpts {
 	/** Top games to request per (family, colour). Lichess caps around 15. */
 	perTarget?: number;
 	/** Cap the number of (family, colour) targets we'll fetch — keeps the
-	 *  initial fetch under a few minutes of wall-clock. */
+	 *  initial fetch under a few minutes of wall-clock. Ignored when
+	 *  `targets` is supplied (caller-picked targets are fetched in full). */
 	maxTargets?: number;
 	/** Skip families with fewer than this many user games. */
 	minUserGames?: number;
@@ -59,13 +60,28 @@ export interface MastersBuildOpts {
 	requestDelayMs?: number;
 	signal?: AbortSignal;
 	onProgress?: (p: MastersFetchProgress) => void;
+	/** Caller-supplied target list. When present, skips the auto-extract
+	 *  + chooser filter and fetches exactly these (family, colour) pairs.
+	 *  Used by the panel's "Configure" picker so the user can hand-pick
+	 *  which buckets get fetched. */
+	targets?: Target[];
 }
 
-interface Target {
+export interface Target {
 	family: string;
 	color: Color;
 	userGames: number;
 	canonicalFen: string;
+}
+
+/** Candidate target plus a flag indicating whether the auto-filter would
+ *  include it by default. Surfaced to the panel UI so the user can see
+ *  which families *could* be fetched and override the default selection. */
+export interface CandidateTarget extends Target {
+	/** True when the structural chooser would auto-include this — i.e. the
+	 *  user picked this opening (or both sides did). False for one-sided
+	 *  faced cases like Caro-Kann as White. */
+	autoIncluded: boolean;
 }
 
 interface ExplorerTopGame {
@@ -81,9 +97,15 @@ export async function buildMastersBaseline(
 	classified: ClassifiedGame[],
 	opts: MastersBuildOpts
 ): Promise<MastersBaseline> {
-	const targets = extractTargets(classified, opts.minUserGames ?? 4);
-	targets.sort((a, b) => b.userGames - a.userGames);
-	const capped = targets.slice(0, opts.maxTargets ?? 12);
+	let capped: Target[];
+	if (opts.targets && opts.targets.length > 0) {
+		// Caller-picked: trust the input order and don't apply maxTargets.
+		capped = opts.targets;
+	} else {
+		const targets = extractTargets(classified, opts.minUserGames ?? 4);
+		targets.sort((a, b) => b.userGames - a.userGames);
+		capped = targets.slice(0, opts.maxTargets ?? 12);
+	}
 
 	const games: ClassifiedGame[] = [];
 	const coverage: MastersBaselineCoverage[] = [];
@@ -138,6 +160,24 @@ function simpleHash(s: string): string {
 }
 
 function extractTargets(classified: ClassifiedGame[], minUserGames: number): Target[] {
+	return enumerateMastersCandidates(classified, minUserGames)
+		.filter((c) => c.autoIncluded)
+		.map(({ autoIncluded: _, ...t }) => t);
+}
+
+/**
+ * List every (family, colour) pair the user has played at least
+ * `minUserGames` times — both auto-included and "would-be-skipped"
+ * cases. The panel UI uses this to render a picker so the user can see
+ * the full set and override the default selection.
+ *
+ * Sorted by user game count (most-played first) so the picker reads
+ * top-down in order of relevance.
+ */
+export function enumerateMastersCandidates(
+	classified: ClassifiedGame[],
+	minUserGames = 4
+): CandidateTarget[] {
 	// Group by (family-from-PGN, user-colour); collect candidate canonical FENs
 	// from the user's 4th user-move (≈ move 4–5 in chess terms — past the
 	// ECO-defining moves but before deep theory diverges).
@@ -166,25 +206,28 @@ function extractTargets(classified: ClassifiedGame[], minUserGames: number): Tar
 		}
 	}
 
-	const targets: Target[] = [];
+	const candidates: CandidateTarget[] = [];
 	for (const b of groups.values()) {
 		if (b.userGames < minUserGames) continue;
-		// Only fetch families where the user actually *chose* this opening
-		// (or the chooser is ambiguous). If the family is "Caro-Kann" and the
-		// user is white, it's a "faced" — masters comparison is less useful
-		// because the choice was the opponent's, not the user's style.
-		const chooser = chooserForOpeningName(b.family, null);
-		if (chooser !== 'either' && chooser !== b.color) continue;
 		const canonical = pickMostCommon(b.fenCounts);
 		if (!canonical) continue;
-		targets.push({
+		// Auto-include rule: families the user actually *chose* (or where
+		// both sides made a real structural choice — QGD, Albin, etc.).
+		// True one-sided faced cases (e.g. Caro-Kann as White) get
+		// `autoIncluded=false` so the picker leaves them unchecked by
+		// default but still shows them so the user can override.
+		const chooser = structuralChooserForOpeningName(b.family, null);
+		const autoIncluded = chooser === 'either' || chooser === b.color;
+		candidates.push({
 			family: b.family,
 			color: b.color,
 			userGames: b.userGames,
-			canonicalFen: canonical
+			canonicalFen: canonical,
+			autoIncluded
 		});
 	}
-	return targets;
+	candidates.sort((a, b) => b.userGames - a.userGames);
+	return candidates;
 }
 
 function parseFamily(openingName: string | null, _eco: string | null): string | null {
