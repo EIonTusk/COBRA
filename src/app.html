@@ -124,11 +124,28 @@
 					}
 					clearPersisted();
 				}
+				// Spurious benign Chromium warnings we never want to surface.
+				// `ResizeObserver loop ...` fires whenever an observer callback
+				// triggers layout — it doesn't break anything and Chromium itself
+				// suppresses it in DevTools. Listing exact substrings keeps the
+				// filter narrow so genuine errors still come through.
+				var IGNORED_ERROR_SUBSTRINGS = [
+					'ResizeObserver loop completed with undelivered notifications',
+					'ResizeObserver loop limit exceeded'
+				];
+				function isIgnored(msg) {
+					if (typeof msg !== 'string') return false;
+					for (var i = 0; i < IGNORED_ERROR_SUBSTRINGS.length; i += 1) {
+						if (msg.indexOf(IGNORED_ERROR_SUBSTRINGS[i]) !== -1) return true;
+					}
+					return false;
+				}
 				window.addEventListener(
 					'error',
 					function (e) {
 						var msg =
 							(e && e.error && (e.error.stack || e.error.message)) || e.message || String(e);
+						if (isIgnored(String(msg))) return;
 						var where =
 							e && e.filename ? e.filename + ':' + (e.lineno || '?') + ':' + (e.colno || '?') : '';
 						add('error', String(msg), where);
@@ -138,6 +155,7 @@
 				window.addEventListener('unhandledrejection', function (e) {
 					var r = e && e.reason;
 					var msg = r && (r.stack || r.message) ? r.stack || r.message : String(r);
+					if (isIgnored(String(msg))) return;
 					add('unhandled', String(msg));
 				});
 				var origErr = console.error;
