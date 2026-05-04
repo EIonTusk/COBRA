@@ -5,13 +5,16 @@
 	import DossierSubpageShell from '$lib/dossier/DossierSubpageShell.svelte';
 	import MastersBaselinePanel from '$lib/dossier/MastersBaselinePanel.svelte';
 	import SquareHeatBoard from '$lib/dossier/SquareHeatBoard.svelte';
+	import Select from '$lib/ui/Select.svelte';
 	import { loadDossierReport } from '$lib/storage/dossierReport';
 	import {
 		buildSpaceControl,
 		type BuildSpaceControlOpts,
 		type SpaceControlPerspective,
+		type SpaceControlReport,
 		type SpaceControlSlice
 	} from '$lib/dossier/spaceControl';
+	import { parseOpeningName } from '$lib/dossier/openings';
 	import type { LoadedMastersBaseline } from '$lib/storage/mastersBaseline';
 	import type { DossierScanResult } from '$lib/dossier/scan';
 	import type { Phase } from '$lib/dossier/classify';
@@ -30,15 +33,24 @@
 
 	let loaded = $state(false);
 	let result = $state<DossierScanResult | null>(null);
-	// Per-perspective phase position. 0 = opening, 0.5 = middle, 1 = end.
+	// Active colour for the single combined heatmap. Per-colour state
+	// (phasePos, muteSmall, familyFilter) is keyed by colour so toggling
+	// the colour preserves what the user had set on the other side.
+	let selectedColor = $state<'white' | 'black'>('white');
+	// Per-colour phase position. 0 = opening, 0.5 = middle, 1 = end.
 	let phasePos = $state<{ white: number; black: number }>({ white: 0.5, black: 0.5 });
-	// Per-perspective mute toggle.
+	// Per-colour mute toggle.
 	let muteSmall = $state<{ white: boolean; black: boolean }>({ white: false, black: false });
 	// One global toggle for "compare against": peers (in-scan opposite-colour
 	// games) or masters (cached masters baseline). Per the dossier convention
 	// of switching baselines per module, not page-globally.
 	let compareMode = $state<'peers' | 'masters'>('peers');
 	let mastersBaseline = $state<LoadedMastersBaseline | null>(null);
+	// Per-colour opening-family filter. `'all'` keeps the unfiltered global
+	// view; selecting a specific family narrows the user-as-X samples to
+	// that family while leaving the opposite-colour games untouched so the
+	// opp baseline stays representative.
+	let familyFilter = $state<{ white: string; black: string }>({ white: 'all', black: 'all' });
 
 	onMount(async () => {
 		const saved = await loadDossierReport();
@@ -46,13 +58,57 @@
 		loaded = true;
 	});
 
-	const summary = $derived.by(() => {
-		if (!result) return null;
+	function buildOpts(): BuildSpaceControlOpts {
 		const opts: BuildSpaceControlOpts = {};
 		if (compareMode === 'masters' && mastersBaseline?.games.length) {
 			opts.comparison = mastersBaseline.games;
 		}
-		return buildSpaceControl(result.classified, opts);
+		return opts;
+	}
+
+	// Family choices per colour, sorted by user-game count desc. Uses the
+	// same `parseOpeningName` family root the opening-fit page does so the
+	// dropdown labels match the rest of the dossier.
+	const familyChoices = $derived.by(() => {
+		// Plain object counters — the derived output is a frozen pair of
+		// arrays so reactivity over an internal Map would be wasted, and
+		// the linter flags raw Map usage in .svelte files anyway.
+		const w: Record<string, number> = {};
+		const b: Record<string, number> = {};
+		if (!result)
+			return { white: [] as Array<[string, number]>, black: [] as Array<[string, number]> };
+		for (const g of result.classified) {
+			const { family } = parseOpeningName(g.openingName, g.eco);
+			const counts = g.color === 'white' ? w : b;
+			counts[family] = (counts[family] ?? 0) + 1;
+		}
+		const sorted = (counts: Record<string, number>) =>
+			Object.entries(counts).sort((a, b) => b[1] - a[1]);
+		return { white: sorted(w), black: sorted(b) };
+	});
+
+	function filteredFor(color: 'white' | 'black'): SpaceControlReport | null {
+		if (!result) return null;
+		const family = familyFilter[color];
+		if (family === 'all') return buildSpaceControl(result.classified, buildOpts());
+		// Narrow only the user-as-X side; pass through the other colour's
+		// games whole so the opp footprint stays at full sample size.
+		const filtered = result.classified.filter((g) => {
+			if (g.color !== color) return true;
+			return parseOpeningName(g.openingName, g.eco).family === family;
+		});
+		return buildSpaceControl(filtered, buildOpts());
+	}
+
+	const whiteSummary = $derived(filteredFor('white'));
+	const blackSummary = $derived(filteredFor('black'));
+
+	// Top-level summary used by the coverage strip — always reflects the
+	// unfiltered corpus so the totals are stable as the user toggles
+	// per-perspective filters.
+	const summary = $derived.by(() => {
+		if (!result) return null;
+		return buildSpaceControl(result.classified, buildOpts());
 	});
 
 	const peerWord = $derived(compareMode === 'masters' ? 'masters' : 'peers');
@@ -155,28 +211,43 @@
 		return m > 0 ? m : 1;
 	}
 
-	const perspectives = $derived.by(() => {
-		if (!summary) return [];
-		const out: Array<{
-			color: 'white' | 'black';
-			label: string;
-			perspective: SpaceControlPerspective;
-			max: number;
-		}> = [];
-		if (summary.white)
-			out.push({
-				color: 'white',
-				label: 'When you play White',
-				perspective: summary.white,
-				max: perspectiveMax(summary.white)
-			});
-		if (summary.black)
-			out.push({
-				color: 'black',
-				label: 'When you play Black',
-				perspective: summary.black,
-				max: perspectiveMax(summary.black)
-			});
+	// Single active perspective driven by the colour selector. Returns a
+	// non-null shell even when the chosen filter narrows below the
+	// sample threshold, so the dropdowns stay reachable and the user can
+	// switch back to "All openings" or to the other colour.
+	type PerspectiveEntry = {
+		color: 'white' | 'black';
+		hasGames: boolean;
+		perspective: SpaceControlPerspective | null;
+		max: number;
+	};
+	const activePerspective = $derived.by((): PerspectiveEntry => {
+		const color = selectedColor;
+		const hasGames = result?.classified.some((g) => g.color === color) ?? false;
+		const fromSummary = color === 'white' ? whiteSummary?.white : blackSummary?.black;
+		const persp = fromSummary ?? null;
+		return {
+			color,
+			hasGames,
+			perspective: persp,
+			max: persp ? perspectiveMax(persp) : 1
+		};
+	});
+
+	const colorOptions: Array<{ value: 'white' | 'black'; label: string }> = [
+		{ value: 'white', label: 'White' },
+		{ value: 'black', label: 'Black' }
+	];
+
+	const familyOptions = $derived.by(() => {
+		const choices = familyChoices[selectedColor];
+		const total = choices.reduce((s, [, n]) => s + n, 0);
+		const out: Array<{ value: string; label: string }> = [
+			{ value: 'all', label: `All openings (${total}g)` }
+		];
+		for (const [family, games] of choices) {
+			out.push({ value: family, label: `${family} (${games}g)` });
+		}
 		return out;
 	});
 </script>
@@ -265,46 +336,65 @@
 			</div>
 		</section>
 
-		{#if perspectives.length === 0}
-			<div class="mt-6 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-900)] p-4">
-				<p class="text-sm text-[var(--color-parchment-200)]">
-					Not enough same-colour samples on either side.
-				</p>
-				<p class="mt-1 text-xs text-[var(--color-parchment-500)]">
-					Each perspective needs at least 25 user-as-X and 25 opponent-as-X positions. Run a larger
-					scan or one that mixes both colours from the
-					<a class="underline" href={resolve('/dossier')}>main report</a>.
-				</p>
-			</div>
-		{/if}
-
-		{#each perspectives as p (p.color)}
-			{@const t = phasePos[p.color]}
-			{@const view = interpolate(p.perspective, t)}
-			{@const tickFmt = (v: number) => `${(v * 100).toFixed(0)}pp`}
-			<section
-				class="mt-6 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-900)] px-4 py-4"
-			>
-				<div class="flex flex-wrap items-baseline justify-between gap-3">
-					<div class="text-xs tracking-wider text-[var(--color-brass-300)] uppercase">
-						{p.label}
-					</div>
+		{@const p = activePerspective}
+		{@const t = phasePos[p.color]}
+		{@const tickFmt = (v: number) => `${(v * 100).toFixed(0)}pp`}
+		<section
+			class="mt-6 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-900)] px-4 py-4"
+		>
+			<div class="flex flex-wrap items-center justify-between gap-3">
+				<div class="text-xs tracking-wider text-[var(--color-brass-300)] uppercase">Heatmap</div>
+				<div class="flex flex-wrap items-center gap-3">
+					<label class="flex items-center gap-2 text-[11px] text-[var(--color-parchment-300)]">
+						<span class="text-[var(--color-parchment-500)]">When you play</span>
+						<Select
+							options={colorOptions}
+							value={selectedColor}
+							onchange={(v) => (selectedColor = v)}
+							class="w-28"
+						/>
+					</label>
+					<label class="flex items-center gap-2 text-[11px] text-[var(--color-parchment-300)]">
+						<span class="text-[var(--color-parchment-500)]">Opening</span>
+						<Select
+							options={familyOptions}
+							value={familyFilter[selectedColor]}
+							onchange={(v) => (familyFilter[selectedColor] = v)}
+							class="w-64"
+						/>
+					</label>
 					<label
 						class="flex cursor-pointer items-center gap-2 text-[11px] text-[var(--color-parchment-300)]"
 					>
 						<input
 							type="checkbox"
-							bind:checked={muteSmall[p.color]}
-							class="size-3.5 accent-[var(--color-brass-300)]"
+							bind:checked={muteSmall[selectedColor]}
+							class="size-4 accent-[var(--color-brass-300)]"
 						/>
 						Mute &lt; ±{(MUTE_THRESHOLD * 100).toFixed(0)}pp
 					</label>
 				</div>
-				<div class="mt-1 text-[10px] text-[var(--color-parchment-500)]">
-					vs {sourceWord} · oriented from {p.color === 'white' ? "white's" : "black's"} POV · files
-					{p.color === 'white' ? 'a–h' : 'h–a'}
-				</div>
+			</div>
+			<div class="mt-1 text-[10px] text-[var(--color-parchment-500)]">
+				vs {sourceWord} · oriented from {p.color === 'white' ? "white's" : "black's"} POV · files
+				{p.color === 'white' ? 'a–h' : 'h–a'}
+				{#if familyFilter[p.color] !== 'all'}
+					· filter <span class="font-mono text-[var(--color-parchment-300)]"
+						>{familyFilter[p.color]}</span
+					>
+				{/if}
+			</div>
 
+			{#if !p.hasGames}
+				<div
+					class="mt-4 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-950)] p-3 text-xs text-[var(--color-parchment-400)]"
+				>
+					No {p.color} games in this scan — switch to the other side or run a scan that includes both
+					colours from the
+					<a class="underline" href={resolve('/dossier')}>main report</a>.
+				</div>
+			{:else if p.perspective}
+				{@const view = interpolate(p.perspective, t)}
 				<div class="mx-auto mt-4 max-w-[32rem]">
 					<div class="flex items-stretch gap-2">
 						<!-- Legend wrapper stretches to full board height; inner
@@ -397,8 +487,22 @@
 						</div>
 					</div>
 				</div>
-			</section>
-		{/each}
+			{:else}
+				<div
+					class="mt-4 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-950)] p-3 text-xs text-[var(--color-parchment-400)]"
+				>
+					Not enough samples for this filter — each perspective needs at least 25 user-as-{p.color}
+					and 25 opp-as-{p.color === 'white' ? 'black' : 'white'} positions. Pick a broader family or
+					<button
+						type="button"
+						class="underline hover:text-[var(--color-parchment-100)]"
+						onclick={() => (familyFilter[p.color] = 'all')}
+					>
+						reset to All openings
+					</button>.
+				</div>
+			{/if}
+		</section>
 
 		<section
 			class="mt-6 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-900)] px-4 py-4"
