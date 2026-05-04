@@ -92,6 +92,9 @@
 
 <script lang="ts">
 	import { onMount, untrack } from 'svelte';
+	import { SvelteMap } from 'svelte/reactivity';
+	import { slide } from 'svelte/transition';
+	import { flip } from 'svelte/animate';
 	import { page } from '$app/state';
 	import {
 		ArrowLeft,
@@ -118,6 +121,15 @@
 	import { nodesMap } from '$lib/storage/nodes';
 	import { colorToMove, STARTPOS_FEN } from '$lib/chess/fen';
 	import { edgeFromUci, fenAfterMove, isPromotionMove, legalDests } from '$lib/chess/position';
+	import { findBranchPoint, fenForKeyInRep } from '$lib/walkthrough/repBranches';
+	import { describeGameEnd } from '$lib/walkthrough/endState';
+	import type { RecommendedGame } from '$lib/walkthrough/recommend';
+	import {
+		getPositionOpenings,
+		setPositionOpening,
+		openingFamily
+	} from '$lib/openings/positionOpenings';
+	import { autoHeight } from '$lib/ui/autoHeight';
 	import { getEngine } from '$lib/stockfish/engine';
 	import {
 		gradeMove,
@@ -182,11 +194,177 @@
 	let browseError = $state<string | null>(null);
 	let browseGames = $state<TopGameEntry[]>([]);
 	let browseYears = $state<{ since?: number; until?: number }>({});
+	// How many of the streamed candidates to show initially. The recommender
+	// surfaces up to ~30; rendering them all dilutes the top picks and makes
+	// the panel huge. The "Load more" button reveals the rest in batches.
+	const BROWSE_PAGE = 10;
+	let browseVisibleCount = $state(BROWSE_PAGE);
 	// Match depth per browse-list game (in plies) — populated when browsing
 	// by deepest user-repertoire coverage.
 	let browseDepths = $state<Map<string, { depth: number; repertoire: string; color: Color }>>(
 		new Map()
 	);
+	// Browse-filter state.
+	//   - `filterRepId`: narrows to a single rep.
+	//   - `filterColor`: narrows by colour, but only takes effect when no
+	//     specific rep is chosen (a rep already implies a colour).
+	//   - `filterLineKey`: composite "repId|fenKey" identifying one branch
+	//     of one rep. Stored as a single composite so the Line dropdown can
+	//     span every visible rep without losing track of which tree the
+	//     fenKey belongs to. Picking a line implies its rep + colour.
+	let filterRepId = $state<string | null>(null);
+	let filterColor = $state<'both' | 'white' | 'black'>('both');
+	let filterLineKey = $state<string | null>(null);
+	// Cached full-rep records (with rootFen) so the filter dropdowns can
+	// inspect tree structure without an extra IndexedDB hit each render.
+	let fullReps = $state<
+		Array<{
+			id: string;
+			name: string;
+			color: Color;
+			rootFen: string;
+			rootFenKey: string;
+			startingFenKey?: string | null;
+			nodes: Map<string, RepertoireNode>;
+		}>
+	>([]);
+	const filterRep = $derived(fullReps.find((r) => r.id === filterRepId) ?? null);
+
+	// Pool of reps the filters expose. A specific rep wins; otherwise the
+	// colour filter narrows the set; otherwise every rep is in scope. The
+	// Line dropdown always lists branches from this pool.
+	const filteredReps = $derived.by(() => {
+		if (filterRep) return [filterRep];
+		if (filterColor !== 'both') return fullReps.filter((r) => r.color === filterColor);
+		return fullReps;
+	});
+
+	// Cached opening family per branch fenKey (e.g. "Sicilian Defense"). Hydrated
+	// from the position_openings IDB store on filter changes, then lazily filled
+	// from the Lichess explorer for any branches the user hasn't visited in the
+	// rep editor yet. Display labels in the Line dropdown fall back to the bare
+	// SAN move when the cache is cold.
+	const lineOpeningNames = new SvelteMap<string, string>();
+	let lineOpeningFetchToken = 0;
+
+	// Top-level branches across every rep in `filteredReps`, each labelled
+	// with its opening family if the cache has a hit (e.g. "Sicilian Defense"
+	// / "French Defense"). Anchored at the rep's `startingFenKey` if set,
+	// otherwise the nearest branching node — same auto-detection used
+	// elsewhere. Each option's value is a composite "repId|fenKey" so the
+	// dropdown can mix branches from different reps without collisions.
+	const filterLineOptions = $derived.by(() => {
+		const opts: Array<{ value: string | null; label: string }> = [
+			{ value: null, label: 'Any line' }
+		];
+		const reps = filteredReps;
+		const includeRepName = reps.length > 1;
+		for (const rep of reps) {
+			const branchKey = findBranchPoint(rep);
+			if (!branchKey) continue;
+			const node = rep.nodes.get(branchKey);
+			if (!node || node.children.length < 2) continue;
+			for (const edge of node.children) {
+				const named = lineOpeningNames.get(edge.toFenKey);
+				const base = named ?? edge.san;
+				const label = includeRepName ? `${base} · ${rep.name}` : base;
+				opts.push({ value: `${rep.id}|${edge.toFenKey}`, label });
+			}
+		}
+		return opts;
+	});
+
+	// Hydrate opening-name labels for whichever reps are in the current pool:
+	// cheap IDB read first, then lazy explorer fetches for misses. Captured
+	// names are persisted so the next visit is cache-only.
+	$effect(() => {
+		const reps = filteredReps;
+		untrack(() => {
+			lineOpeningNames.clear();
+			if (reps.length === 0) return;
+			void hydrateLineOpenings(reps);
+		});
+	});
+
+	async function hydrateLineOpenings(reps: typeof fullReps) {
+		const myToken = ++lineOpeningFetchToken;
+		// Collect every branch fenKey we'll need to label, paired with the
+		// rep that owns it (so the lazy fetch can compute the right FEN).
+		const branches: Array<{ rep: (typeof fullReps)[number]; toFenKey: string }> = [];
+		for (const rep of reps) {
+			const branchKey = findBranchPoint(rep);
+			if (!branchKey) continue;
+			const node = rep.nodes.get(branchKey);
+			if (!node || node.children.length < 2) continue;
+			for (const edge of node.children) branches.push({ rep, toFenKey: edge.toFenKey });
+		}
+		if (branches.length === 0) return;
+		const cached = await getPositionOpenings(branches.map((b) => b.toFenKey));
+		if (myToken !== lineOpeningFetchToken) return;
+		for (const [k, v] of cached) lineOpeningNames.set(k, openingFamily(v.name));
+		// Fetch missing entries from Lichess. The explorer client serializes
+		// requests internally and respects rate limits, so a handful of
+		// sequential calls is safe. Skip duplicates (same fenKey across reps).
+		const token = settings ? effectiveLichessToken(settings) : '';
+		if (!token) return;
+		const fetched: Record<string, true> = {};
+		for (const { rep, toFenKey } of branches) {
+			if (cached.has(toFenKey) || fetched[toFenKey]) continue;
+			fetched[toFenKey] = true;
+			if (myToken !== lineOpeningFetchToken) return;
+			const childFen = fenForKeyInRep(rep, toFenKey);
+			if (!childFen) continue;
+			try {
+				const res = await fetchExplorer({
+					fen: childFen,
+					source: 'masters',
+					moves: 0,
+					topGames: 0,
+					token
+				});
+				if (myToken !== lineOpeningFetchToken) return;
+				if (res.opening) {
+					await setPositionOpening(toFenKey, res.opening);
+					lineOpeningNames.set(toFenKey, openingFamily(res.opening.name));
+				}
+			} catch {
+				/* skip on failure — SAN fallback handles it */
+			}
+		}
+	}
+
+	// Resolve the line filter to the rep+fenKey it points at, or null when
+	// the stored composite no longer matches any current option (happens
+	// when the pool shrinks to exclude that branch). Doing this as a
+	// derivation rather than an $effect avoids the "writes-to-state-from-
+	// effect" anti-pattern; the underlying `filterLineKey` is left alone so
+	// the Select control can keep its identity across re-renders.
+	const effectiveLine = $derived.by<{ repId: string; fenKey: string } | null>(() => {
+		if (!filterLineKey) return null;
+		if (!filterLineOptions.some((o) => o.value === filterLineKey)) return null;
+		const sep = filterLineKey.indexOf('|');
+		if (sep < 0) return null;
+		return {
+			repId: filterLineKey.slice(0, sep),
+			fenKey: filterLineKey.slice(sep + 1)
+		};
+	});
+
+	// The rep effectively in scope for the browse: a picked line wins
+	// (because it pins both rep + branch), then an explicit rep filter, then
+	// nothing (pool spans `filteredReps`).
+	const effectiveRep = $derived(
+		(effectiveLine && fullReps.find((r) => r.id === effectiveLine.repId)) || filterRep
+	);
+
+	// What the Color dropdown displays. When a rep (or line) is in scope it
+	// shows that rep's colour — the actual filter is bypassed in this case,
+	// but the user expects to see the colour they're effectively targeting,
+	// not a stale "Both".
+	const displayColor = $derived<'both' | 'white' | 'black'>(
+		effectiveRep ? effectiveRep.color : filterColor
+	);
+	const colorLocked = $derived(!!effectiveRep);
 
 	// Self-play mode: the user plays their colour's moves themselves, like a
 	// drill. When off, the walkthrough is the old passive-review mode where
@@ -473,15 +651,28 @@
 			.init()
 			.catch(() => undefined);
 		const all = await listRepertoires();
-		reps = await Promise.all(
-			all.map(async (r: Repertoire) => ({
-				id: r.id,
-				name: r.name,
-				color: r.color,
-				rootFenKey: r.rootFenKey,
-				nodes: await nodesMap(r.id)
-			}))
+		const withNodes = await Promise.all(
+			all.map(async (r: Repertoire) => {
+				const nodes = await nodesMap(r.id);
+				return { rep: r, nodes };
+			})
 		);
+		reps = withNodes.map(({ rep: r, nodes }) => ({
+			id: r.id,
+			name: r.name,
+			color: r.color,
+			rootFenKey: r.rootFenKey,
+			nodes
+		}));
+		fullReps = withNodes.map(({ rep: r, nodes }) => ({
+			id: r.id,
+			name: r.name,
+			color: r.color,
+			rootFen: r.rootFen,
+			rootFenKey: r.rootFenKey,
+			startingFenKey: r.startingFenKey,
+			nodes
+		}));
 		// Auto-load if the dashboard linked here with ?gameId=... — this is how
 		// the "Recommended walkthrough" card hands off to this page.
 		const gameId = page.url.searchParams.get('gameId');
@@ -573,28 +764,73 @@
 		if (browsing) return;
 		browseError = null;
 		browsing = true;
+		browseVisibleCount = BROWSE_PAGE;
 		const token = settings ? effectiveLichessToken(settings) : '';
 		try {
 			// If the user has repertoires, surface games that go deepest into
 			// *their* prep; otherwise fall back to the generic startpos top
-			// games.
+			// games. Filters narrow the candidate set:
+			//   - Repertoire: probe just one rep instead of all.
+			//   - Color: keep only reps of that colour (only meaningful when
+			//     no specific rep is chosen).
+			//   - Line: when a rep is chosen, restrict probing to the subtree
+			//     rooted at the picked branch.
 			if (reps.length > 0) {
 				const { recommendDeepGames } = await import('$lib/walkthrough/recommend');
-				const allReps = await loadFullReps();
+				// Picking a line pins the rep too; otherwise honour the
+				// rep/colour filters directly.
+				const line = effectiveLine;
+				let pool = fullReps;
+				if (line) {
+					pool = pool.filter((r) => r.id === line.repId);
+				} else if (filterRepId) {
+					pool = pool.filter((r) => r.id === filterRepId);
+				} else if (filterColor !== 'both') {
+					pool = pool.filter((r) => r.color === filterColor);
+				}
+				if (pool.length === 0) {
+					browseGames = [];
+					browseDepths = new Map();
+					browseError = 'No repertoires match the chosen filters.';
+					return;
+				}
+				const probeReps = pool.map((r) => {
+					if (line && r.id === line.repId) {
+						const probeFen = fenForKeyInRep(r, line.fenKey);
+						if (probeFen) {
+							return { ...r, probeFromFen: probeFen, probeFromFenKey: line.fenKey };
+						}
+					}
+					return r;
+				});
+				// Lower the bar when the user picked a single line — candidates
+				// are already filtered to the line by probing, and demanding
+				// 5 plies past the rep root would gut shallow openings.
+				const minDepth = line ? 3 : 5;
+				// Browse skips PGN verification (each verified candidate is an
+				// extra HTTP round-trip with no payoff for browse — the user
+				// sees the actual move-order match the moment they open a
+				// game). `onProgress` streams probe results in as they land
+				// so the first row appears in <1s instead of 10+.
+				const applyRecs = (recs: RecommendedGame[]) => {
+					browseGames = recs.map((r) => r.game);
+					browseDepths = new Map(
+						recs.map((r) => [
+							r.game.id,
+							{ depth: r.depth, repertoire: r.repertoireName, color: r.repertoireColor }
+						])
+					);
+				};
 				const recs = await recommendDeepGames({
-					reps: allReps,
+					reps: probeReps,
 					token: token || undefined,
 					limit: 30,
-					maxProbes: 50,
-					minDepth: 5
+					maxProbes: 20,
+					minDepth,
+					verify: false,
+					onProgress: applyRecs
 				});
-				browseGames = recs.map((r) => r.game);
-				browseDepths = new Map(
-					recs.map((r) => [
-						r.game.id,
-						{ depth: r.depth, repertoire: r.repertoireName, color: r.repertoireColor }
-					])
-				);
+				applyRecs(recs);
 			} else {
 				const res = await fetchExplorer({
 					fen: STARTPOS_FEN,
@@ -610,7 +846,7 @@
 				.map((g) => g.year)
 				.filter((y): y is number => typeof y === 'number');
 			browseYears = years.length ? { since: Math.min(...years), until: Math.max(...years) } : {};
-			if (browseGames.length === 0) {
+			if (browseGames.length === 0 && !browseError) {
 				browseError = 'No masters games surfaced.';
 			}
 		} catch (e) {
@@ -618,27 +854,6 @@
 		} finally {
 			browsing = false;
 		}
-	}
-
-	/**
-	 * Load full-FEN variants of the current reps so recommendDeepGames can
-	 * play edges from the root. The page's `reps` array only carries fenKey;
-	 * the rootFen lives on the full Repertoire record.
-	 */
-	async function loadFullReps() {
-		const { listRepertoires } = await import('$lib/storage/repertoires');
-		const full = await listRepertoires();
-		return reps.map((r) => {
-			const match = full.find((x) => x.id === r.id);
-			return {
-				id: r.id,
-				name: r.name,
-				color: r.color,
-				rootFen: match?.rootFen ?? STARTPOS_FEN,
-				rootFenKey: r.rootFenKey,
-				nodes: r.nodes
-			};
-		});
 	}
 
 	async function loadMastersGame(game: TopGameEntry) {
@@ -661,6 +876,10 @@
 			selectedRepId = best?.id ?? null;
 			orientation = best?.color ?? 'white';
 			recomputeAnnotations();
+			// Remember we've opened this one so the dashboard's daily
+			// recommendation rotates to a fresh game next session.
+			const { markWalkthroughGameViewed } = await import('$lib/walkthrough/viewed');
+			await markWalkthroughGameViewed(game.id);
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : 'Failed to load masters game.';
 		} finally {
@@ -736,6 +955,32 @@
 		return { match, dev, past };
 	});
 
+	const isAtEnd = $derived(plies.length > 0 && ply >= plies.length);
+
+	/**
+	 * Describe how the game ended for the "Game complete" card. Combines the
+	 * PGN result + Termination header with rules-detection on the final
+	 * position (checkmate / stalemate / 50-move / insufficient material) and
+	 * a repetition scan across every position. See `describeGameEnd`.
+	 */
+	const gameResult = $derived.by(() => {
+		if (!isAtEnd) return null;
+		const finalFen = plies[plies.length - 1]?.fenAfter;
+		// Position list = starting position + every fenKeyAfter. Used solely
+		// for threefold-repetition detection on the final position.
+		const positionKeys: string[] = [];
+		if (plies.length > 0) positionKeys.push(plies[0].fenKeyBefore);
+		for (const p of plies) positionKeys.push(p.fenKeyAfter);
+		return describeGameEnd({
+			result: gameHeaders?.get('Result') ?? '',
+			termination: gameHeaders?.get('Termination') ?? undefined,
+			whiteName: fmtHeader('White') || undefined,
+			blackName: fmtHeader('Black') || undefined,
+			finalFen,
+			positionKeys
+		});
+	});
+
 	function fmtHeader(name: string): string {
 		return gameHeaders?.get(name) ?? '';
 	}
@@ -802,17 +1047,76 @@
 	{#if plies.length === 0}
 		<!-- Browse top masters DB games -->
 		<div class="ink-panel mt-8 p-4">
-			<div class="flex items-start gap-3">
-				<div class="flex-1">
-					<div class="eyebrow mb-1">Browse masters DB</div>
-					<p class="font-serif text-xs text-[var(--color-parchment-500)] italic">
-						Top games from the Lichess masters database at the starting position. Tournament games
-						by titled players, historical and modern.
-					</p>
+			<div class="eyebrow mb-1">Browse masters DB</div>
+			<p class="font-serif text-xs text-[var(--color-parchment-500)] italic">
+				Top games from the Lichess masters database at the starting position. Tournament games by
+				titled players, historical and modern.
+			</p>
+
+			{#if reps.length > 0}
+				<!-- Filters narrow the candidate set: by repertoire, by colour
+					 (only meaningful when no specific rep is chosen), and by
+					 line. The Line dropdown lists branches across every rep
+					 in scope, so picking a line is enough on its own — it
+					 implies the rep + colour. -->
+				<div class="relative z-10 mt-4 grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+					<div>
+						<Label for="filter-rep">Repertoire</Label>
+						<Select
+							id="filter-rep"
+							value={filterRepId}
+							onchange={(v) => (filterRepId = v as string | null)}
+							placeholder="All"
+							options={[
+								{ value: null, label: 'All repertoires' },
+								...fullReps.map((r) => ({ value: r.id, label: `${r.name} (${r.color})` }))
+							]}
+						/>
+					</div>
+					<div
+						class={colorLocked ? 'pointer-events-none opacity-40' : ''}
+						aria-disabled={colorLocked}
+					>
+						<Label for="filter-color">Color</Label>
+						<Select
+							id="filter-color"
+							value={displayColor}
+							onchange={(v) => (filterColor = (v ?? 'both') as 'both' | 'white' | 'black')}
+							options={[
+								{ value: 'both', label: 'Both colors' },
+								{ value: 'white', label: 'White' },
+								{ value: 'black', label: 'Black' }
+							]}
+						/>
+					</div>
+					<div>
+						<Label for="filter-line">Line</Label>
+						<Select
+							id="filter-line"
+							value={filterLineKey}
+							onchange={(v) => (filterLineKey = v as string | null)}
+							placeholder="Any line"
+							options={filterLineOptions}
+						/>
+					</div>
 				</div>
-				<Button variant="secondary" size="sm" onclick={browseMasters} disabled={browsing}>
-					<span>{browsing ? 'Loading…' : browseGames.length > 0 ? 'Refresh' : 'Browse'}</span>
+			{/if}
+
+			<div class="mt-5 flex flex-wrap items-center gap-3">
+				<Button variant="primary" size="md" onclick={browseMasters} disabled={browsing}>
+					<span>{browsing ? 'Loading…' : browseGames.length > 0 ? 'Refresh games' : 'Browse'}</span>
 				</Button>
+				{#if effectiveRep}
+					<span
+						class="font-mono text-[10px] tracking-wider text-[var(--color-parchment-500)] uppercase"
+					>
+						in {effectiveRep.name}
+						{#if effectiveLine}
+							{@const lineLabel = lineOpeningNames.get(effectiveLine.fenKey)}
+							{#if lineLabel}· {lineLabel}{/if}
+						{/if}
+					</span>
+				{/if}
 			</div>
 
 			{#if browseError}
@@ -822,7 +1126,7 @@
 				<p
 					class="mt-3 font-mono text-[11px] tracking-widest text-[var(--color-parchment-500)] uppercase"
 				>
-					{browseGames.length} games · {browseYears.since}
+					{Math.min(browseVisibleCount, browseGames.length)} of {browseGames.length} · {browseYears.since}
 					{browseYears.until && browseYears.until !== browseYears.since
 						? `– ${browseYears.until}`
 						: ''}
@@ -831,9 +1135,9 @@
 
 			{#if browseGames.length > 0}
 				<ul class="mt-3 space-y-1">
-					{#each browseGames as g (g.id)}
+					{#each browseGames.slice(0, browseVisibleCount) as g (g.id)}
 						{@const meta = browseDepths.get(g.id)}
-						<li>
+						<li in:slide={{ duration: 220 }} animate:flip={{ duration: 220 }}>
 							<button
 								type="button"
 								onclick={() => loadMastersGame(g)}
@@ -872,6 +1176,21 @@
 						</li>
 					{/each}
 				</ul>
+				{#if browseVisibleCount < browseGames.length}
+					<div class="mt-3 flex justify-center">
+						<Button
+							variant="ghost"
+							size="sm"
+							onclick={() =>
+								(browseVisibleCount = Math.min(
+									browseGames.length,
+									browseVisibleCount + BROWSE_PAGE
+								))}
+						>
+							<span>Load more · {browseGames.length - browseVisibleCount} hidden</span>
+						</Button>
+					</div>
+				{/if}
 			{/if}
 		</div>
 
@@ -1060,103 +1379,133 @@
 
 			<!-- Right rail: prompt card (drill-style) + game info + controls -->
 			<aside class="space-y-3 md:space-y-5">
-				<!-- Drill-style prompt card. Priority: your-move → wrong →
-					 refuted → current ply annotation. -->
-				{#if selfplay && walkPhase === 'idle' && userToMove && ply < plies.length}
-					<div class="ot-fade">
-						<div class="eyebrow mb-2">
-							Your move as {selectedRep?.color}
-						</div>
-						<h2 class="font-serif text-[2rem] leading-tight text-[var(--color-parchment-50)]">
-							What do you play here?
-						</h2>
-						{#if hintLevel === 0}
-							<p class="mt-3 font-serif text-sm text-[var(--color-parchment-400)] italic">
-								Play on the board, or ask for a hint.
-							</p>
-						{:else if hintLevel === 1}
-							<p class="mt-3 font-serif text-sm text-[var(--color-olive-300)] italic">
-								Hint: the piece to move is highlighted.
-							</p>
-						{:else}
-							<p class="mt-3 font-serif text-sm text-[var(--color-olive-300)] italic">
-								The answer is drawn on the board. Play it to advance.
-							</p>
-						{/if}
-						<div class="mt-3 flex gap-2">
-							<Button variant="ghost" size="sm" onclick={showHint} disabled={hintLevel >= 2}>
-								<Keyboard class="size-3" />
-								<span>
-									{hintLevel === 0 ? 'Show hint' : hintLevel === 1 ? 'Show answer' : 'Answer shown'}
-								</span>
-								<kbd
-									class="ml-1 rounded bg-[var(--color-ink-800)] px-1 py-0.5 font-mono text-[10px]"
-									>H</kbd
+				<!-- Drill-style prompt card. Priority: end-of-game →
+					 your-move → wrong → refuted → current ply annotation.
+					 Wrapped in autoHeight so swapping between branches
+					 (which often have different intrinsic heights) animates
+					 instead of snapping. -->
+				<div use:autoHeight>
+					{#if isAtEnd && gameResult}
+						<div class="ot-fade">
+							<div class="eyebrow mb-2">Game complete</div>
+							<div class="flex items-baseline gap-3">
+								<span
+									class="font-mono text-3xl tabular-nums"
+									class:text-[var(--color-parchment-50)]={gameResult.tone === 'white'}
+									class:text-[var(--color-parchment-300)]={gameResult.tone === 'black'}
+									class:text-[var(--color-parchment-400)]={gameResult.tone === 'draw' ||
+										gameResult.tone === 'unknown'}
 								>
-							</Button>
-						</div>
-					</div>
-				{:else if selfplay && walkPhase === 'wrong' && moveQuality}
-					<div class="ot-fade">
-						<div class="eyebrow mb-2" style:color={nagColor(moveQuality)}>
-							{nagGlyph(moveQuality)}
-							{moveQualityLabel(moveQuality)}
-						</div>
-						<h2 class="font-serif text-[2rem] leading-tight text-[var(--color-parchment-100)]">
-							<em>{moveQualityHeadline(moveQuality)}</em>
-						</h2>
-						<p class="mt-3 font-serif text-sm text-[var(--color-parchment-400)] italic">
-							Try again — play the game move.
-						</p>
-					</div>
-				{:else if selfplay && walkPhase === 'refuted' && refutationSan}
-					<div class="ot-fade">
-						<div class="eyebrow mb-2 !text-[var(--color-oxblood-300)]">Refuted</div>
-						<h2 class="font-serif text-[1.75rem] leading-tight text-[var(--color-parchment-100)]">
-							Engine:
-							<span class="font-mono text-[var(--color-oxblood-300)] not-italic"
-								>{refutationSan}</span
-							>
-						</h2>
-						<p class="mt-3 font-serif text-sm text-[var(--color-parchment-500)] italic">
-							Resetting to let you try again.
-						</p>
-					</div>
-				{:else if ply > 0}
-					{@const current = plies[ply - 1]}
-					<div class="ot-fade">
-						<div class="flex items-baseline gap-2">
-							<span class="eyebrow">Ply {ply}</span>
-							<span class="font-mono text-xl">
-								{moveNumberPrefix(ply - 1) ?? ''}
-								{current.san}
-							</span>
-						</div>
-						{#if current.annotation === 'match'}
-							<p class="mt-2 font-serif text-sm text-[var(--color-olive-300)] italic">
-								<Check class="mb-0.5 inline size-3.5" /> In your repertoire.
+									{gameResult.score}
+								</span>
+								<h2 class="font-serif text-[1.5rem] leading-tight text-[var(--color-parchment-50)]">
+									{gameResult.headline}
+								</h2>
+							</div>
+							<p class="mt-3 font-serif text-sm text-[var(--color-parchment-400)] italic">
+								Stepped through {plies.length} plies. Use ← to revisit any move.
 							</p>
-						{:else if current.annotation === 'deviation'}
-							<p class="mt-2 font-serif text-sm text-[var(--color-oxblood-300)] italic">
-								<XIcon class="mb-0.5 inline size-3.5" /> Off-book.
-								{#if !selfplay}
-									Your line here:
-									<span class="font-mono text-[var(--color-brass-300)] not-italic"
-										>{current.expectedSan}</span
+						</div>
+					{:else if selfplay && walkPhase === 'idle' && userToMove && ply < plies.length}
+						<div class="ot-fade">
+							<div class="eyebrow mb-2">
+								Your move as {selectedRep?.color}
+							</div>
+							<h2 class="font-serif text-[2rem] leading-tight text-[var(--color-parchment-50)]">
+								What do you play here?
+							</h2>
+							{#if hintLevel === 0}
+								<p class="mt-3 font-serif text-sm text-[var(--color-parchment-400)] italic">
+									Play on the board, or ask for a hint.
+								</p>
+							{:else if hintLevel === 1}
+								<p class="mt-3 font-serif text-sm text-[var(--color-olive-300)] italic">
+									Hint: the piece to move is highlighted.
+								</p>
+							{:else}
+								<p class="mt-3 font-serif text-sm text-[var(--color-olive-300)] italic">
+									The answer is drawn on the board. Play it to advance.
+								</p>
+							{/if}
+							<div class="mt-3 flex gap-2">
+								<Button variant="ghost" size="sm" onclick={showHint} disabled={hintLevel >= 2}>
+									<Keyboard class="size-3" />
+									<span>
+										{hintLevel === 0
+											? 'Show hint'
+											: hintLevel === 1
+												? 'Show answer'
+												: 'Answer shown'}
+									</span>
+									<kbd
+										class="ml-1 rounded bg-[var(--color-ink-800)] px-1 py-0.5 font-mono text-[10px]"
+										>H</kbd
 									>
-								{/if}
+								</Button>
+							</div>
+						</div>
+					{:else if selfplay && walkPhase === 'wrong' && moveQuality}
+						<div class="ot-fade">
+							<div class="eyebrow mb-2" style:color={nagColor(moveQuality)}>
+								{nagGlyph(moveQuality)}
+								{moveQualityLabel(moveQuality)}
+							</div>
+							<h2 class="font-serif text-[2rem] leading-tight text-[var(--color-parchment-100)]">
+								<em>{moveQualityHeadline(moveQuality)}</em>
+							</h2>
+							<p class="mt-3 font-serif text-sm text-[var(--color-parchment-400)] italic">
+								Try again — play the game move.
 							</p>
-						{:else if current.annotation === 'past-tree'}
-							<p class="mt-2 font-serif text-sm text-[var(--color-parchment-400)] italic">
-								<Circle class="mb-0.5 inline size-3.5" /> Past your prep.
+						</div>
+					{:else if selfplay && walkPhase === 'refuted' && refutationSan}
+						<div class="ot-fade">
+							<div class="eyebrow mb-2 !text-[var(--color-oxblood-300)]">Refuted</div>
+							<h2 class="font-serif text-[1.75rem] leading-tight text-[var(--color-parchment-100)]">
+								Engine:
+								<span class="font-mono text-[var(--color-oxblood-300)] not-italic"
+									>{refutationSan}</span
+								>
+							</h2>
+							<p class="mt-3 font-serif text-sm text-[var(--color-parchment-500)] italic">
+								Resetting to let you try again.
 							</p>
-						{:else}
-							<p class="mt-2 font-serif text-sm text-[var(--color-parchment-500)] italic">
-								Opponent's move.
-							</p>
-						{/if}
-					</div>
-				{/if}
+						</div>
+					{:else if ply > 0}
+						{@const current = plies[ply - 1]}
+						<div class="ot-fade">
+							<div class="flex items-baseline gap-2">
+								<span class="eyebrow">Ply {ply}</span>
+								<span class="font-mono text-xl">
+									{moveNumberPrefix(ply - 1) ?? ''}
+									{current.san}
+								</span>
+							</div>
+							{#if current.annotation === 'match'}
+								<p class="mt-2 font-serif text-sm text-[var(--color-olive-300)] italic">
+									<Check class="mb-0.5 inline size-3.5" /> In your repertoire.
+								</p>
+							{:else if current.annotation === 'deviation'}
+								<p class="mt-2 font-serif text-sm text-[var(--color-oxblood-300)] italic">
+									<XIcon class="mb-0.5 inline size-3.5" /> Off-book.
+									{#if !selfplay}
+										Your line here:
+										<span class="font-mono text-[var(--color-brass-300)] not-italic"
+											>{current.expectedSan}</span
+										>
+									{/if}
+								</p>
+							{:else if current.annotation === 'past-tree'}
+								<p class="mt-2 font-serif text-sm text-[var(--color-parchment-400)] italic">
+									<Circle class="mb-0.5 inline size-3.5" /> Past your prep.
+								</p>
+							{:else}
+								<p class="mt-2 font-serif text-sm text-[var(--color-parchment-500)] italic">
+									Opponent's move.
+								</p>
+							{/if}
+						</div>
+					{/if}
+				</div>
 
 				<!-- Game info + repertoire picker. -->
 				<div class="ink-panel p-4">
