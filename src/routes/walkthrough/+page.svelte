@@ -118,47 +118,18 @@
 	import { nodesMap } from '$lib/storage/nodes';
 	import { colorToMove, STARTPOS_FEN } from '$lib/chess/fen';
 	import { edgeFromUci, fenAfterMove, isPromotionMove, legalDests } from '$lib/chess/position';
-	import { getEngine, type EngineInfo } from '$lib/stockfish/engine';
+	import { getEngine } from '$lib/stockfish/engine';
+	import {
+		gradeMove,
+		shouldRefute,
+		nagGlyph,
+		nagColor,
+		moveQualityLabel,
+		moveQualityHeadline,
+		type MoveQuality
+	} from '$lib/drill/grade';
+	import { probeMoveEvals } from '$lib/drill/probe';
 	import type { AppSettings, Color, Repertoire, RepertoireNode } from '$lib/types';
-
-	// Move-quality glyphs, same vocabulary as the drill page. A shared helper
-	// module would be nicer but a handful of small functions inline keeps the
-	// walkthrough self-contained.
-	type MoveQuality = 'correct' | 'playable' | 'dubious' | 'mistake' | 'blunder';
-	function nagGlyph(q: MoveQuality): string {
-		switch (q) {
-			case 'correct':
-				return '!';
-			case 'playable':
-				return '!?';
-			case 'dubious':
-				return '?!';
-			case 'mistake':
-				return '?';
-			case 'blunder':
-				return '??';
-		}
-	}
-	function nagColor(q: MoveQuality): string {
-		switch (q) {
-			case 'correct':
-				return '#639b24';
-			case 'playable':
-				return '#749bbf';
-			case 'dubious':
-				return '#e8b730';
-			case 'mistake':
-				return '#e58f2a';
-			case 'blunder':
-				return '#ac3332';
-		}
-	}
-	function gradeFromCp(stmCp: number): MoveQuality {
-		if (stmCp >= 200) return 'blunder';
-		if (stmCp >= 100) return 'mistake';
-		if (stmCp >= 50) return 'dubious';
-		return 'playable';
-	}
 
 	type Annotation = 'match' | 'deviation' | 'past-tree' | 'opponent';
 
@@ -243,7 +214,10 @@
 	const OPPONENT_AUTOPLAY_MS = 650;
 	const WRONG_FLASH_MS = 420;
 	const WRONG_SETTLE_MS = 380;
-	const REFUTATION_PROBE_MS = 800;
+	// Engine probe budgets: tighter on fenBefore (cp value only), looser
+	// on fenAfter (need a usable PV to animate the refutation).
+	const REFUTATION_PROBE_BEFORE_MS = 400;
+	const REFUTATION_PROBE_AFTER_MS = 800;
 	// Refutation animation: how many plies of Stockfish's PV to animate, and
 	// how fast. The goal is to show the tactic through until the material
 	// loss is realised — usually 3–4 plies is enough.
@@ -418,30 +392,38 @@
 		const token = { cancelled: false };
 		wrongToken = token;
 
+		// `currentFen` has already flipped to the overlay (post-wrong-
+		// move) position by the time this runs; the actual game
+		// position the user was moving from is `baseFen`.
+		const fenBefore = baseFen;
 		const wrongFen = overlayFen!;
 		refutationSan = null;
 
 		await sleep(WRONG_FLASH_MS);
 		if (token.cancelled) return;
 
-		const refutation = await probeRefutation(wrongFen, REFUTATION_PROBE_MS);
+		const probe = await probeMoveEvals(
+			fenBefore,
+			wrongFen,
+			REFUTATION_PROBE_BEFORE_MS,
+			REFUTATION_PROBE_AFTER_MS
+		);
 		if (token.cancelled) return;
 
-		moveQuality = refutation ? gradeFromCp(refutation.stmCp) : 'dubious';
+		moveQuality = probe ? gradeMove(probe.bestUserPov, probe.playedUserPov) : 'dubious';
 		if (moveQuality === 'playable') playCorrect();
 		else playIncorrect();
-		const shouldRefute =
-			refutation !== null && (moveQuality === 'mistake' || moveQuality === 'blunder');
+		const refute = probe !== null && shouldRefute(moveQuality);
 
-		if (shouldRefute && refutation) {
+		if (refute && probe) {
 			// Walk Stockfish's principal variation several plies deep — the
 			// material loss from a real blunder often only becomes visible
 			// after 2–3 exchanges, so we keep animating until the tactic
 			// plays out.
 			let showFen = wrongFen;
-			const maxPlies = Math.min(REFUTATION_MAX_PLIES, refutation.pv.length);
+			const maxPlies = Math.min(REFUTATION_MAX_PLIES, probe.refutationPv.length);
 			for (let i = 0; i < maxPlies; i++) {
-				const pvUci = refutation.pv[i];
+				const pvUci = probe.refutationPv[i];
 				if (!pvUci || pvUci.length < 4) break;
 				const orig = pvUci.slice(0, 2) as Key;
 				const dest = pvUci.slice(2, 4) as Key;
@@ -477,51 +459,6 @@
 		walkPhase = 'idle';
 		await sleep(WRONG_SETTLE_MS);
 		if (token.cancelled) return;
-	}
-
-	async function probeRefutation(
-		fen: string,
-		timeoutMs: number
-	): Promise<{ pv: string[]; stmCp: number } | null> {
-		const engine = getEngine();
-		if (!engine.isReady()) {
-			// Try to kick it so future probes work.
-			void engine.init().catch(() => undefined);
-			return null;
-		}
-		const stm = colorToMove(fen);
-		const sign = stm === 'black' ? -1 : 1;
-		return await new Promise<{ pv: string[]; stmCp: number } | null>((resolve) => {
-			let best: { pv: string[]; stmCp: number } | null = null;
-			let settled = false;
-			const unsub = engine.onInfo((info: EngineInfo) => {
-				if (!info.pv.length) return;
-				if (info.scoreMate !== undefined) {
-					const mateCp = info.scoreMate > 0 ? 10000 : -10000;
-					best = { pv: info.pv.slice(), stmCp: mateCp * sign };
-				} else if (info.scoreCp !== undefined) {
-					best = { pv: info.pv.slice(), stmCp: info.scoreCp * sign };
-				}
-			});
-			const timer = setTimeout(() => {
-				if (settled) return;
-				settled = true;
-				unsub();
-				try {
-					engine.stop();
-				} catch {
-					/* ignore */
-				}
-				resolve(best);
-			}, timeoutMs);
-			engine.go(fen, 16).catch(() => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timer);
-				unsub();
-				resolve(null);
-			});
-		});
 	}
 
 	function sleep(ms: number): Promise<void> {
@@ -1163,10 +1100,10 @@
 					<div class="ot-fade">
 						<div class="eyebrow mb-2" style:color={nagColor(moveQuality)}>
 							{nagGlyph(moveQuality)}
-							{moveQuality}
+							{moveQualityLabel(moveQuality)}
 						</div>
 						<h2 class="font-serif text-[2rem] leading-tight text-[var(--color-parchment-100)]">
-							<em>Not the move played.</em>
+							<em>{moveQualityHeadline(moveQuality)}</em>
 						</h2>
 						<p class="mt-3 font-serif text-sm text-[var(--color-parchment-400)] italic">
 							Try again — play the game move.

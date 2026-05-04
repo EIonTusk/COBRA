@@ -22,7 +22,7 @@
  * feature rows. About 45–60s on a warm connection, mostly network.
  */
 
-import { streamUserGames } from '$lib/lichess/games';
+import { LichessRateLimitedError, streamUserGames } from '$lib/lichess/games';
 import { streamChesscomGames } from '$lib/chesscom/games';
 import { effectiveLichessToken } from '$lib/storage/settings';
 import {
@@ -77,6 +77,33 @@ interface OpponentSeed {
 	source: 'lichess' | 'chesscom';
 	username: string;
 	rating: number;
+}
+
+/**
+ * Conservative pacing between consecutive snowball fetches. Lichess's
+ * overall budget is ~1 RPS for paid endpoints; `/api/games/user` is
+ * higher cost. 250ms keeps a 30-opponent walk well inside that envelope
+ * without making the calibration appreciably slower (≤7.5s of added gap
+ * across the whole snowball).
+ */
+const LICHESS_INTER_REQUEST_MS = 250;
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			resolve();
+			return;
+		}
+		const timer = setTimeout(() => {
+			signal?.removeEventListener('abort', onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(new DOMException('Aborted', 'AbortError'));
+		};
+		signal?.addEventListener('abort', onAbort, { once: true });
+	});
 }
 
 export async function calibrateBaseline(opts: CalibrateOpts): Promise<CalibrateResult> {
@@ -154,7 +181,26 @@ export async function calibrateBaseline(opts: CalibrateOpts): Promise<CalibrateR
 				totalGamesProcessed += 1;
 			}
 		} catch (e) {
+			// 429 is the one error where we MUST stop the batch: every
+			// further opponent fetch will be rejected for the cooldown
+			// duration and continuing just extends the lockout. Surface a
+			// clear reason and break; partial data is kept for the bucket.
+			if (e instanceof LichessRateLimitedError) {
+				bumpSkip(
+					skipped,
+					`Lichess rate limit hit (cooldown ~${Math.round(e.retryAfterMs / 1000)}s); aborted at opponent ${i + 1}/${sample.length}.`
+				);
+				break;
+			}
 			bumpSkip(skipped, e instanceof Error ? e.message : 'fetch failed');
+		}
+
+		// Inter-request gap to stay under Lichess's ~1-RPS overall budget.
+		// `/api/games/user` is one of the more expensive endpoints, and the
+		// snowball walks ≤30 of them back-to-back — without a gap the burst
+		// reliably trips 429 even on a fresh token.
+		if (i < sample.length - 1 && !opts.signal?.aborted) {
+			await delay(LICHESS_INTER_REQUEST_MS, opts.signal);
 		}
 	}
 	opts.onProgress?.(sample.length, sample.length, 'done');

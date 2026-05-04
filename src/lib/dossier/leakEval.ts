@@ -17,6 +17,7 @@ import { parseFen, makeFen } from 'chessops/fen';
 import { parseSan } from 'chessops/san';
 
 import { getEngine, type EngineInfo } from '$lib/stockfish/engine';
+import { stmPovToUserPov } from './sota';
 import type { LeakInstance } from './mismatch';
 
 export interface AnalysedLeak extends LeakInstance {
@@ -59,11 +60,14 @@ export async function analyseLeaks(
 		if (opts.signal?.aborted) break;
 		const after = await engine.analyse(fenAfter, depth);
 
-		const bestCp = scoreToCp(before);
-		const playedCp = scoreToCp(after);
-		// Both already in white's POV. Convert to user's POV:
-		const sign = leak.color === 'white' ? 1 : -1;
-		const cpLoss = Math.max(0, (bestCp - playedCp) * sign);
+		// Engine cp arrives in side-to-move POV (UCI standard). At
+		// `leak.fenBefore` STM is the user (it's their move); at `fenAfter`
+		// STM is the opponent. Convert both into user-POV via stmPovToUserPov
+		// so the subtraction is apples-to-apples.
+		const stmAfter: 'white' | 'black' = leak.color === 'white' ? 'black' : 'white';
+		const bestCpUser = stmPovToUserPov(scoreToCp(before), leak.color, leak.color);
+		const playedCpUser = stmPovToUserPov(scoreToCp(after), stmAfter, leak.color);
+		const cpLoss = Math.max(0, bestCpUser - playedCpUser);
 
 		out.push({
 			...leak,
@@ -76,7 +80,10 @@ export async function analyseLeaks(
 	return out;
 }
 
-/** Convert a search result to white-POV centipawns. Mate scores capped. */
+/** Pull a centipawn reading out of an engine info, with mate scores
+ *  capped to ±MATE_CP. The value is in whatever POV the engine emitted —
+ *  side-to-move POV for `lila-stockfish-web` — and callers must convert
+ *  to user-POV (or whatever target POV) before differencing. */
 function scoreToCp(info: EngineInfo): number {
 	if (info.scoreMate !== undefined) {
 		return info.scoreMate > 0 ? MATE_CP : -MATE_CP;

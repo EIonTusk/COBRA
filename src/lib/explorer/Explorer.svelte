@@ -1,6 +1,5 @@
 <script lang="ts">
 	import {
-		ExternalLink,
 		ArrowRight,
 		Bookmark,
 		Crown,
@@ -16,6 +15,7 @@
 	import type { ComponentType, Snippet } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
 	import { resolve } from '$app/paths';
+	import { page } from '$app/state';
 
 	import {
 		fetchExplorer,
@@ -32,6 +32,33 @@
 	import type { DossierFingerprint } from '$lib/dossier/fingerprint';
 	import type { OpeningFitSummary } from '$lib/dossier/openingFit';
 	import { Button } from '$lib/ui';
+	import { startOAuth, ALL_SCOPES } from '$lib/lichess/oauth';
+
+	let oauthBusy = $state(false);
+	// `?return=<path>` carrier for the "Open Settings" and inline-Settings
+	// links so a user who routes through Settings to connect (or to paste a
+	// token) still ends up back where they started instead of stranded on
+	// /settings. The primary "Sign in with Lichess" button goes direct via
+	// startOAuth, which handles the same handoff in-script.
+	const settingsReturnHref = $derived(
+		`${resolve('/settings')}?return=${encodeURIComponent(page.url.pathname + page.url.search + page.url.hash)}#lichess`
+	);
+	async function connectLichess() {
+		if (oauthBusy) return;
+		oauthBusy = true;
+		try {
+			// startOAuth navigates the current tab away (web) or hands the
+			// URL to the OS browser (Tauri). Either way, we don't return.
+			// Stash the current path so the callback brings the user back to
+			// wherever they kicked off (e.g. /repertoire/.../edit) instead of
+			// dropping them on /settings.
+			const returnTo = page.url.pathname + page.url.search + page.url.hash;
+			await startOAuth([...ALL_SCOPES], returnTo);
+		} catch (e) {
+			oauthBusy = false;
+			error = e instanceof Error ? e.message : 'Could not start Lichess sign-in.';
+		}
+	}
 
 	interface Props {
 		fen: string;
@@ -107,6 +134,14 @@
 		 * Missing entries are treated as zero.
 		 */
 		subtreeSizeBySan?: Map<string, number>;
+		/**
+		 * The user's saved continuations at this position, in tree order.
+		 * Only consumed when we can't reach Lichess (no token configured) —
+		 * we still want the user to see and click their own prep, just with
+		 * the Lichess-derived stats columns rendered as skeletons. Includes
+		 * `uci` so deletion still works without a successful explorer fetch.
+		 */
+		savedMoves?: Array<{ san: string; uci: string }>;
 	}
 	let {
 		fen,
@@ -121,7 +156,8 @@
 		openingFit = null,
 		headerRight,
 		userWdlBySan,
-		subtreeSizeBySan
+		subtreeSizeBySan,
+		savedMoves
 	}: Props = $props();
 
 	// Right-click context menu for moves already in the tree. Kept as a
@@ -583,38 +619,174 @@
 	</div>
 
 	{#if needsToken}
-		<div class="space-y-3 text-xs text-[var(--color-parchment-400)]">
-			<p class="font-serif leading-relaxed italic">
-				Lichess requires a personal API token for the explorer now.
+		<!-- Bordered notice: makes the missing-Lichess state read as a
+			 deliberate empty-state rather than a transient blank. The setup
+			 instructions live inside the card so the user can act on them
+			 without leaving the panel. -->
+		<div
+			class="mb-4 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-800)]/40 p-3"
+		>
+			<p class="mb-2 font-mono text-[10px] tracking-wider text-[var(--color-brass-300)] uppercase">
+				Lichess connection required
 			</p>
-			<ol class="list-none space-y-2 pl-0">
-				<li class="flex gap-2">
-					<span class="font-mono text-[var(--color-parchment-500)] tabular-nums">1.</span>
-					<span>
-						Generate one at
-						<a
-							href="https://lichess.org/account/oauth/token/create?description=Opening+Trainer"
-							target="_blank"
-							rel="noopener"
-							class="inline-flex items-center gap-0.5 text-[var(--color-brass-300)] underline underline-offset-2"
-						>
-							lichess.org<ExternalLink class="size-2.5" />
-						</a>
-						(no scopes).
-					</span>
-				</li>
-				<li class="flex gap-2">
-					<span class="font-mono text-[var(--color-parchment-500)] tabular-nums">2.</span>
-					<span>
-						Paste it into
-						<a
-							href={resolve('/settings')}
-							class="text-[var(--color-brass-300)] underline underline-offset-2">Settings</a
-						>.
-					</span>
-				</li>
-			</ol>
+			<p class="mb-3 font-serif text-xs leading-relaxed text-[var(--color-parchment-300)] italic">
+				Sign in with Lichess to load game counts, win-rates and opening tags. The same connection
+				powers explorer probes, opponent prep and bot sparring.
+			</p>
+			<!-- Primary CTA: full OAuth login flow (PKCE). This is the path
+				 we want everyone on — it's a normal "sign in with X" round-
+				 trip and the resulting token covers explorer, study sync
+				 and bot challenges. The pasted-token escape hatch lives
+				 below as a small secondary affordance for people who
+				 deliberately want a scopeless personal token. -->
+			<div class="mb-2 flex flex-wrap items-center gap-2">
+				<Button variant="primary" size="sm" onclick={connectLichess} disabled={oauthBusy}>
+					{oauthBusy ? 'Opening Lichess…' : 'Sign in with Lichess'}
+				</Button>
+				<!-- href is built from `resolve('/settings')` plus a `?return=`
+					 carrier so the user lands back on the explorer's host page
+					 after connecting. The lint rule only spots literal
+					 `resolve()` in the attribute. -->
+				<!-- eslint-disable svelte/no-navigation-without-resolve -->
+				<a
+					href={settingsReturnHref}
+					class="font-mono text-[10px] tracking-wider text-[var(--color-parchment-500)] uppercase transition-colors hover:text-[var(--color-parchment-300)]"
+				>
+					<!-- eslint-enable svelte/no-navigation-without-resolve -->
+					Open Settings
+				</a>
+			</div>
+			<p class="font-serif text-[11px] leading-relaxed text-[var(--color-parchment-500)] italic">
+				Prefer not to sign in? You can paste a personal API token in
+				<!-- eslint-disable svelte/no-navigation-without-resolve -->
+				<a
+					href={settingsReturnHref}
+					class="text-[var(--color-parchment-400)] underline underline-offset-2 hover:text-[var(--color-parchment-200)]"
+					><!-- eslint-enable svelte/no-navigation-without-resolve -->Settings</a
+				> instead.
+			</p>
 		</div>
+
+		<!-- Without Lichess we can still surface what *we* know: the user's
+			 own saved moves. Each row mirrors the regular candidate layout
+			 so columns stay aligned across states; everything Lichess would
+			 fill in (WDL bar, share/score %, tags) renders as a pulsing
+			 skeleton bar to telegraph "this is where the data goes once you
+			 connect". Engine eval still shows real values when available. -->
+		{#if savedMoves && savedMoves.length > 0}
+			<p
+				class="mb-2 font-mono text-[10px] tracking-wider text-[var(--color-parchment-500)] uppercase"
+			>
+				In your repertoire
+			</p>
+			<ul class="space-y-0.5">
+				{#each savedMoves as m (m.uci)}
+					<li>
+						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+						<div
+							role={onselect ? 'button' : undefined}
+							tabindex={onselect ? 0 : undefined}
+							aria-disabled={!onselect ? 'true' : undefined}
+							onclick={onselect ? () => onselect?.(m.san) : undefined}
+							onkeydown={onselect ? (e) => handleRowKey(e, m) : undefined}
+							oncontextmenu={(e) => openContextMenu(e, m)}
+							class="group grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-1.5 pl-1.5 text-left transition-colors lg:gap-2 {onselect
+								? 'cursor-pointer hover:bg-[var(--color-ink-800)]'
+								: 'cursor-default'}"
+						>
+							<span
+								class="grid grid-cols-[2.25rem_1fr] items-center gap-1 font-mono text-sm text-[var(--color-parchment-100)]"
+							>
+								<span class="flex items-center gap-1">
+									<span class="relative inline-block leading-none whitespace-nowrap">
+										{#if ondelete}
+											<button
+												type="button"
+												onclick={(e) => {
+													e.stopPropagation();
+													openConfirm(m);
+												}}
+												onkeydown={(e) => {
+													if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+												}}
+												title="Delete {m.san} from your tree"
+												aria-label="Delete {m.san} from your tree"
+												class="group/bookmark absolute right-full bottom-0 -m-2 mr-0.5 cursor-pointer py-2 pr-1 pl-3 leading-none"
+											>
+												<Bookmark
+													class="size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)] transition-colors group-hover/bookmark:fill-[var(--color-oxblood-300)] group-hover/bookmark:text-[var(--color-oxblood-300)]"
+													strokeWidth={1.5}
+												/>
+											</button>
+										{:else}
+											<Bookmark
+												class="absolute right-full bottom-0 mr-1.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
+												strokeWidth={1.5}
+												aria-label="Already in your tree"
+											>
+												<title>Already in your tree</title>
+											</Bookmark>
+										{/if}
+										{m.san}
+									</span>
+								</span>
+								{#if engineEvalByUci?.get(m.uci)}
+									{@const ev = engineEvalByUci.get(m.uci)!}
+									<span
+										class="font-mono text-[10px] tabular-nums {ev.tone}"
+										title="Stockfish evaluation"
+									>
+										{ev.text}
+									</span>
+								{:else}
+									<span></span>
+								{/if}
+							</span>
+							<div class="flex min-w-0 flex-col gap-0.5">
+								<div
+									class="h-[5px] animate-pulse rounded-full bg-[var(--color-ink-800)]"
+									title="Win/draw/loss share — connect Lichess to populate"
+									aria-hidden="true"
+								></div>
+								<div class="flex items-center justify-between gap-2">
+									<span
+										class="h-2 w-16 animate-pulse rounded-full bg-[var(--color-ink-800)]"
+										aria-hidden="true"
+									></span>
+									<span
+										class="h-2 w-7 animate-pulse rounded-full bg-[var(--color-ink-800)]"
+										aria-hidden="true"
+									></span>
+								</div>
+							</div>
+							<div class="flex flex-col items-end gap-0.5">
+								{#if transposesSans?.has(m.san)}
+									<span
+										title="Transposes into existing prep — playing this reaches a position already in your tree."
+										class="flex items-center"
+									>
+										<Shuffle class="size-3.5 text-[var(--color-brass-300)]" strokeWidth={1.75} />
+									</span>
+								{:else}
+									<span
+										class="h-2 w-6 animate-pulse rounded-full bg-[var(--color-ink-800)]"
+										aria-hidden="true"
+									></span>
+								{/if}
+								<span
+									class="h-2 w-5 animate-pulse rounded-full bg-[var(--color-ink-800)]"
+									aria-hidden="true"
+								></span>
+							</div>
+						</div>
+					</li>
+				{/each}
+			</ul>
+		{:else}
+			<p class="font-serif text-[11px] text-[var(--color-parchment-500)] italic">
+				No saved moves at this position yet. Play one on the board to add it.
+			</p>
+		{/if}
 	{:else if error}
 		<p class="text-xs text-[var(--color-oxblood-300)]">{error}</p>
 	{/if}
@@ -671,7 +843,7 @@
 														}}
 														title="Delete {r.san} from your tree"
 														aria-label="Delete {r.san} from your tree"
-														class="group/bookmark absolute right-full bottom-0 -m-2 mr-0.5 cursor-pointer p-2 leading-none"
+														class="group/bookmark absolute right-full bottom-0 -m-2 mr-0.5 cursor-pointer py-2 pr-1 pl-3 leading-none"
 													>
 														<Bookmark
 															class="size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)] transition-colors group-hover/bookmark:fill-[var(--color-oxblood-300)] group-hover/bookmark:text-[var(--color-oxblood-300)]"
@@ -680,7 +852,7 @@
 													</button>
 												{:else}
 													<Bookmark
-														class="absolute right-full bottom-0 mr-0.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
+														class="absolute right-full bottom-0 mr-1.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
 														strokeWidth={1.5}
 													/>
 												{/if}
@@ -761,7 +933,7 @@
 													}}
 													title="Delete {m.san} from your tree"
 													aria-label="Delete {m.san} from your tree"
-													class="group/bookmark absolute right-full bottom-0 -m-2 mr-0.5 cursor-pointer p-2 leading-none"
+													class="group/bookmark absolute right-full bottom-0 -m-2 mr-0.5 cursor-pointer py-2 pr-1 pl-3 leading-none"
 												>
 													<Bookmark
 														class="size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)] transition-colors group-hover/bookmark:fill-[var(--color-oxblood-300)] group-hover/bookmark:text-[var(--color-oxblood-300)]"
@@ -770,7 +942,7 @@
 												</button>
 											{:else}
 												<Bookmark
-													class="absolute right-full bottom-0 mr-0.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
+													class="absolute right-full bottom-0 mr-1.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
 													strokeWidth={1.5}
 													aria-label="Already in your tree"
 												>

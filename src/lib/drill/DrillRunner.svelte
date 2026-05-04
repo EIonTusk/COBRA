@@ -29,7 +29,7 @@
 	import { upsertCard, getCard } from '$lib/storage/cards';
 	import { upsertIdeaCard } from '$lib/storage/ideaCards';
 	import { markMistakeByPosition } from '$lib/storage/mistakes';
-	import { getEngine, type EngineInfo } from '$lib/stockfish/engine';
+	import { getEngine } from '$lib/stockfish/engine';
 	import { reviewCard, outcomeToRating, type DrillOutcome } from '$lib/fsrs/scheduler';
 	import { Button } from '$lib/ui';
 	import { playCorrect, playIncorrect } from '$lib/ui/sounds';
@@ -41,7 +41,17 @@
 		type IdeaCard
 	} from '$lib/types';
 	import { collectLeafCards, sortLeavesByLineOrder } from './buildSegment';
-	import type { DrillEntry, DrillPhase, DrillSegment, MoveQuality } from './types';
+	import type { DrillEntry, DrillPhase, DrillSegment } from './types';
+	import {
+		gradeMove,
+		shouldRefute,
+		nagGlyph,
+		nagColor,
+		moveQualityLabel,
+		moveQualityHeadline,
+		type MoveQuality
+	} from './grade';
+	import { probeMoveEvals } from './probe';
 
 	interface Props {
 		segments: DrillSegment[];
@@ -56,58 +66,8 @@
 
 	let { segments, settings, onTrainFurther, onRetrain, retrainBusy = false }: Props = $props();
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// NAG glyph palette + grading thresholds. Mirrors Lichess analysis-board
-	// styling so the cue is immediately legible to anyone who's used the site.
-	// ─────────────────────────────────────────────────────────────────────────
-	function nagGlyph(q: MoveQuality): string {
-		switch (q) {
-			case 'correct':
-				return '!';
-			case 'playable':
-				return '!?';
-			case 'dubious':
-				return '?!';
-			case 'mistake':
-				return '?';
-			case 'blunder':
-				return '??';
-		}
-	}
-	function nagColor(q: MoveQuality): string {
-		switch (q) {
-			case 'correct':
-				return '#639b24';
-			case 'playable':
-				return '#749bbf';
-			case 'dubious':
-				return '#e8b730';
-			case 'mistake':
-				return '#e58f2a';
-			case 'blunder':
-				return '#ac3332';
-		}
-	}
-	function gradeFromCp(stmCp: number): MoveQuality {
-		if (stmCp >= 200) return 'blunder';
-		if (stmCp >= 100) return 'mistake';
-		if (stmCp >= 50) return 'dubious';
-		return 'playable';
-	}
-	function moveQualityLabel(q: MoveQuality): string {
-		switch (q) {
-			case 'correct':
-				return 'Correct';
-			case 'playable':
-				return 'Playable — not your line';
-			case 'dubious':
-				return 'Dubious — not your line';
-			case 'mistake':
-				return 'A mistake';
-			case 'blunder':
-				return 'A blunder';
-		}
-	}
+	// NAG glyph palette + grading thresholds live in `./grade` — same
+	// helpers are reused by the walkthrough flow.
 
 	// Composite keys keep cross-segment state collision-free when two reps
 	// happen to share a fenKey (transposition across reps).
@@ -313,7 +273,12 @@
 	const AUTO_ADVANCE_SLOW_MS = 1400;
 	const WRONG_FLASH_MS = 420;
 	const WRONG_SETTLE_MS = 380;
-	const REFUTATION_PROBE_MS = 800;
+	// Engine probe budget split: `BEFORE` only needs a single cp value
+	// (best-line eval at the position the user moved from), so it can
+	// run shallower and shorter. `AFTER` needs a usable PV to animate
+	// the refutation, so it gets the longer slice.
+	const REFUTATION_PROBE_BEFORE_MS = 400;
+	const REFUTATION_PROBE_AFTER_MS = 800;
 	const REFUTATION_HOLD_MS = 1100;
 	const REFUTATION_MAX_PLIES = 6;
 	const REFUTATION_PACE_MS = 700;
@@ -660,6 +625,10 @@
 		const token = { cancelled: false };
 		wrongToken = token;
 
+		// At this point `currentFen` has already been advanced to the
+		// post-move position by `handleMove`. The starting position of
+		// the card (= fenBefore) is reconstructed from its fenKey.
+		const fenBefore = fenFromKey(entry.card.fenKey);
 		const wrongFen = currentFen;
 		refutationSan = null;
 		refutationCp = null;
@@ -667,21 +636,29 @@
 		await sleep(WRONG_FLASH_MS);
 		if (token.cancelled) return;
 
-		const refutation = await probeRefutation(wrongFen, REFUTATION_PROBE_MS);
+		const probe = await probeMoveEvals(
+			fenBefore,
+			wrongFen,
+			REFUTATION_PROBE_BEFORE_MS,
+			REFUTATION_PROBE_AFTER_MS
+		);
 		if (token.cancelled) return;
 
-		moveQuality = refutation ? gradeFromCp(refutation.stmCp) : 'dubious';
+		// Grade by cpLoss + absolute-eval context when both probes
+		// landed. If only the after-position eval is available, fall
+		// back to the absolute-magnitude tiers (no "gave_advantage"
+		// detection, but at least the loud cases still land).
+		moveQuality = probe ? gradeMove(probe.bestUserPov, probe.playedUserPov) : 'dubious';
 		if (moveQuality === 'playable') playCorrect();
 		else playIncorrect();
 
-		const shouldRefute =
-			refutation !== null && (moveQuality === 'mistake' || moveQuality === 'blunder');
+		const refute = probe !== null && shouldRefute(moveQuality);
 
-		if (shouldRefute && refutation) {
+		if (refute && probe) {
 			let showFen = wrongFen;
-			const maxPlies = Math.min(REFUTATION_MAX_PLIES, refutation.pv.length);
+			const maxPlies = Math.min(REFUTATION_MAX_PLIES, probe.refutationPv.length);
 			for (let i = 0; i < maxPlies; i++) {
-				const pvUci = refutation.pv[i];
+				const pvUci = probe.refutationPv[i];
 				if (!pvUci || pvUci.length < 4) break;
 				const orig = pvUci.slice(0, 2) as Key;
 				const dest = pvUci.slice(2, 4) as Key;
@@ -697,7 +674,7 @@
 				userLastMove = [orig, dest];
 				if (i === 0) {
 					refutationSan = pvEdge.san;
-					refutationCp = refutation.stmCp;
+					refutationCp = probe.refutationCp;
 					phase = 'refuted';
 				}
 				showFen = nextFen;
@@ -720,47 +697,6 @@
 		refutationCp = null;
 		moveQuality = null;
 		phase = 'pending';
-	}
-
-	async function probeRefutation(
-		fen: string,
-		timeoutMs: number
-	): Promise<{ pv: string[]; stmCp: number } | null> {
-		const engine = getEngine();
-		if (!engine.isReady()) return null;
-		const stm = colorToMove(fen);
-		const sign = stm === 'black' ? -1 : 1;
-		return await new Promise<{ pv: string[]; stmCp: number } | null>((resolve) => {
-			let best: { pv: string[]; stmCp: number } | null = null;
-			let settled = false;
-			const unsub = engine.onInfo((info: EngineInfo) => {
-				if (!info.pv.length) return;
-				if (info.scoreMate !== undefined) {
-					const mateCp = info.scoreMate > 0 ? 10000 : -10000;
-					best = { pv: info.pv.slice(), stmCp: mateCp * sign };
-				} else if (info.scoreCp !== undefined) {
-					best = { pv: info.pv.slice(), stmCp: info.scoreCp * sign };
-				}
-			});
-			const timer = setTimeout(() => {
-				if (settled) return;
-				settled = true;
-				unsub();
-				try {
-					engine.stop();
-				} catch {
-					/* ignore */
-				}
-				resolve(best);
-			}, timeoutMs);
-			engine.go(fen, 16).catch(() => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timer);
-				unsub();
-				resolve(null);
-			});
-		});
 	}
 
 	function showHint() {
@@ -1770,8 +1706,10 @@
 						{#if moveQuality}
 							<span
 								class:!text-[var(--color-olive-300)]={moveQuality === 'playable'}
-								class:!text-[var(--color-brass-300)]={moveQuality === 'dubious'}
-								class:!text-[var(--color-copper-300)]={moveQuality === 'mistake'}
+								class:!text-[var(--color-brass-300)]={moveQuality === 'dubious' ||
+									moveQuality === 'missed_chance'}
+								class:!text-[var(--color-copper-300)]={moveQuality === 'mistake' ||
+									moveQuality === 'gave_advantage'}
 								class:!text-[var(--color-oxblood-300)]={moveQuality === 'blunder'}
 							>
 								{moveQualityLabel(moveQuality)}
@@ -1781,12 +1719,8 @@
 						{/if}
 					</div>
 					<h2 class="font-serif text-[2rem] leading-tight text-[var(--color-parchment-100)]">
-						{#if moveQuality === 'playable'}
-							<em>Fair, but not your repertoire. Try again.</em>
-						{:else if moveQuality === 'dubious'}
-							<em>Not quite. Try again.</em>
-						{:else if moveQuality}
-							<em>Try again.</em>
+						{#if moveQuality}
+							<em>{moveQualityHeadline(moveQuality)}</em>
 						{:else}
 							<em>Evaluating…</em>
 						{/if}

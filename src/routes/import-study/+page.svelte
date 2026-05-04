@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { base, resolve } from '$app/paths';
+	import { page } from '$app/state';
 	import { ArrowRight, BookOpen, Link as LinkIcon, RefreshCw } from 'lucide-svelte';
 
 	import { parseRepertoirePgn } from '$lib/chess/pgn';
@@ -59,7 +60,10 @@
 	});
 
 	async function reconnectForScopes() {
-		await startOAuth([...STUDY_SCOPES]);
+		// Land back on the import-study page rather than /settings so the
+		// user can immediately resume picking a study after reconnecting.
+		const returnTo = page.url.pathname + page.url.search + page.url.hash;
+		await startOAuth([...STUDY_SCOPES], returnTo);
 	}
 
 	async function loadStudies() {

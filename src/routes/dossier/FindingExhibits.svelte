@@ -270,62 +270,90 @@
 	</div>
 {:else if slug === 'opening-fit'}
 	{@const of = exhibits.openingFit}
-	<table class="w-full border-collapse font-mono text-[11px]">
-		<thead class="text-[var(--color-parchment-500)]">
-			<tr>
-				<th class="pb-1 text-left font-normal">Family</th>
-				<th class="pb-1 text-right font-normal">Games</th>
-				<th class="pb-1 text-right font-normal">Win %</th>
-				<th class="pb-1 text-right font-normal">Δ win</th>
-				<th class="pb-1 text-right font-normal">Δ CP</th>
-				<th class="pb-1 text-right font-normal">Verdict</th>
-			</tr>
-		</thead>
-		<tbody class="text-[var(--color-parchment-100)]">
-			{#each of.rows.slice(0, 6) as r (r.family)}
-				<tr class="border-t border-[var(--color-ink-800)]">
-					<td class="py-1 pr-2 text-[var(--color-parchment-200)]">{r.family}</td>
-					<td class="py-1 text-right">{r.games}</td>
-					<td class="py-1 text-right">{pctFmt(r.winRate, 0)}</td>
-					<td
-						class="py-1 text-right {r.winRateDelta > 0.03
-							? 'text-emerald-300'
-							: r.winRateDelta < -0.03
-								? 'text-amber-300'
-								: ''}"
-					>
-						{signedPctFmt(r.winRateDelta, 0)}
-					</td>
-					<td
-						class="py-1 text-right {r.avgCpLossDelta > 5
-							? 'text-amber-300'
-							: r.avgCpLossDelta < -5
-								? 'text-emerald-300'
-								: ''}"
-					>
-						{r.avgCpLoss > 0
-							? `${r.avgCpLossDelta >= 0 ? '+' : ''}${r.avgCpLossDelta.toFixed(0)}`
-							: '—'}
-					</td>
-					<td class="py-1 text-right text-[10px]">
-						<span
-							class="rounded border px-1 py-0.5 {r.verdict === 'fit'
-								? 'border-emerald-500/50 text-emerald-300'
-								: r.verdict === 'misfit'
-									? 'border-amber-300/50 text-amber-300'
-									: 'border-[var(--color-ink-700)] text-[var(--color-parchment-500)]'}"
-						>
-							{r.verdict}
-						</span>
-					</td>
-				</tr>
-			{/each}
-		</tbody>
-	</table>
+	{@const whiteRows = of.rows.filter((r) => r.color === 'white').slice(0, 6)}
+	{@const blackRows = of.rows.filter((r) => r.color === 'black').slice(0, 6)}
+	<div class="grid gap-3">
+		{#each [{ side: 'white', label: 'As White', rows: whiteRows }, { side: 'black', label: 'As Black', rows: blackRows }] as group (group.side)}
+			<div>
+				<div class="mb-1 text-[10px] tracking-wider text-[var(--color-parchment-500)] uppercase">
+					{group.label} ({group.rows.length})
+				</div>
+				{#if group.rows.length === 0}
+					<div class="text-[10px] text-[var(--color-parchment-500)]">
+						No family with ≥5 games on this side yet.
+					</div>
+				{:else}
+					<table class="w-full border-collapse font-mono text-[11px]">
+						<thead class="text-[var(--color-parchment-500)]">
+							<tr>
+								<th class="pb-1 text-left font-normal">Family</th>
+								<th class="pb-1 text-right font-normal">Games</th>
+								<th class="pb-1 text-right font-normal">Win %</th>
+								<th class="pb-1 text-right font-normal">Δ win</th>
+								<th class="pb-1 text-right font-normal">Δ CP</th>
+								<th class="pb-1 text-right font-normal">Verdict</th>
+							</tr>
+						</thead>
+						<tbody class="text-[var(--color-parchment-100)]">
+							{#each group.rows as r (`${r.color}|${r.opening}`)}
+								<tr class="border-t border-[var(--color-ink-800)]">
+									<td class="py-1 pr-2 text-[var(--color-parchment-200)]">
+										{r.opening}
+										{#if r.role === 'played'}
+											<span class="ml-1 text-[10px] text-[var(--color-parchment-500)]">
+												(played)
+											</span>
+										{:else if r.role === 'faced'}
+											<span class="ml-1 text-[10px] text-[var(--color-parchment-500)]">
+												(faced)
+											</span>
+										{/if}
+									</td>
+									<td class="py-1 text-right">{r.games}</td>
+									<td class="py-1 text-right">{pctFmt(r.winRate, 0)}</td>
+									<td
+										class="py-1 text-right {r.winRateDelta > 0.03
+											? 'text-emerald-300'
+											: r.winRateDelta < -0.03
+												? 'text-amber-300'
+												: ''}"
+									>
+										{signedPctFmt(r.winRateDelta, 0)}
+									</td>
+									<td
+										class="py-1 text-right {r.cpLossDelta != null && r.cpLossDelta > 5
+											? 'text-amber-300'
+											: r.cpLossDelta != null && r.cpLossDelta < -5
+												? 'text-emerald-300'
+												: ''}"
+									>
+										{r.cpLossDelta != null
+											? `${r.cpLossDelta >= 0 ? '+' : ''}${r.cpLossDelta.toFixed(0)}`
+											: '—'}
+									</td>
+									<td class="py-1 text-right text-[10px]">
+										<span
+											class="rounded border px-1 py-0.5 {r.verdict === 'strong'
+												? 'border-emerald-500/50 text-emerald-300'
+												: r.verdict === 'weak'
+													? 'border-amber-300/50 text-amber-300'
+													: 'border-[var(--color-ink-700)] text-[var(--color-parchment-500)]'}"
+										>
+											{r.verdict}
+										</span>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				{/if}
+			</div>
+		{/each}
+	</div>
 	<div class="mt-2 text-[10px] text-[var(--color-parchment-500)]">
-		Baseline: overall win {pctFmt(of.overallWinRate, 0)} · overall CP loss {of.overallCpLoss.toFixed(
-			1
-		)}.
+		Baseline: overall win {pctFmt(of.userWinRate, 0)} · overall CP loss {of.userAvgCpLoss != null
+			? of.userAvgCpLoss.toFixed(1)
+			: '—'}. Rows are split by family × side; QGA, QGD and Slav each get their own row.
 	</div>
 {:else if slug === 'endgame-subtypes'}
 	{@const eg = exhibits.endgameSubtypes}

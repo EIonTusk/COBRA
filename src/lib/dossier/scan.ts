@@ -148,13 +148,39 @@ export async function scanDossierAcrossAccounts(
 								signal: opts.signal
 							});
 
+				// `scanned` counts every game pulled from the stream (raw API
+				// throughput); the progress callback reports the cumulative
+				// `classified.length` across ALL accounts so the displayed
+				// counter is monotonically non-decreasing across the whole
+				// scan and matches the actual size of the analysed corpus.
+				// Per-account `scanned` is recorded in `perAccount` so the
+				// audit log still has the raw throughput.
+				const accountMax = opts.maxGamesPerAccount ?? 100;
 				let scanned = 0;
+				let kept = 0;
 				for await (const game of stream) {
 					scanned += 1;
+					if (kept >= accountMax) {
+						// Defensive: the upstream stream (Lichess `max=` /
+						// chess.com client-side cap) should already enforce
+						// this, but we've seen Lichess occasionally over-yield
+						// in practice. Stop iterating here so the progress
+						// counter doesn't sail past the user's configured
+						// limit. Log once per overshoot so the symptom is
+						// visible if it's a genuine upstream bug rather than
+						// our miscount.
+						console.warn(
+							`[dossier scan] stream for ${account.source}/${account.username} yielded > ${accountMax} games; capping. (scanned=${scanned}, kept=${kept})`
+						);
+						break;
+					}
 					if (game.variant !== 'standard') continue;
 					const c = classifyGame(game, account.username);
-					if (c) classified.push(c);
-					opts.onProgress?.(account, scanned);
+					if (c) {
+						classified.push(c);
+						kept += 1;
+					}
+					opts.onProgress?.(account, classified.length);
 				}
 				perAccount.push({ account, scanned });
 			} catch (e) {
@@ -187,6 +213,13 @@ export async function scanDossierAcrossAccounts(
 		try {
 			evalAxes = await analyseEvalAxes(classified, {
 				depth: effectiveDepth,
+				// Adaptive scoring: every move gets a cheap shallow pass; only
+				// positions where the engine itself is unsure (top-1 vs top-2
+				// gap < ambiguityGap) get the full deep re-pass. Cuts the
+				// average per-move work to roughly the shallow-only budget
+				// while preserving precision exactly where it matters for
+				// cpLoss / blunder classification.
+				adaptive: true,
 				signal: opts.signal,
 				onProgress: opts.onEvalProgress,
 				lichessToken: token ?? undefined,

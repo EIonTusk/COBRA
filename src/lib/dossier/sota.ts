@@ -31,17 +31,45 @@ export function scoreToSignedCp(s: ScoreLike): number {
 	return 0;
 }
 
-/** Lichess win-probability sigmoid. Input cp from POV of side-to-move. Returns 0–100. */
+/** Lichess win-probability sigmoid. Input cp under any consistent POV
+ *  (positive = good for that POV); returns 0–100 win probability for that
+ *  same POV. The dossier feeds it user-POV cp; cpToWinProb is symmetric
+ *  around 0 so any agreed POV works as long as `before` and `after` use
+ *  the same one. */
 export function cpToWinProb(cp: number): number {
 	const clamped = Math.max(-MATE_WP_CP, Math.min(MATE_WP_CP, cp));
 	return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * clamped)) - 1);
 }
 
-/** WP-loss for a move: drop in win probability from the position before to after. */
+/** WP-loss for a move: drop in win probability from the position before to after.
+ *  Both inputs MUST be in the same POV (typically user-POV). */
 export function wpLoss(cpBefore: number, cpAfter: number): number {
 	const wpBefore = cpToWinProb(cpBefore);
 	const wpAfter = cpToWinProb(cpAfter);
 	return Math.max(0, wpBefore - wpAfter);
+}
+
+/**
+ * Convert a side-to-move-POV centipawn reading (UCI standard, what
+ * `lila-stockfish-web` emits via `engine.onInfo`) into the user's POV.
+ *
+ * The engine reports cp/mate from the perspective of whoever is on move
+ * at the analysed FEN. The dossier wants user-POV (positive = good for
+ * the user being scored, regardless of whose turn it is).
+ *
+ *   - At positions where it's the user's turn, STM-POV = user-POV → return as-is.
+ *   - At positions where it's the opponent's turn, STM-POV = -user-POV → negate.
+ *
+ * This function is the single-source-of-truth for that conversion. All
+ * dossier paths that read engine cp values must go through it; otherwise
+ * scoring at black-to-move positions silently inverts.
+ */
+export function stmPovToUserPov(
+	cp: number,
+	fenSideToMove: 'white' | 'black',
+	userColor: 'white' | 'black'
+): number {
+	return fenSideToMove === userColor ? cp : -cp;
 }
 
 /**

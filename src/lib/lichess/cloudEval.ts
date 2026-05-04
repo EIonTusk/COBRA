@@ -6,16 +6,20 @@
  * master-game transpositions almost always hit; obscure middlegame
  * positions miss (404 → returned as null).
  *
- * Scores arrive in side-to-move's POV (UCI convention). We flip here
- * so downstream consumers can treat cloud and local Stockfish the same.
+ * Lichess returns cp/mate already in white's POV (positive = white winning,
+ * per their public docs) — no further normalisation needed here. The
+ * explorer + edit page render evals in white's POV; local Stockfish output
+ * (which IS side-to-move POV per UCI) gets flipped to white's POV at the
+ * call site in src/routes/repertoire/[id]/edit/+page.svelte so both
+ * sources line up.
  */
 
 export interface CloudEvalPv {
 	/** UCI move list, first = best move. */
 	moves: string[];
-	/** Centipawns, flipped to white's POV to match local engine convention. */
+	/** Centipawns in white's POV (positive = white better). */
 	scoreCp?: number;
-	/** Mate distance, same flip. */
+	/** Mate distance in white's POV (positive = white mates). */
 	scoreMate?: number;
 }
 
@@ -73,10 +77,11 @@ async function doFetch(
 	const headers: Record<string, string> = { Accept: 'application/json' };
 	if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
 	const url = `https://lichess.org/api/cloud-eval?fen=${encodeURIComponent(fen)}&multiPv=${multiPv}`;
-	// Lichess reports cp/mate in UCI side-to-move POV. Flip to white's
-	// POV so it matches Engine's normalization.
-	const sideToMove = fen.split(' ')[1] === 'b' ? 'black' : 'white';
-	const flip = sideToMove === 'black' ? -1 : 1;
+	// Lichess cloud-eval returns cp/mate already in white's POV (per their
+	// docs: "positive means white is winning"). No flip needed here — that
+	// matches the explorer + edit page display convention. Local Stockfish
+	// output IS in side-to-move POV per UCI; that gets flipped at its call
+	// site in src/routes/repertoire/[id]/edit/+page.svelte.
 	try {
 		const res = await fetch(url, { headers, signal: opts.signal });
 		if (res.status === 404) {
@@ -100,8 +105,8 @@ async function doFetch(
 			knodes: raw.knodes,
 			pvs: (raw.pvs ?? []).map((pv) => ({
 				moves: pv.moves.split(' ').filter(Boolean),
-				scoreCp: pv.cp !== undefined ? pv.cp * flip : undefined,
-				scoreMate: pv.mate !== undefined ? pv.mate * flip : undefined
+				scoreCp: pv.cp,
+				scoreMate: pv.mate
 			}))
 		};
 		store(key, out);

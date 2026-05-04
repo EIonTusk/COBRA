@@ -14,15 +14,14 @@
 		ChevronLeft,
 		Check,
 		Compass,
-		Eye,
-		EyeOff,
 		Copy,
 		Flame,
+		MoveUpRight,
 		Lightbulb,
-		Menu,
 		Save,
 		Star,
 		Target,
+		WifiOff,
 		X as XIcon
 	} from 'lucide-svelte';
 	import type { Key, MoveMetadata } from '@lichess-org/chessground/types';
@@ -119,6 +118,18 @@
 	let ideaAnswer = $state('');
 	let ideaDirty = $state(false);
 	let settings = $state<AppSettings | null>(null);
+	// Reactive gate for any UI affordance that needs to call Lichess.
+	// Mirrors the convention used by /mistakes, /autobuild, /opponent-prep
+	// so toolbar buttons and inline notices flip in lock-step the moment a
+	// token is added or cleared in Settings.
+	const tokenConfigured = $derived(!!settings && !!effectiveLichessToken(settings));
+	// Path-only "come back here" URL we hand off to /settings via `?return=`
+	// so post-OAuth navigation lands the user back on this edit page rather
+	// than stranding them on /settings. Path/search/hash only — never the
+	// origin (the consumer rejects absolute URLs).
+	const lichessReturnHref = $derived(
+		`${resolve('/settings')}?return=${encodeURIComponent(page.url.pathname + page.url.search + page.url.hash)}#lichess`
+	);
 	let jumpStatus = $state<string | null>(null);
 	let jumpBusy = $state(false);
 	// On narrow viewports the three "…missing" buttons get rolled up into a
@@ -194,6 +205,12 @@
 	// maintaining a separate "Continuations in your tree" panel.
 	const knownChildSans = $derived<Set<string>>(
 		new Set((currentNode?.children ?? []).map((e) => e.san))
+	);
+	// Saved continuations at this position with both SAN and UCI. Passed
+	// to the Explorer so the no-Lichess-token state can still render the
+	// user's own prep (with skeleton placeholders for Lichess stats).
+	const savedMovesAtCurrent = $derived<Array<{ san: string; uci: string }>>(
+		(currentNode?.children ?? []).map((e) => ({ san: e.san, uci: e.uci }))
 	);
 	// Subtree size per saved continuation at this position. The Explorer
 	// surfaces the count in its delete-confirm dialog so the user sees how
@@ -608,6 +625,14 @@
 		explorerShapes = [];
 
 		const fen = currentFen;
+		// lila-stockfish-web emits cp/mate from the side-to-move POV (UCI
+		// convention); Lichess cloud-eval already returns white's POV. Flip
+		// local engine output to white's POV so both sources agree before
+		// they hit `combinedByUci`. Without this, "+0.22" at the start
+		// position became "-0.20" after e4 — the eval looked sign-flipped
+		// when really it was just being re-rendered in black's POV because
+		// Black was now on move.
+		const localFlip = fen.split(' ')[1] === 'b' ? -1 : 1;
 		const knownUcis = new Set<string>((currentNode?.children ?? []).map((e) => e.uci));
 		const localSettings = settings;
 		const token = localSettings ? effectiveLichessToken(localSettings) : null;
@@ -629,8 +654,13 @@
 				engineUnsub?.();
 				engineUnsub = engine.onInfo((info) => {
 					if (!info.multipv) return;
+					const flipped: EngineInfo = {
+						...info,
+						scoreCp: info.scoreCp !== undefined ? info.scoreCp * localFlip : undefined,
+						scoreMate: info.scoreMate !== undefined ? info.scoreMate * localFlip : undefined
+					};
 					const map = new SvelteMap(engineByMultipv);
-					map.set(info.multipv, info);
+					map.set(info.multipv, flipped);
 					engineByMultipv = map;
 				});
 			} catch {
@@ -1485,7 +1515,13 @@
 		botOpponent = 'stockfish';
 		botStockfishLevel = 5;
 		botMaiaRating = 1500;
-		botColor = rep.color;
+		// Default to whichever side is on move at the launch FEN. Lichess
+		// starts the game from `currentFen`, so picking `rep.color` while
+		// the position has the opposite side to move means the bot plays
+		// first — and for some custom-FEN paths the user reports being
+		// silently assigned the other colour, which presents as "I'm white
+		// but it's black to play and my clock is ticking and I can't move".
+		botColor = sideToMove;
 		botError = null;
 		botMissingScope = false;
 		botDialogOpen = true;
@@ -1525,8 +1561,13 @@
 			// the recorded colour from the PGN header if needed.
 			const gameId = gameIdFromUrl(url);
 			if (gameId && rep) {
+				// Reconciliation overwrites this from the PGN headers once the
+				// game finishes, so the worst case for a random-colour pick is
+				// a wrong label in the spar list until then. Use side-to-move
+				// rather than `rep.color` so the placeholder lines up with
+				// what Lichess most often serves for a custom FEN.
 				const userColorForRecord =
-					botColor === 'random' ? rep.color : (botColor as 'white' | 'black');
+					botColor === 'random' ? sideToMove : (botColor as 'white' | 'black');
 				const opponentLabel =
 					botOpponent === 'stockfish' ? `Stockfish L${botStockfishLevel}` : `Maia ${botMaiaRating}`;
 				const strength = botOpponent === 'stockfish' ? botStockfishLevel : botMaiaRating;
@@ -1630,11 +1671,16 @@
 					aria-haspopup="menu"
 					aria-expanded={findMissingOpen}
 					title="Jump to a missing move, spar a bot, or toggle arrows"
-					class="eyebrow inline-flex items-center gap-1.5 rounded-[3px] px-1.5 py-1 text-[var(--color-parchment-300)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)] disabled:opacity-60"
+					class="eyebrow inline-flex items-center gap-1.5 rounded-[3px] px-1.5 py-1 transition-all duration-150 ease-out disabled:opacity-60 {findMissingOpen
+						? 'bg-[var(--color-ink-800)] text-[var(--color-parchment-100)]'
+						: 'text-[var(--color-parchment-300)] hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]'}"
 				>
-					<Menu class="size-3.5" />
 					<span>{jumpBusy ? 'Probing…' : 'Actions'}</span>
-					<ChevronDown class="size-3" />
+					<ChevronDown
+						class="size-3 transition-transform duration-200 ease-out {findMissingOpen
+							? 'rotate-180'
+							: ''}"
+					/>
 				</button>
 				{#if findMissingOpen}
 					<button
@@ -1645,66 +1691,142 @@
 					></button>
 					<div
 						role="menu"
-						class="absolute top-full right-0 z-40 mt-1 w-64 overflow-hidden rounded-[4px] border border-[var(--color-ink-700)] shadow-[var(--shadow-lg)]"
+						class="ot-menu-pop stagger-menu absolute top-full right-0 z-40 mt-1 w-64 overflow-hidden rounded-[4px] border border-[var(--color-ink-700)] shadow-[var(--shadow-lg)]"
 						style:background-color="var(--color-ink-900)"
 					>
+						{#if !tokenConfigured}
+							<!-- Header banner: visible only when no Lichess token,
+								 explains why several entries below are disabled
+								 and links straight to the connection section in
+								 Settings. Replaces the desktop inline pill on
+								 mobile, where the action bar has no room. -->
+							<!-- href is built from `resolve('/settings')` plus a `?return=`
+								 query carrying the current path so the OAuth callback
+								 lands the user back here instead of /settings. The lint
+								 rule only spots literal `resolve()` calls in the
+								 attribute, so disable it for this anchor. -->
+							<!-- eslint-disable svelte/no-navigation-without-resolve -->
+							<a
+								href={lichessReturnHref}
+								onclick={() => (findMissingOpen = false)}
+								style:--i="0"
+								class="flex items-center gap-2 border-b border-[var(--color-ink-800)] bg-[var(--color-ink-800)]/40 px-3 py-2 font-mono text-[10px] tracking-wider text-[var(--color-parchment-300)] uppercase transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]"
+							>
+								<!-- eslint-enable svelte/no-navigation-without-resolve -->
+								<WifiOff class="size-3 text-[var(--color-brass-300)]" />
+								<span>Lichess offline — sign in to enable</span>
+							</a>
+						{/if}
 						<button
 							type="button"
 							role="menuitem"
-							disabled={jumpBusy}
+							disabled={jumpBusy || !tokenConfigured}
+							title={tokenConfigured
+								? undefined
+								: 'Requires a Lichess connection — paste a token in Settings to enable.'}
 							onclick={() => {
 								findMissingOpen = false;
 								void jumpNextMissing();
 							}}
+							style:--i="1"
 							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
 						>
 							<Compass class="size-3.5 text-[var(--color-parchment-400)]" />
 							<span
-								>Next missing <span class="text-[var(--color-parchment-500)]">· on this line</span
+								>Next missing <span class="text-[var(--color-parchment-500)]"
+									>· {tokenConfigured ? 'on this line' : 'needs Lichess'}</span
 								></span
 							>
 						</button>
 						<button
 							type="button"
 							role="menuitem"
-							disabled={jumpBusy}
+							disabled={jumpBusy || !tokenConfigured}
+							title={tokenConfigured
+								? undefined
+								: 'Requires a Lichess connection — paste a token in Settings to enable.'}
 							onclick={() => {
 								findMissingOpen = false;
 								void jumpBiggestMissing();
 							}}
+							style:--i="2"
 							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
 						>
 							<Flame class="size-3.5 text-[var(--color-parchment-400)]" />
 							<span
-								>Biggest missing <span class="text-[var(--color-parchment-500)]">· elsewhere</span
+								>Biggest missing <span class="text-[var(--color-parchment-500)]"
+									>· {tokenConfigured ? 'elsewhere' : 'needs Lichess'}</span
 								></span
 							>
 						</button>
 						<button
 							type="button"
 							role="menuitem"
-							disabled={jumpBusy}
+							disabled={jumpBusy || !tokenConfigured}
+							title={tokenConfigured
+								? undefined
+								: 'Requires a Lichess connection — paste a token in Settings to enable.'}
 							onclick={() => {
 								findMissingOpen = false;
 								void jumpMostImportant();
 							}}
+							style:--i="3"
 							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
 						>
 							<Star class="size-3.5 text-[var(--color-parchment-400)]" />
-							<span>Most popular missing</span>
+							<span
+								>Most popular missing{#if !tokenConfigured}<span
+										class="ml-1 text-[var(--color-parchment-500)]">· needs Lichess</span
+									>{/if}</span
+							>
 						</button>
-						<div class="border-t border-[var(--color-ink-800)]"></div>
+						{#if topGap}
+							<!-- Doesn't need Lichess (driven by the local
+								 empirical-gaps store), so this stays
+								 enabled even when offline. Sits with the
+								 other "find a place to work on" entries. -->
+							<button
+								type="button"
+								role="menuitem"
+								onclick={() => {
+									findMissingOpen = false;
+									jumpTopEmpiricalGap();
+								}}
+								style:--i="4"
+								class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)]"
+							>
+								<Target class="size-3.5 text-[var(--color-parchment-400)]" />
+								<span class="flex-1"
+									>Gap you commonly face <span class="text-[var(--color-parchment-500)]"
+										>· from your games</span
+									></span
+								>
+								<span class="font-mono text-[10px] text-[var(--color-parchment-500)] tabular-nums">
+									×{topGap.count}
+								</span>
+							</button>
+						{/if}
+						<div class="border-t border-[var(--color-ink-800)]" style:--i="5"></div>
 						<button
 							type="button"
 							role="menuitem"
+							disabled={!tokenConfigured}
+							title={tokenConfigured
+								? undefined
+								: 'Requires a Lichess connection — paste a token in Settings to enable.'}
 							onclick={() => {
 								findMissingOpen = false;
 								openBotDialog();
 							}}
-							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)]"
+							style:--i="6"
+							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
 						>
 							<Bot class="size-3.5 text-[var(--color-parchment-400)]" />
-							<span>Spar <span class="text-[var(--color-parchment-500)]">· Lichess bot</span></span>
+							<span
+								>Spar <span class="text-[var(--color-parchment-500)]"
+									>· {tokenConfigured ? 'Lichess bot' : 'needs Lichess'}</span
+								></span
+							>
 						</button>
 						<button
 							type="button"
@@ -1714,6 +1836,7 @@
 								findMissingOpen = false;
 								void togglePinAtCurrent();
 							}}
+							style:--i="7"
 							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
 						>
 							<Bookmark
@@ -1740,17 +1863,26 @@
 								findMissingOpen = false;
 								boardHintsEnabled = !boardHintsEnabled;
 							}}
+							style:--i="8"
 							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)]"
 						>
+							<!-- MoveUpRight matches the visual shape of board arrows
+								 (a diagonal pointer); the on/off state is carried
+								 by the icon's tone — full parchment when arrows are
+								 visible, dimmed when they're hidden — and by the
+								 menu label that follows. -->
+							<MoveUpRight
+								class="size-3.5 transition-colors {boardHintsEnabled
+									? 'text-[var(--color-brass-300)]'
+									: 'text-[var(--color-parchment-500)]'}"
+							/>
 							{#if boardHintsEnabled}
-								<EyeOff class="size-3.5 text-[var(--color-parchment-400)]" />
 								<span
 									>Hide arrows <span class="text-[var(--color-parchment-500)]"
 										>· engine & explorer</span
 									></span
 								>
 							{:else}
-								<Eye class="size-3.5 text-[var(--color-parchment-400)]" />
 								<span
 									>Show arrows <span class="text-[var(--color-parchment-500)]"
 										>· engine & explorer</span
@@ -1824,14 +1956,40 @@
 			<div
 				class="order-6 flex flex-wrap items-center gap-2 lg:order-none lg:col-span-2 lg:row-start-1"
 			>
-				<!-- Desktop: individual buttons, hidden on mobile. -->
+				{#if !tokenConfigured}
+					<!-- Inline notice: sits next to the disabled toolbar
+						 buttons so the cause is unambiguous, and links
+						 straight to the place that fixes it. Desktop-only —
+						 mobile shows it as a header at the top of the
+						 Actions popup since the action bar there only
+						 carries the save pill. -->
+					<!-- See companion banner above for why this href can't pass
+						 the lint rule's literal-resolve check. -->
+					<!-- eslint-disable svelte/no-navigation-without-resolve -->
+					<a
+						href={lichessReturnHref}
+						title="Sign in to Lichess to enable these actions"
+						class="hidden items-center gap-1.5 rounded-[3px] border border-[var(--color-ink-700)] bg-[var(--color-ink-800)]/40 px-2 py-1 font-mono text-[10px] tracking-wider text-[var(--color-parchment-400)] uppercase transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-200)] lg:inline-flex"
+					>
+						<!-- eslint-enable svelte/no-navigation-without-resolve -->
+						<WifiOff class="size-3 text-[var(--color-brass-300)]" />
+						<span>Lichess offline — sign in to enable</span>
+					</a>
+				{/if}
+				<!-- Desktop: individual buttons, hidden on mobile. The three
+					 "missing" probes and Spar all hit Lichess; we disable
+					 them when no token is configured and explain why in the
+					 tooltip so the user can fix it from Settings rather than
+					 hunt for the cause. -->
 				<Button
 					class="hidden lg:inline-flex"
 					variant="secondary"
 					size="sm"
 					onclick={jumpNextMissing}
-					disabled={jumpBusy}
-					title="Probe the current line and jump to the earliest opponent move above the coverage threshold you haven't answered"
+					disabled={jumpBusy || !tokenConfigured}
+					title={tokenConfigured
+						? "Probe the current line and jump to the earliest opponent move above the coverage threshold you haven't answered"
+						: 'Requires a Lichess connection — paste a token in Settings to enable.'}
 				>
 					<Compass class="size-3.5" />
 					<span>{jumpBusy ? 'Probing…' : 'Next missing'}</span>
@@ -1841,8 +1999,10 @@
 					variant="secondary"
 					size="sm"
 					onclick={jumpBiggestMissing}
-					disabled={jumpBusy}
-					title="Probe the tree, skipping the current line, and jump to the biggest uncovered opponent move elsewhere"
+					disabled={jumpBusy || !tokenConfigured}
+					title={tokenConfigured
+						? 'Probe the tree, skipping the current line, and jump to the biggest uncovered opponent move elsewhere'
+						: 'Requires a Lichess connection — paste a token in Settings to enable.'}
 				>
 					<Flame class="size-3.5" />
 					<span>{jumpBusy ? 'Probing…' : 'Biggest missing'}</span>
@@ -1852,8 +2012,10 @@
 					variant="secondary"
 					size="sm"
 					onclick={jumpMostImportant}
-					disabled={jumpBusy}
-					title="Probe the whole tree and jump to the single most-played opponent move above the coverage threshold that you haven't answered"
+					disabled={jumpBusy || !tokenConfigured}
+					title={tokenConfigured
+						? "Probe the whole tree and jump to the single most-played opponent move above the coverage threshold that you haven't answered"
+						: 'Requires a Lichess connection — paste a token in Settings to enable.'}
 				>
 					<Star class="size-3.5" />
 					<span>{jumpBusy ? 'Ranking…' : 'Most popular missing'}</span>
@@ -1863,7 +2025,10 @@
 					variant="secondary"
 					size="sm"
 					onclick={openBotDialog}
-					title="Open a real Lichess game from this position vs Stockfish or Maia"
+					disabled={!tokenConfigured}
+					title={tokenConfigured
+						? 'Open a real Lichess game from this position vs Stockfish or Maia'
+						: 'Requires a Lichess connection — paste a token in Settings to enable.'}
 				>
 					<Bot class="size-3.5" />
 					<span>Spar</span>
@@ -1888,7 +2053,11 @@
 					<span>{currentIsPinnedGate ? 'Unpin start' : 'Pin start'}</span>
 				</Button>
 				{#if topGap}
+					<!-- Desktop-only: mobile users reach the same action via
+						 the Actions popup menu, where it sits next to the
+						 missing-move probes. -->
 					<Button
+						class="hidden lg:inline-flex"
 						variant="secondary"
 						size="sm"
 						onclick={jumpTopEmpiricalGap}
@@ -1901,27 +2070,6 @@
 						</span>
 					</Button>
 				{/if}
-				<button
-					type="button"
-					onclick={() => {
-						if (justSaved || saveNothingToDo) return;
-						void saveLine();
-					}}
-					title={justSaved ? 'Saved.' : saveNothingToDo ? 'No unsaved moves yet' : 'Save this line'}
-					disabled={justSaved || saveNothingToDo}
-					class="hidden items-center gap-2 rounded-full border px-3 py-1 font-serif text-[13px] transition-colors duration-200 disabled:opacity-50 lg:flex {saveToneClass}"
-				>
-					{#if justSaved}
-						<Check class="size-3.5" />
-						<span>Saved</span>
-					{:else}
-						<Save class="size-3.5" />
-						<span>Save line</span>
-						{#if movesSinceSave > 0}
-							<span class="font-mono text-[11px] tabular-nums opacity-80">+{movesSinceSave}</span>
-						{/if}
-					{/if}
-				</button>
 				{#if jumpStatus}
 					<span class="ml-1 font-serif text-[11px] text-[var(--color-parchment-400)] italic">
 						{jumpStatus}
@@ -1937,22 +2085,24 @@
 				suggestions are painted on the board.
 			-->
 			<div
-				class="order-5 hidden items-center gap-2 text-[13px] lg:order-none lg:col-start-2 lg:row-start-2 lg:flex"
+				class="order-5 hidden items-baseline gap-2 text-[13px] lg:order-none lg:col-start-2 lg:row-start-2 lg:flex"
 			>
-				<Lightbulb class="size-3.5 shrink-0 text-[var(--color-brass-300)]" />
+				<Lightbulb class="size-3.5 shrink-0 self-center text-[var(--color-brass-300)]" />
 				<span class="font-mono tabular-nums {engineScoreTone}">{engineScore}</span>
 				{#if engineTopSan}
 					<span class="text-[var(--color-ink-600)]">·</span>
 					<span class="font-mono text-[var(--color-parchment-200)]">{engineTopSan}</span>
 				{/if}
 				{#if engineDepth > 0}
+					<span class="text-[var(--color-ink-600)]">·</span>
 					<span
-						class="font-mono text-[11px] text-[var(--color-parchment-500)] tabular-nums"
+						class="font-mono text-[var(--color-parchment-500)] tabular-nums"
 						title={enginePrimary?.source === 'cloud'
 							? 'Lichess cloud eval'
 							: 'Local Stockfish — deepens while you stay on this position'}
 					>
-						d{engineDepth}{#if engineSourceLabel === 'cloud'}·☁{/if}
+						depth {engineDepth}{#if engineSourceLabel === 'cloud'}
+							· cloud{/if}
 					</span>
 				{/if}
 				<button
@@ -2047,16 +2197,18 @@
 					<!-- Mobile-only Stockfish readout inlined into the Candidates
 						 header; the standalone engine row is hidden on mobile
 						 (`hidden lg:flex`) so the page doesn't double-print it. -->
-					<span class="flex items-center gap-1.5 text-[12px] lg:hidden">
-						<Lightbulb class="size-3 shrink-0 text-[var(--color-brass-300)]" />
+					<span class="flex items-baseline gap-1.5 text-[12px] lg:hidden">
+						<Lightbulb class="size-3 shrink-0 self-center text-[var(--color-brass-300)]" />
 						<span class="font-mono tabular-nums {engineScoreTone}">{engineScore}</span>
 						{#if engineTopSan}
 							<span class="text-[var(--color-ink-600)]">·</span>
 							<span class="font-mono text-[var(--color-parchment-200)]">{engineTopSan}</span>
 						{/if}
 						{#if engineDepth > 0}
-							<span class="font-mono text-[10px] text-[var(--color-parchment-500)] tabular-nums">
-								d{engineDepth}{#if engineSourceLabel === 'cloud'}·☁{/if}
+							<span class="text-[var(--color-ink-600)]">·</span>
+							<span class="font-mono text-[var(--color-parchment-500)] tabular-nums">
+								depth {engineDepth}{#if engineSourceLabel === 'cloud'}
+									· cloud{/if}
 							</span>
 						{/if}
 					</span>
@@ -2074,6 +2226,7 @@
 					fingerprint={settings?.styleAdviceEnabled ? styleFingerprint : null}
 					openingFit={settings?.styleAdviceEnabled ? styleOpeningFit : null}
 					userWdlBySan={userWdlAtCurrent}
+					savedMoves={savedMovesAtCurrent}
 					headerRight={engineInline}
 				/>
 			</div>
@@ -2105,6 +2258,37 @@
 							<ChevronLeft class="size-4" />
 						</button>
 						<div class="eyebrow ml-2">Line</div>
+						<!-- Desktop save pill: sits at the right of the Line
+								 header so the primary commit action lives next
+								 to the line it's saving, in line with the move
+								 arrows. Mobile uses the board-toolbar pill. -->
+						<button
+							type="button"
+							onclick={() => {
+								if (justSaved || saveNothingToDo) return;
+								void saveLine();
+							}}
+							title={justSaved
+								? 'Saved.'
+								: saveNothingToDo
+									? 'No unsaved moves yet'
+									: 'Save this line'}
+							disabled={justSaved || saveNothingToDo}
+							class="ml-auto hidden items-center gap-2 rounded-full border px-3 py-1 font-serif text-[13px] transition-colors duration-200 disabled:opacity-50 lg:flex {saveToneClass}"
+						>
+							{#if justSaved}
+								<Check class="size-3.5" />
+								<span>Saved</span>
+							{:else}
+								<Save class="size-3.5" />
+								<span>Save line</span>
+								{#if movesSinceSave > 0}
+									<span class="font-mono text-[11px] tabular-nums opacity-80"
+										>+{movesSinceSave}</span
+									>
+								{/if}
+							{/if}
+						</button>
 					</div>
 
 					{#if history.length === 0}

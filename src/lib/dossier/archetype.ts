@@ -193,6 +193,14 @@ function sublineFor(structure: StructureLabel, tempo: TempoLabel): string {
  */
 export interface EmpiricalRec {
 	family: string;
+	/**
+	 * Side the user played. Empirical rows come from per-(family, color)
+	 * `byOpening` cells, so "QGD as White" and "QGD as Black" are
+	 * separate recommendations. `null` is used only for `explore` seeds,
+	 * which are colour-agnostic until you've played them enough to
+	 * register on either side.
+	 */
+	color: 'white' | 'black' | null;
 	games: number;
 	winRate: number;
 	deltaVsOverall: number;
@@ -227,6 +235,7 @@ export function empiricalOpeningRecs(fp: DossierFingerprint, arch: Archetype): E
 		if (delta >= EDGE_PP) {
 			working.push({
 				family: o.family,
+				color: o.color,
 				games: o.games,
 				winRate: o.winRate,
 				deltaVsOverall: delta,
@@ -235,6 +244,7 @@ export function empiricalOpeningRecs(fp: DossierFingerprint, arch: Archetype): E
 		} else if (delta <= -EDGE_PP) {
 			underperforming.push({
 				family: o.family,
+				color: o.color,
 				games: o.games,
 				winRate: o.winRate,
 				deltaVsOverall: delta,
@@ -298,18 +308,25 @@ function rationaleForUnderperforming(o: OpeningProfile, delta: number, arch: Arc
  * we *think* fit your style that you've barely played. Marked clearly as
  * untested in the UI; once you have 8+ games in one it'll get promoted
  * to working/underperforming on the next scan.
+ *
+ * Seed names are short keywords (e.g. `"Caro-Kann"`, `"Slav"`, `"Queen's
+ * Gambit"`) and are matched against `byOpening` family names with a
+ * case-insensitive substring test — `byOpening.family` carries the full
+ * PGN root like `"Caro-Kann Defense"` or `"Queen's Gambit Declined"`,
+ * and we want a seed to be considered "already played" when the user
+ * has any meaningful sample on either side of the board.
  */
 function exploreCandidates(fp: DossierFingerprint, arch: Archetype): EmpiricalRec[] {
-	const playedFamilies = new Set<string>(
-		fp.byOpening.filter((o) => o.games >= EXPLORE_MAX_GAMES).map((o) => o.family)
-	);
+	const playedFamilies = fp.byOpening
+		.filter((o) => o.games >= EXPLORE_MAX_GAMES)
+		.map((o) => o.family.toLowerCase());
 
 	const seeds: { family: string; rationale: string }[] = [];
 	if (arch.structure === 'conservative' || arch.structure === 'piece_player') {
 		seeds.push(
 			{ family: 'Caro-Kann', rationale: 'Solid skeleton suits a piece-player.' },
 			{ family: 'French', rationale: 'Maneuvering room behind a fixed centre.' },
-			{ family: 'Spanish (Ruy Lopez)', rationale: 'Long-game pressure as White.' }
+			{ family: 'Ruy Lopez', rationale: 'Long-game pressure as White.' }
 		);
 	}
 	if (arch.structure === 'aggressor' || arch.structure === 'pawn_driven') {
@@ -322,7 +339,7 @@ function exploreCandidates(fp: DossierFingerprint, arch: Archetype): EmpiricalRe
 	if (arch.tempo === 'forcing' || arch.tempo === 'trader') {
 		seeds.push(
 			{ family: 'Sicilian', rationale: 'Open lines reward forcing instincts.' },
-			{ family: 'Italian / Two Knights', rationale: 'Direct, tactical Italian lines.' }
+			{ family: 'Italian Game', rationale: 'Direct, tactical Italian lines.' }
 		);
 	}
 	if (arch.tempo === 'patient') {
@@ -335,11 +352,13 @@ function exploreCandidates(fp: DossierFingerprint, arch: Archetype): EmpiricalRe
 	const out: EmpiricalRec[] = [];
 	const seen = new Set<string>();
 	for (const s of seeds) {
-		if (seen.has(s.family)) continue;
-		if (playedFamilies.has(s.family)) continue;
-		seen.add(s.family);
+		const key = s.family.toLowerCase();
+		if (seen.has(key)) continue;
+		if (playedFamilies.some((f) => f.includes(key))) continue;
+		seen.add(key);
 		out.push({
 			family: s.family,
+			color: null,
 			games: 0,
 			winRate: 0,
 			deltaVsOverall: 0,
