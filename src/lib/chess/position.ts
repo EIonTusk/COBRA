@@ -133,6 +133,29 @@ export function isGameEnd(fen: string): { checkmate: boolean; stalemate: boolean
 	return { checkmate: chess.isCheckmate(), stalemate: chess.isStalemate() };
 }
 
+/**
+ * Richer end-state probe used when explaining how a game ended (resigned,
+ * stalemate, mate, 50-move, insufficient material …). All flags read off the
+ * single `Chess` instance so the cost is one parse + the rules check, not five.
+ */
+export function endState(fen: string): {
+	checkmate: boolean;
+	stalemate: boolean;
+	insufficientMaterial: boolean;
+	inCheck: boolean;
+	/** Halfmove clock from the FEN (resets on pawn moves and captures). */
+	halfmoves: number;
+} {
+	const chess = chessFromFen(fen);
+	return {
+		checkmate: chess.isCheckmate(),
+		stalemate: chess.isStalemate(),
+		insufficientMaterial: chess.isInsufficientMaterial(),
+		inCheck: chess.isCheck(),
+		halfmoves: chess.halfmoves
+	};
+}
+
 const PIECE_VALUE: Record<Role, number> = {
 	pawn: 1,
 	knight: 3,

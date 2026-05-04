@@ -2,6 +2,8 @@
 	import { page } from '$app/state';
 	import { base, resolve } from '$app/paths';
 	import { goto } from '$app/navigation';
+	import { slide } from 'svelte/transition';
+	import { flip } from 'svelte/animate';
 	import {
 		AlertTriangle,
 		BookOpen,
@@ -775,7 +777,11 @@
 									: 'text-[var(--color-parchment-300)]'}
 						{@const outcomeLabel =
 							outcome === 'win' ? 'W' : outcome === 'loss' ? 'L' : outcome === 'draw' ? '½' : '…'}
-						<li class="grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 py-2 text-sm">
+						<li
+							in:slide={{ duration: 220 }}
+							animate:flip={{ duration: 220 }}
+							class="grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 py-2 text-sm"
+						>
 							<span
 								class="flex size-5 items-center justify-center rounded-full border border-[var(--color-ink-700)] font-mono text-[11px] tabular-nums {outcomeTone}"
 								title={outcome ?? 'ongoing'}

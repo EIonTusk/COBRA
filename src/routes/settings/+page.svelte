@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { SvelteSet } from 'svelte/reactivity';
 	import { onMount, tick } from 'svelte';
+	import { slide } from 'svelte/transition';
+	import { flip } from 'svelte/animate';
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { ExternalLink, AlertTriangle, Check } from 'lucide-svelte';
@@ -724,7 +726,11 @@
 						class="mb-4 divide-y divide-[var(--color-ink-800)] border-y border-[var(--color-ink-800)]"
 					>
 						{#each displayedScanAccounts as a (`${a.source}:${a.username}`)}
-							<li class="flex items-center gap-3 py-2">
+							<li
+								in:slide={{ duration: 220 }}
+								animate:flip={{ duration: 220 }}
+								class="flex items-center gap-3 py-2"
+							>
 								<span
 									class="flex w-5 shrink-0 items-center justify-center"
 									class:text-[var(--color-brass-300)]={a.source === 'lichess'}
@@ -869,6 +875,8 @@
 					<ul class="mb-3 space-y-1 text-xs">
 						{#each storedBaselines as b (b.id)}
 							<li
+								in:slide={{ duration: 220 }}
+								animate:flip={{ duration: 220 }}
 								class="flex flex-wrap items-baseline justify-between gap-2 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-950)] px-3 py-2"
 							>
 								<div>

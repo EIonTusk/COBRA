@@ -31,6 +31,16 @@ export interface RepertoireInput {
 	rootFen: string;
 	rootFenKey: string;
 	nodes: Map<string, RepertoireNode>;
+	/**
+	 * Optional probe-from position. When set, the explorer is queried only at
+	 * positions in the subtree rooted at this fenKey instead of the entire
+	 * repertoire — useful for "filter by line" in the walkthrough browse.
+	 * Game *verification* (the prefix-depth check) still walks from the real
+	 * `rootFenKey`, so a candidate game must reach the line via the actual
+	 * move order, not just transpose into the subtree.
+	 */
+	probeFromFen?: string;
+	probeFromFenKey?: string;
 }
 
 export interface RecommendedGame {
@@ -57,12 +67,29 @@ export interface RecommendOpts {
 	 * fork, before mainline theory divergences).
 	 */
 	minDepth?: number;
+	/**
+	 * When true (the default), every candidate's full PGN is downloaded and
+	 * walked move-by-move against the rep so the reported `depth` reflects
+	 * the actual move-order match (not just the position lookup, which can
+	 * include transpositions). The dashboard wants this — it's picking one
+	 * game to highlight. The browse list doesn't: verification means N
+	 * extra HTTP round-trips before any row renders, and the user sees the
+	 * real match the moment they open a game. Disable for fast browse.
+	 */
+	verify?: boolean;
+	/**
+	 * Callback fired with the running candidate list after each probe (and,
+	 * when verification is on, after each verified candidate). Lets callers
+	 * stream results into the UI instead of waiting for the full Promise.
+	 */
+	onProgress?: (running: RecommendedGame[]) => void;
 }
 
 export async function recommendDeepGames(opts: RecommendOpts): Promise<RecommendedGame[]> {
 	const maxProbes = opts.maxProbes ?? 40;
 	const limit = opts.limit ?? 24;
 	const minDepth = opts.minDepth ?? 5;
+	const verify = opts.verify ?? true;
 
 	// Flatten every rep's tree nodes with their full FEN. We probe deepest
 	// first but include many mid-depth positions too — a game that diverged
@@ -73,17 +100,14 @@ export async function recommendDeepGames(opts: RecommendOpts): Promise<Recommend
 
 	// Aggregate by game id: keep the max observed depth so a game seen at
 	// multiple positions gets credit for the deepest one.
-	const best = new Map<
-		string,
-		{
-			game: TopGameEntry;
-			depth: number;
-			repertoireId: string;
-			repertoireName: string;
-			repertoireColor: Color;
-			seenAtFen: string;
-		}
-	>();
+	const best = new Map<string, RecommendedGame>();
+
+	function snapshot(): RecommendedGame[] {
+		return [...best.values()]
+			.filter((v) => v.depth >= minDepth)
+			.sort((a, b) => b.depth - a.depth)
+			.slice(0, limit);
+	}
 
 	let probed = 0;
 	for (const p of probes) {
@@ -98,6 +122,7 @@ export async function recommendDeepGames(opts: RecommendOpts): Promise<Recommend
 				token: opts.token
 			});
 			probed += 1;
+			let added = false;
 			for (const g of res.topGames ?? []) {
 				const prev = best.get(g.id);
 				if (!prev || p.depth > prev.depth) {
@@ -109,37 +134,49 @@ export async function recommendDeepGames(opts: RecommendOpts): Promise<Recommend
 						repertoireColor: p.repertoireColor,
 						seenAtFen: p.fen
 					});
+					added = true;
 				}
 			}
+			// Stream interim results so the caller can paint the list as
+			// rows arrive instead of waiting for every probe to finish.
+			if (added) opts.onProgress?.(snapshot());
 		} catch {
 			probed += 1;
 			continue;
 		}
 	}
 
-	// Verify each candidate against the rep it surfaced under by fetching
-	// the game's PGN and measuring the real move-by-move prefix depth.
-	// Lichess's explorer is position-indexed, so a candidate surfaced at a
-	// tree node of depth N may have reached that node through a different
-	// move order — from the user's point of view it deviates early.
+	if (!verify) return snapshot();
+
+	// Verification: download each candidate's PGN and measure the real
+	// move-by-move prefix depth. Lichess's explorer is position-indexed,
+	// so a candidate surfaced at a tree node of depth N may have reached
+	// that node through a different move order. Off by default for browse
+	// (each verify is an extra HTTP request), on for the dashboard
+	// recommendation where accuracy matters.
 	const candidates = [...best.values()];
 	const repsById = new Map(opts.reps.map((r) => [r.id, r]));
 	const verified = await verifyCandidates(candidates, repsById, {
 		signal: opts.signal,
 		token: opts.token,
-		concurrency: 3
+		concurrency: 3,
+		onCandidateVerified: (rec) => {
+			best.set(rec.game.id, rec);
+			opts.onProgress?.(snapshot());
+		}
 	});
 
-	return verified
-		.filter((v) => v.depth >= minDepth)
-		.sort((a, b) => b.depth - a.depth)
-		.slice(0, limit);
+	// Replace pre-verification snapshot with verified depths.
+	best.clear();
+	for (const v of verified) best.set(v.game.id, v);
+	return snapshot();
 }
 
 interface VerifyOpts {
 	signal?: AbortSignal;
 	token?: string;
 	concurrency: number;
+	onCandidateVerified?: (rec: RecommendedGame) => void;
 }
 
 async function verifyCandidates(
@@ -160,7 +197,9 @@ async function verifyCandidates(
 				const pgn = await fetchMastersGamePgn(c.game.id, opts.token);
 				const actual = measurePrefixDepth(pgn, rep);
 				if (actual > 0) {
-					out.push({ ...c, depth: actual });
+					const rec = { ...c, depth: actual };
+					out.push(rec);
+					opts.onCandidateVerified?.(rec);
 				}
 			} catch {
 				// Drop on any fetch/parse failure — we can't verify.
@@ -226,8 +265,11 @@ function collectTreeNodes(
 	const perRep = reps.map((rep) => {
 		const entries: Array<{ fen: string; depth: number }> = [];
 		const visited = new Set<string>();
+		const startFen = rep.probeFromFen ?? rep.rootFen;
+		const startFenKey = rep.probeFromFenKey ?? rep.rootFenKey;
+		const customStart = rep.probeFromFenKey !== undefined;
 		const queue: Array<{ fen: string; fenKey: string; depth: number }> = [
-			{ fen: rep.rootFen, fenKey: rep.rootFenKey, depth: 0 }
+			{ fen: startFen, fenKey: startFenKey, depth: 0 }
 		];
 		while (queue.length > 0) {
 			const cur = queue.shift()!;
@@ -242,9 +284,12 @@ function collectTreeNodes(
 				queue.push({ fen: nextFen, fenKey: edge.toFenKey, depth: cur.depth + 1 });
 			}
 		}
-		// Drop openings-book noise (very first few plies). Keep everything
-		// below that; the caller filters on `minDepth` again post-aggregation.
-		const ranked = entries.filter((e) => e.depth >= 3);
+		// Drop openings-book noise (very first few plies). Skip this when the
+		// caller provided a custom probe root — by definition it's already
+		// past book theory, and the depth values are measured from that point
+		// not the rep root, so a depth-3 cutoff would gut narrow line
+		// selections.
+		const ranked = customStart ? entries : entries.filter((e) => e.depth >= 3);
 		ranked.sort((a, b) => b.depth - a.depth);
 		// Take a generous slice per rep so mid-depth positions get probed
 		// too. The outer interleave + `cap` keeps the total bounded.

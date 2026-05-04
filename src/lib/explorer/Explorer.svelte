@@ -26,7 +26,8 @@
 	} from './client';
 	import { probeNarrowness, type NarrownessResult } from './narrowness';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
-	import { colorToMove } from '$lib/chess/fen';
+	import { colorToMove, fenKeyFromFen } from '$lib/chess/fen';
+	import { setPositionOpening } from '$lib/openings/positionOpenings';
 	import type { AppSettings } from '$lib/types';
 	import { adviseMoves, type StyleAdvice } from '$lib/dossier/styleAdvisor';
 	import type { DossierFingerprint } from '$lib/dossier/fingerprint';
@@ -275,6 +276,16 @@
 			});
 			if (myToken !== probeToken) return;
 			result = res;
+			// Opportunistic capture: cache the opening tag for this position
+			// so the walkthrough's line filter (and any other surface that
+			// wants a human-readable name) can skip the explorer round-trip.
+			if (res.opening) {
+				try {
+					void setPositionOpening(fenKeyFromFen(fen), res.opening);
+				} catch {
+					/* malformed FEN — nothing to cache */
+				}
+			}
 			void scheduleNarrownessProbes(fen, res, myToken);
 		} catch (e) {
 			result = null;

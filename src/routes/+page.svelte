@@ -91,6 +91,7 @@
 			const settings: AppSettings = await getSettings();
 			const token = effectiveLichessToken(settings);
 			const { recommendDeepGames } = await import('$lib/walkthrough/recommend');
+			const { viewedWalkthroughGameIds } = await import('$lib/walkthrough/viewed');
 			const full = await Promise.all(
 				reps.map(async (r) => ({
 					id: r.id,
@@ -108,13 +109,20 @@
 				maxProbes: 15
 			});
 			if (recs.length > 0) {
+				// Prefer games the user hasn't opened yet — once they've
+				// walked through one, surfacing it again on the next visit
+				// just nags them with the same suggestion. Fall back to the
+				// full pool only when every candidate has been seen.
+				const seen = viewedWalkthroughGameIds(settings);
+				const fresh = recs.filter((r) => !seen.has(r.game.id));
+				const pool = fresh.length > 0 ? fresh : recs;
 				// Pick one seeded by today's UTC date so the same recommendation
 				// is stable across refreshes on the same day, and rolls over
 				// once a day automatically.
 				const today = new Date().toISOString().slice(0, 10);
 				let h = 0;
 				for (let i = 0; i < today.length; i++) h = ((h << 5) - h + today.charCodeAt(i)) | 0;
-				recommend = recs[Math.abs(h) % recs.length];
+				recommend = pool[Math.abs(h) % pool.length];
 			}
 		} catch {
 			/* silent — not worth surfacing a failure on the dashboard */

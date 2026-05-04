@@ -168,6 +168,24 @@ export interface BaselineClockSpend {
 }
 
 /**
+ * Per-position opening tag. Captured opportunistically from Lichess explorer
+ * responses (via the rep editor's Explorer panel and the walkthrough's line
+ * filter) and reused as the human-readable label for repertoire branches.
+ *
+ * Keyed by `fenKey` (EPD), not (repertoireId, fenKey) — the opening name for
+ * a position doesn't depend on which rep contains it, so a single cache
+ * benefits every rep. `eco` is the standard A/B/C/D/E + 2-digit code; `name`
+ * is the full Lichess naming (e.g. `"Sicilian Defense: Najdorf Variation,
+ * English Attack"`), trimmed where convenient by callers.
+ */
+export interface StoredPositionOpening {
+	fenKey: string;
+	eco: string;
+	name: string;
+	fetchedAt: number;
+}
+
+/**
  * Cached masters-baseline derived from Lichess masters DB. Single-row store
  * (id='latest'). Stores ClassifiedGame[] of master games matching the user's
  * opening families, ready to feed dossier modules as a directional reference
@@ -275,13 +293,17 @@ export interface OpeningTrainerDB extends DBSchema {
 		key: string;
 		value: StoredMastersBaseline;
 	};
+	position_openings: {
+		key: string;
+		value: StoredPositionOpening;
+	};
 }
 
 // IDB name kept as 'openingtrainer' (pre-COBRA-rename) so existing users'
 // repertoires and cards survive the rebrand. Renaming would create a
 // fresh empty DB and orphan their data.
 const DB_NAME = 'openingtrainer';
-const DB_VERSION = 16;
+const DB_VERSION = 17;
 const REQUIRED_STORES = [
 	'repertoires',
 	'nodes',
@@ -296,7 +318,8 @@ const REQUIRED_STORES = [
 	'dossier_scan_checkpoint',
 	'spar_games',
 	'position_wdl',
-	'masters_baseline'
+	'masters_baseline',
+	'position_openings'
 ] as const;
 
 let dbPromise: Promise<IDBPDatabase<OpeningTrainerDB>> | null = null;
@@ -375,6 +398,9 @@ function ensureAllStores(db: IDBPDatabase<OpeningTrainerDB>) {
 	}
 	if (!has('masters_baseline')) {
 		db.createObjectStore('masters_baseline', { keyPath: 'id' });
+	}
+	if (!has('position_openings')) {
+		db.createObjectStore('position_openings', { keyPath: 'fenKey' });
 	}
 }
 

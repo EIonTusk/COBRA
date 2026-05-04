@@ -2,6 +2,7 @@
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { onMount, untrack } from 'svelte';
 	import { base } from '$app/paths';
+	import { autoHeight } from '$lib/ui/autoHeight';
 	import {
 		Keyboard,
 		Pencil,
@@ -1599,8 +1600,10 @@
 			{/if}
 		</div>
 
-		<!-- Side: prompt + feedback + rating -->
-		<aside class="space-y-5">
+		<!-- Side: prompt + feedback + rating. autoHeight smooths the height
+			 jumps when the panel cycles between intro / prompt / feedback /
+			 result variants — they have very different intrinsic heights. -->
+		<aside class="space-y-5" use:autoHeight>
 			{#if phase === 'intro'}
 				{#key currentLineLabel}
 					<div class="ot-fade">

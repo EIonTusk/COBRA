@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { slide } from 'svelte/transition';
+	import { flip } from 'svelte/animate';
 	import { base, resolve } from '$app/paths';
 	import { goto } from '$app/navigation';
 	import { ArrowLeft, ArrowRight, RotateCcw, X } from 'lucide-svelte';
@@ -657,7 +659,7 @@
 									<ul class="max-h-64 overflow-y-auto py-1">
 										{#each broadcastPlayerResults as p (p.id)}
 											{@const active = broadcastSelectedPlayer?.id === p.id}
-											<li>
+											<li in:slide={{ duration: 200 }} animate:flip={{ duration: 200 }}>
 												<button
 													type="button"
 													role="option"

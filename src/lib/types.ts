@@ -232,6 +232,14 @@ export interface AppSettings {
 	 * prep walk-through), so existing flows aren't hijacked.
 	 */
 	openAtStartingPosition?: boolean;
+	/**
+	 * IDs of masters/Lichess games the user has already opened in the
+	 * walkthrough page. Used to keep the dashboard's "Recommended
+	 * walkthrough" rotating through fresh games instead of resurfacing the
+	 * same one each session. Capped to the most-recent 200 entries to keep
+	 * the settings record small.
+	 */
+	viewedWalkthroughGames?: Array<{ id: string; viewedAt: number }>;
 }
 
 export interface StoredMistake {
