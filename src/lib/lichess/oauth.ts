@@ -4,9 +4,12 @@
  * Lichess doesn't require app registration — any URL works as `client_id`
  * and the redirect_uri is trusted as long as it matches what was sent with
  * the authorisation request. On the web we use the app's origin +
- * `/auth/lichess/callback`. In a Tauri build we use a custom scheme
- * (`cobra://auth/lichess/callback`) so Lichess can hand control back to
- * the OS, which routes the URL to our app via the deep-link plugin.
+ * `/auth/lichess/callback`. In a Tauri build we use a reverse-domain
+ * scheme (`io.github.eiontusk.cobra://auth/lichess/callback`) so Lichess
+ * can hand control back to the OS, which routes the URL to our app via
+ * the deep-link plugin. Lichess rejects "exotic" custom schemes like
+ * `cobra://` — they require reverse-domain notation for custom-app
+ * redirect URIs.
  *
  * Flow (web):
  *   1. startOAuth()     — generate PKCE verifier + challenge, stash the
@@ -20,9 +23,9 @@
  *                         user's *system* browser (where saved passwords
  *                         and SSO live). The Tauri app stays in place.
  *   2. (user authorises in their real browser)
- *   3. Lichess redirects to `cobra://auth/lichess/callback?...` — the OS
- *                         hands that to us via the deep-link listener
- *                         registered in the layout.
+ *   3. Lichess redirects to `io.github.eiontusk.cobra://auth/lichess/
+ *                         callback?...` — the OS hands that to us via
+ *                         the deep-link listener registered in the layout.
  *   4. The listener navigates the SvelteKit router to
  *      `/auth/lichess/callback?...`, which calls handleCallback().
  *
@@ -55,13 +58,18 @@ const SCOPES_KEY = 'ot:lichess:pkce-scopes';
 // "Connect Lichess" button on the Settings page itself behaves as before.
 const RETURN_KEY = 'ot:lichess:return-to';
 
-/** Custom URL scheme registered with Tauri's deep-link plugin. Must match
- *  `plugins.deep-link.{mobile,desktop}.scheme[s]` in `tauri.conf.json`. */
-const TAURI_REDIRECT_URI = 'cobra://auth/lichess/callback';
+/** Reverse-domain URL scheme registered with Tauri's deep-link plugin.
+ *  Must match `plugins.deep-link.{mobile,desktop}.scheme[s]` in
+ *  `tauri.conf.json` and the deep-link protocol filter in
+ *  `src/routes/+layout.svelte`. Lichess rejects "exotic" schemes like
+ *  bare `cobra://` and requires reverse-domain notation for custom apps,
+ *  so we use the bundle identifier verbatim. */
+export const TAURI_DEEP_LINK_SCHEME = 'io.github.eiontusk.cobra';
+const TAURI_REDIRECT_URI = `${TAURI_DEEP_LINK_SCHEME}://auth/lichess/callback`;
 /** Lichess accepts any URL as client_id — using the same custom scheme
  *  keeps web and Tauri requests visually consistent in Lichess's consent
- *  screen ("authorise cobra://app to…"). */
-const TAURI_CLIENT_ID = 'cobra://app';
+ *  screen ("authorise io.github.eiontusk.cobra://app to…"). */
+const TAURI_CLIENT_ID = `${TAURI_DEEP_LINK_SCHEME}://app`;
 
 function isTauriRuntime(): boolean {
 	if (typeof window === 'undefined') return false;
@@ -198,7 +206,8 @@ export async function startOAuth(scopes: string[] = [], returnTo?: string): Prom
 	if (isTauriRuntime()) {
 		// Hand the URL to the OS so it lands in the user's real browser
 		// (where their Lichess login + 2FA lives). The deep-link listener
-		// picks the callback up when Lichess redirects to `cobra://…`.
+		// picks the callback up when Lichess redirects to the registered
+		// reverse-domain scheme.
 		await openExternal(url);
 		return;
 	}

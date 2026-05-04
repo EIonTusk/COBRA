@@ -15,6 +15,7 @@
 	import { getEngine } from '$lib/stockfish/engine';
 	import { appearance } from '$lib/board/appearance.svelte';
 	import { openExternal, isExternalHttpUrl } from '$lib/platform/openExternal';
+	import { TAURI_DEEP_LINK_SCHEME } from '$lib/lichess/oauth';
 	import pkg from '../../package.json';
 
 	const appVersion = pkg.version;
@@ -153,13 +154,14 @@
 		return () => document.removeEventListener('click', onClick);
 	});
 
-	// Tauri-only: receive `cobra://…` deep-links from the OS and route the
-	// SvelteKit app to the matching internal page. Currently the only
-	// scheme we handle is the Lichess OAuth callback — the user authorises
-	// in their system browser, Lichess redirects to
-	// `cobra://auth/lichess/callback?code=…&state=…`, the OS hands the URL
-	// to us, and we hop the router onto the existing /auth/lichess/callback
-	// page so it can finish the token exchange and surface success/error.
+	// Tauri-only: receive deep-links from the OS and route the SvelteKit
+	// app to the matching internal page. Currently the only scheme we
+	// handle is the Lichess OAuth callback — the user authorises in their
+	// system browser, Lichess redirects to
+	// `io.github.eiontusk.cobra://auth/lichess/callback?code=…&state=…`,
+	// the OS hands the URL to us, and we hop the router onto the existing
+	// /auth/lichess/callback page so it can finish the token exchange and
+	// surface success/error.
 	$effect(() => {
 		if (typeof window === 'undefined') return;
 		const inTauri = '__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window;
@@ -177,8 +179,8 @@
 				} catch {
 					continue;
 				}
-				if (parsed.protocol !== 'cobra:') continue;
-				// `new URL("cobra://auth/lichess/callback?…")` parses host="auth"
+				if (parsed.protocol !== `${TAURI_DEEP_LINK_SCHEME}:`) continue;
+				// `new URL("<scheme>://auth/lichess/callback?…")` parses host="auth"
 				// and pathname="/lichess/callback". Stitch them back together
 				// for matching so the path is whole regardless of how the OS
 				// formatted the incoming URL.

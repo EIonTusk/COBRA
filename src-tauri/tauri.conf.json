@@ -44,8 +44,8 @@
 	},
 	"plugins": {
 		"deep-link": {
-			"mobile": [{ "scheme": ["cobra"], "appLink": false }],
-			"desktop": { "schemes": ["cobra"] }
+			"mobile": [{ "scheme": ["io.github.eiontusk.cobra"], "appLink": false }],
+			"desktop": { "schemes": ["io.github.eiontusk.cobra"] }
 		}
 	}
 }
