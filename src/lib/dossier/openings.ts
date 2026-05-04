@@ -95,6 +95,75 @@ export function familyChooser(family: OpeningFamily): 'white' | 'black' | 'eithe
  * heuristics, then the ECO fallback. Used by openingProfile.ts to
  * decide whether a row is "Played" or "Faced".
  */
+// Hardcoded black-side families (most-specific match first). Pulled to
+// module scope so callers like the masters-baseline filter can reuse the
+// same lists without rebuilding them on every call.
+const BLACK_NAME_PATTERNS = [
+	'caro-kann',
+	'sicilian',
+	'french defense',
+	'french defence',
+	'scandinavian',
+	'alekhine',
+	'pirc',
+	'modern defense',
+	'modern defence',
+	'nimzovich defense',
+	'slav',
+	'semi-slav',
+	'grünfeld',
+	'grunfeld',
+	"king's indian defense",
+	"king's indian defence",
+	"queen's indian",
+	'nimzo-indian',
+	'bogo-indian',
+	'old indian',
+	'budapest',
+	'englund',
+	'albin',
+	'dutch defense',
+	'dutch defence',
+	'benoni',
+	'benko',
+	"petrov's defense",
+	"petrov's defence",
+	'petroff',
+	'russian game',
+	'philidor'
+];
+
+const WHITE_NAME_PATTERNS = [
+	'english opening',
+	'ruy lopez',
+	'spanish',
+	'catalan',
+	'london system',
+	'colle',
+	'trompowsky',
+	'torre attack',
+	'bird',
+	'réti',
+	'reti opening',
+	'larsen',
+	'nimzowitsch-larsen',
+	'sokolsky',
+	'van geet',
+	'zukertort',
+	'polish opening',
+	"king's gambit",
+	'italian game',
+	'giuoco',
+	'evans gambit',
+	'scotch game',
+	'four knights',
+	'vienna game',
+	'danish gambit',
+	'center game',
+	'ponziani',
+	"king's indian attack"
+];
+
 export function chooserForOpeningName(
 	familyName: string,
 	eco: string | null | undefined
@@ -102,75 +171,8 @@ export function chooserForOpeningName(
 	const name = familyName.toLowerCase();
 	if (!name) return familyChooser(ecoFamily(eco));
 
-	// Hardcoded black-side families (most-specific match first).
-	const blackNames = [
-		'caro-kann',
-		'sicilian',
-		'french defense',
-		'french defence',
-		'scandinavian',
-		'alekhine',
-		'pirc',
-		'modern defense',
-		'modern defence',
-		'nimzovich defense',
-		'slav',
-		'semi-slav',
-		'grünfeld',
-		'grunfeld',
-		"king's indian defense",
-		"king's indian defence",
-		"queen's indian",
-		'nimzo-indian',
-		'bogo-indian',
-		'old indian',
-		'budapest',
-		'englund',
-		'albin',
-		'dutch defense',
-		'dutch defence',
-		'benoni',
-		'benko',
-		"petrov's defense",
-		"petrov's defence",
-		'petroff',
-		'russian game',
-		'philidor'
-	];
-	for (const p of blackNames) if (name.includes(p)) return 'black';
-
-	// Hardcoded white-side families.
-	const whiteNames = [
-		'english opening',
-		'ruy lopez',
-		'spanish',
-		'catalan',
-		'london system',
-		'colle',
-		'trompowsky',
-		'torre attack',
-		'bird',
-		'réti',
-		'reti opening',
-		'larsen',
-		'nimzowitsch-larsen',
-		'sokolsky',
-		'van geet',
-		'zukertort',
-		'polish opening',
-		"king's gambit",
-		'italian game',
-		'giuoco',
-		'evans gambit',
-		'scotch game',
-		'four knights',
-		'vienna game',
-		'danish gambit',
-		'center game',
-		'ponziani',
-		"king's indian attack"
-	];
-	for (const p of whiteNames) if (name.includes(p)) return 'white';
+	for (const p of BLACK_NAME_PATTERNS) if (name.includes(p)) return 'black';
+	for (const p of WHITE_NAME_PATTERNS) if (name.includes(p)) return 'white';
 
 	// Suffix / keyword heuristics — suffixes like "Declined", "Accepted",
 	// "Defense" always signal Black's choice; "Attack" / "System" /
@@ -183,6 +185,38 @@ export function chooserForOpeningName(
 	if (/\bsystem\b/.test(name)) return 'white';
 
 	// Fallback — coarse ECO-derived chooser.
+	return familyChooser(ecoFamily(eco));
+}
+
+/**
+ * Like `chooserForOpeningName` but treats Declined / Accepted /
+ * Counter-Gambit lines as `'either'`. Used when the caller cares whether
+ * *both* sides made a real structural choice — e.g. the masters baseline
+ * filter. In a Queen's Gambit Declined, White chose to offer the gambit
+ * and Black chose to decline it; both colours' games at that position
+ * reflect deliberate style, so master games on either side are useful.
+ *
+ * The Played/Faced labelling on the dossier opening-fit page should
+ * still use the strict `chooserForOpeningName` — that view answers a
+ * different question ("did *I* pick this line?").
+ */
+export function structuralChooserForOpeningName(
+	familyName: string,
+	eco: string | null | undefined
+): 'white' | 'black' | 'either' {
+	const name = familyName.toLowerCase();
+	if (!name) return familyChooser(ecoFamily(eco));
+
+	for (const p of BLACK_NAME_PATTERNS) if (name.includes(p)) return 'black';
+	for (const p of WHITE_NAME_PATTERNS) if (name.includes(p)) return 'white';
+
+	// Mutual-structure suffixes: skip the `declined`/`accepted`/
+	// `counter-gambit` rules that the strict chooser uses, since both
+	// sides expressed a choice that lands them at the same canonical FEN.
+	if (/\bdefen[sc]e\b/.test(name)) return 'black';
+	if (/\battack\b/.test(name)) return 'white';
+	if (/\bsystem\b/.test(name)) return 'white';
+
 	return familyChooser(ecoFamily(eco));
 }
 

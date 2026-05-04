@@ -30,6 +30,22 @@ export interface ExchangeSummary {
 	simplifyWhenAheadDelta: number;
 	/** Cling delta: piece-trade rate when behind vs equal (negative = you avoid trades when losing). */
 	clingWhenBehindDelta: number;
+	/**
+	 * Per-state aggregates over the optional comparison pool (e.g. cached
+	 * masters baseline). Same shape as `byState`. Present only when
+	 * `opts.comparison` was passed and at least one bucket has moves.
+	 */
+	comparisonByState?: Record<MaterialState, ExchangeBucket>;
+}
+
+export interface ExchangePropensityOpts {
+	/**
+	 * Pool of comparison games (typically the cached masters baseline) used
+	 * to derive per-state trade rates alongside the user's. The user-side
+	 * `byState` aggregates are unaffected; this only adds a parallel
+	 * `comparisonByState` block to the summary.
+	 */
+	comparison?: ClassifiedGame[];
 }
 
 const PIECE_VALUES: Record<string, number> = {
@@ -41,7 +57,27 @@ const PIECE_VALUES: Record<string, number> = {
 	king: 0
 };
 
-export function analyseExchangePropensity(games: ClassifiedGame[]): ExchangeSummary {
+export function analyseExchangePropensity(
+	games: ClassifiedGame[],
+	opts: ExchangePropensityOpts = {}
+): ExchangeSummary {
+	const byState = bucketByState(games);
+	const summary: ExchangeSummary = {
+		byState,
+		simplifyWhenAheadDelta: byState.ahead.pieceTradeRate - byState.equal.pieceTradeRate,
+		clingWhenBehindDelta: byState.behind.pieceTradeRate - byState.equal.pieceTradeRate
+	};
+
+	if (opts.comparison && opts.comparison.length > 0) {
+		const cmp = bucketByState(opts.comparison);
+		const totalMoves = cmp.ahead.moves + cmp.equal.moves + cmp.behind.moves;
+		if (totalMoves > 0) summary.comparisonByState = cmp;
+	}
+
+	return summary;
+}
+
+function bucketByState(games: ClassifiedGame[]): Record<MaterialState, ExchangeBucket> {
 	const empty = (): ExchangeBucket => ({
 		moves: 0,
 		pieceTrades: 0,
@@ -83,9 +119,5 @@ export function analyseExchangePropensity(games: ClassifiedGame[]): ExchangeSumm
 		b.pieceTradeRate = b.moves > 0 ? b.pieceTrades / b.moves : 0;
 	}
 
-	return {
-		byState,
-		simplifyWhenAheadDelta: byState.ahead.pieceTradeRate - byState.equal.pieceTradeRate,
-		clingWhenBehindDelta: byState.behind.pieceTradeRate - byState.equal.pieceTradeRate
-	};
+	return byState;
 }

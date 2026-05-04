@@ -167,6 +167,26 @@ export interface BaselineClockSpend {
 	blunderEnd: number;
 }
 
+/**
+ * Cached masters-baseline derived from Lichess masters DB. Single-row store
+ * (id='latest'). Stores ClassifiedGame[] of master games matching the user's
+ * opening families, ready to feed dossier modules as a directional reference
+ * pool. Re-fetched on demand from the dossier UI; the data itself is stable
+ * (master games don't change) so we cache forever and only re-fetch when the
+ * user's opening repertoire shifts enough that the targets hash drifts.
+ */
+export interface StoredMastersBaseline {
+	id: 'latest';
+	fetchedAt: number;
+	/** Hash of (family, color) targets at fetch time — used to detect when
+	 *  the user's repertoire has shifted enough to warrant a refresh. */
+	targetsHash: string;
+	/** Schema version for the payload. Bump when MastersBaseline shape changes. */
+	version: number;
+	/** Opaque MastersBaseline blob — see $lib/dossier/mastersBaseline.ts. */
+	payload: unknown;
+}
+
 export interface OpeningTrainerDB extends DBSchema {
 	repertoires: {
 		key: string;
@@ -251,13 +271,17 @@ export interface OpeningTrainerDB extends DBSchema {
 			'by-repertoire-fenKey': [string, string];
 		};
 	};
+	masters_baseline: {
+		key: string;
+		value: StoredMastersBaseline;
+	};
 }
 
 // IDB name kept as 'openingtrainer' (pre-COBRA-rename) so existing users'
 // repertoires and cards survive the rebrand. Renaming would create a
 // fresh empty DB and orphan their data.
 const DB_NAME = 'openingtrainer';
-const DB_VERSION = 15;
+const DB_VERSION = 16;
 const REQUIRED_STORES = [
 	'repertoires',
 	'nodes',
@@ -271,7 +295,8 @@ const REQUIRED_STORES = [
 	'style_reports',
 	'dossier_scan_checkpoint',
 	'spar_games',
-	'position_wdl'
+	'position_wdl',
+	'masters_baseline'
 ] as const;
 
 let dbPromise: Promise<IDBPDatabase<OpeningTrainerDB>> | null = null;
@@ -347,6 +372,9 @@ function ensureAllStores(db: IDBPDatabase<OpeningTrainerDB>) {
 		const pw = db.createObjectStore('position_wdl', { keyPath: 'id' });
 		pw.createIndex('by-repertoire', 'repertoireId');
 		pw.createIndex('by-repertoire-fenKey', ['repertoireId', 'fenKey']);
+	}
+	if (!has('masters_baseline')) {
+		db.createObjectStore('masters_baseline', { keyPath: 'id' });
 	}
 }
 
