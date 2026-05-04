@@ -28,7 +28,6 @@ playwright-report
 # Tauri
 /src-tauri/target
 /src-tauri/gen
-/src-tauri/Cargo.lock
 /src-tauri/icons
 
 # Local scratchpad
