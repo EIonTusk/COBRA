@@ -121,6 +121,36 @@
 		appearance.apply();
 	});
 
+	// On-device diagnostic for the cross-origin-isolation status. SAB is only
+	// exposed when the document is COI; if it isn't, threaded Stockfish
+	// won't load. Logging this once per session into the overlay (and
+	// probing the actual response headers Tauri's asset server emits)
+	// lets us tell, on a packaged Android build, whether COOP/COEP are
+	// reaching the WebView at all — without needing chrome://inspect.
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		const diag = (window as unknown as { __cobraDiag?: { log?: (m: string) => void } }).__cobraDiag;
+		const log = (m: string) => diag?.log?.(m);
+		log(
+			`coi=${window.crossOriginIsolated} sab=${typeof SharedArrayBuffer !== 'undefined'} ` +
+				`origin=${window.location.origin}`
+		);
+		// Sniff the actual HTTP headers on a same-origin asset. If
+		// `coi=false` here but COOP/COEP land in the response, then the
+		// WebView is ignoring them (often a scheme/secure-context issue).
+		// If they're absent, the asset server isn't injecting them and we
+		// need to fix that layer.
+		void fetch(window.location.href, { method: 'GET', cache: 'no-store' })
+			.then((r) => {
+				log(
+					`headers: COOP=${r.headers.get('Cross-Origin-Opener-Policy')} ` +
+						`COEP=${r.headers.get('Cross-Origin-Embedder-Policy')} ` +
+						`CORP=${r.headers.get('Cross-Origin-Resource-Policy')}`
+				);
+			})
+			.catch((e) => log(`header-probe failed: ${e instanceof Error ? e.message : e}`));
+	});
+
 	// Tauri-only: route external link clicks to the OS browser instead of
 	// the in-app WebView. Without this, `<a target="_blank" href="https://…">`
 	// either spawns a sandboxed webview (no saved passwords / cookies) or

@@ -93,6 +93,25 @@ export class Engine {
 	async init(): Promise<void> {
 		if (this.readyPromise) return this.readyPromise;
 		this.readyPromise = (async () => {
+			// Trace bridge to the diagnostic overlay (see src/app.html). Only
+			// active when the overlay is mounted; in node tests / web builds
+			// the optional chain swallows it. Used so on-device we can see
+			// the actual values of crossOriginIsolated / SAB / origin when
+			// init fails — `chrome://inspect` isn't always available.
+			const trace = (msg: string) => {
+				try {
+					(window as unknown as { __cobraDiag?: { log?: (m: string) => void } }).__cobraDiag?.log?.(
+						`[stockfish] ${msg}`
+					);
+				} catch {
+					/* ignore */
+				}
+			};
+			trace(
+				`init: origin=${typeof window !== 'undefined' ? window.location.origin : '?'} ` +
+					`coi=${typeof window !== 'undefined' ? window.crossOriginIsolated : '?'} ` +
+					`sab=${typeof SharedArrayBuffer !== 'undefined'}`
+			);
 			if (typeof SharedArrayBuffer === 'undefined') {
 				const err = new StockfishUnavailable(
 					'SharedArrayBuffer unavailable — check COOP/COEP headers.'
