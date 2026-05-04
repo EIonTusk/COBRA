@@ -18,8 +18,11 @@
 		tokenHasStudyScopes,
 		tokenHasChallengeScopes,
 		isSafeReturnPath,
+		connectViaPastedToken,
+		tokenCreatePageUrl,
 		ALL_SCOPES
 	} from '$lib/lichess/oauth';
+	import { openExternal } from '$lib/platform/openExternal';
 	import {
 		Button,
 		DashboardBacklink,
@@ -79,6 +82,15 @@
 	let saving = $state(false);
 	let justSaved = $state(false);
 	let showToken = $state(false);
+	// Paste-token (OAuth bypass) UI state. Used as the primary connect
+	// path on Android, where the OAuth deep-link flow crashes the app via
+	// a Tauri/Wry panic in `Java_…_Rust_onNewIntent`. Surfaced as a
+	// secondary control on every platform — desktop / web users can also
+	// reach for it if they prefer not to round-trip through OAuth.
+	let pasteOpen = $state(false);
+	let pasteToken = $state('');
+	let pasteBusy = $state(false);
+	let pasteError = $state<string | null>(null);
 	let newAccountSource = $state<'lichess' | 'chesscom'>('lichess');
 	let newAccountUsername = $state('');
 
@@ -609,6 +621,96 @@
 						</Button>
 					{/if}
 				</div>
+
+				<!--
+					Paste-token (OAuth bypass) panel. The flow:
+					1. user opens Lichess in their system browser via the helper
+					   button (URL has scopes pre-checked + description=COBRA);
+					2. they create a token there, copy the `lip_…` string;
+					3. paste it here, click Save, and the app validates +
+					   captures username via /api/token/test + /api/account.
+					Stored into `lichessOAuth` so every existing scope-aware
+					feature (study sync, autobuild, bot challenges) treats it
+					identically to an OAuth-issued token. Required on Android
+					where Tauri's onNewIntent panic kills the OAuth deep-link
+					return.
+				-->
+				{#if !tokenIsFresh(settings.lichessOAuth)}
+					<div class="ink-panel mb-5 p-4">
+						<button
+							type="button"
+							class="flex w-full items-center justify-between text-left"
+							aria-expanded={pasteOpen}
+							onclick={() => (pasteOpen = !pasteOpen)}
+						>
+							<span>
+								<div class="eyebrow mb-0.5">Paste a token instead</div>
+								<p class="font-serif text-xs text-[var(--color-parchment-500)] italic">
+									OAuth not working (e.g. on Android)? Paste a Lichess Personal Access Token to
+									connect with the same scopes.
+								</p>
+							</span>
+							<span class="ml-3 text-[var(--color-parchment-400)]">{pasteOpen ? '−' : '+'}</span>
+						</button>
+						{#if pasteOpen}
+							<div transition:slide={{ duration: 180 }} class="mt-4 space-y-3">
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={() => void openExternal(tokenCreatePageUrl())}
+								>
+									Open Lichess to generate a token
+									<ExternalLink class="ml-1 size-3.5" />
+								</Button>
+								<p class="font-serif text-xs text-[var(--color-parchment-500)] italic">
+									The link opens the create page with all COBRA scopes pre-checked. Name the token
+									(e.g. "COBRA mobile"), tap Submit, copy the `lip_…` string.
+								</p>
+								<div>
+									<Label for="lichess-paste-token">Token</Label>
+									<Input
+										id="lichess-paste-token"
+										type="text"
+										autocomplete="off"
+										data-form-type="other"
+										data-lpignore="true"
+										data-1p-ignore="true"
+										bind:value={pasteToken}
+										placeholder="lip_..."
+										class="font-mono text-[13px]"
+									/>
+								</div>
+								{#if pasteError}
+									<p class="font-serif text-xs text-[var(--color-oxblood-300)] italic">
+										{pasteError}
+									</p>
+								{/if}
+								<Button
+									variant="primary"
+									size="sm"
+									disabled={pasteBusy || !pasteToken.trim()}
+									onclick={async () => {
+										pasteError = null;
+										pasteBusy = true;
+										try {
+											await connectViaPastedToken(pasteToken);
+											pasteToken = '';
+											pasteOpen = false;
+											settings = await getSettings();
+											savedSnapshot = JSON.stringify(settings);
+										} catch (e) {
+											pasteError = e instanceof Error ? e.message : String(e);
+										} finally {
+											pasteBusy = false;
+										}
+									}}
+								>
+									{pasteBusy ? 'Connecting…' : 'Connect with token'}
+								</Button>
+							</div>
+						{/if}
+					</div>
+				{/if}
 
 				<div>
 					<Label for="lichess-token">Or paste a personal API token</Label>
