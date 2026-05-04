@@ -5,6 +5,124 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 		<meta name="text-scale" content="scale" />
 		<link rel="icon" type="image/svg+xml" href="%sveltekit.assets%/icon.svg" />
+		<!--
+			Bootstrap diagnostic overlay. Loads before any module so it can
+			catch errors in module evaluation, SW registration, or anything
+			else that fires before Svelte mounts. Invisible until an error
+			is captured — then it pins itself to the bottom of the screen
+			with a scrollable log. On platforms where there's no console
+			to read (Android Tauri WebView), this is the only signal users
+			and devs get when the app fails to start.
+		-->
+		<script>
+			(function () {
+				if (window.__cobraDiag) return;
+				window.__cobraDiag = true;
+				var entries = [];
+				var box = null;
+				function makeBox() {
+					if (box) return box;
+					box = document.createElement('div');
+					box.id = 'cobra-diag-overlay';
+					box.style.cssText =
+						'position:fixed;left:0;right:0;bottom:0;max-height:60vh;overflow:auto;' +
+						'background:#1a0a0a;color:#fdd;font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;' +
+						'padding:8px 32px 8px 10px;z-index:2147483647;border-top:2px solid #c33;' +
+						'white-space:pre-wrap;word-break:break-word;';
+					var close = document.createElement('button');
+					close.type = 'button';
+					close.textContent = '×';
+					close.setAttribute('aria-label', 'Close diagnostic');
+					close.style.cssText =
+						'position:absolute;top:2px;right:6px;background:transparent;color:#fff;' +
+						'border:0;font:18px/1 monospace;cursor:pointer;padding:4px 8px';
+					close.onclick = function () {
+						if (box && box.parentNode) box.parentNode.removeChild(box);
+						box = null;
+					};
+					box.appendChild(close);
+					var hdr = document.createElement('div');
+					hdr.textContent = 'COBRA diagnostic — JS errors captured below';
+					hdr.style.cssText = 'color:#fa8;margin-bottom:4px;font-weight:600';
+					box.appendChild(hdr);
+					if (document.body) {
+						document.body.appendChild(box);
+					} else {
+						document.addEventListener('DOMContentLoaded', function () {
+							if (box && !box.parentNode) document.body.appendChild(box);
+						});
+					}
+					return box;
+				}
+				function add(kind, msg, where) {
+					try {
+						var ts = new Date().toISOString().slice(11, 23);
+						var line = '[' + ts + '] ' + kind + ': ' + msg + (where ? '\n  at ' + where : '');
+						entries.push(line);
+						var b = makeBox();
+						if (!b) return;
+						var el = document.createElement('div');
+						el.style.cssText =
+							'border-top:1px solid #533;padding-top:4px;margin-top:4px;color:' +
+							(kind === 'error' || kind === 'unhandled' ? '#fdd' : '#fea');
+						el.textContent = line;
+						b.appendChild(el);
+					} catch (_) {
+						/* never let the diagnostic itself throw */
+					}
+				}
+				window.addEventListener(
+					'error',
+					function (e) {
+						var msg =
+							(e && e.error && (e.error.stack || e.error.message)) || e.message || String(e);
+						var where =
+							e && e.filename ? e.filename + ':' + (e.lineno || '?') + ':' + (e.colno || '?') : '';
+						add('error', String(msg), where);
+					},
+					true
+				);
+				window.addEventListener('unhandledrejection', function (e) {
+					var r = e && e.reason;
+					var msg = r && (r.stack || r.message) ? r.stack || r.message : String(r);
+					add('unhandled', String(msg));
+				});
+				var origErr = console.error;
+				console.error = function () {
+					try {
+						var parts = [];
+						for (var i = 0; i < arguments.length; i++) {
+							var a = arguments[i];
+							if (a && a.stack) parts.push(a.stack);
+							else if (typeof a === 'string') parts.push(a);
+							else
+								try {
+									parts.push(JSON.stringify(a));
+								} catch (_) {
+									parts.push(String(a));
+								}
+						}
+						add('console', parts.join(' '));
+					} catch (_) {
+						/* ignore */
+					}
+					return origErr.apply(console, arguments);
+				};
+				// Expose a manual peek for cases where the user can't see the
+				// overlay (e.g. CSS broke). Devs in chrome://inspect can run
+				// `__cobraDiag.dump()` to copy/paste the captured log.
+				window.__cobraDiag = {
+					version: 1,
+					entries: entries,
+					show: function () {
+						makeBox();
+					},
+					dump: function () {
+						return entries.join('\n');
+					}
+				};
+			})();
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

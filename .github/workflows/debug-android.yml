@@ -1,0 +1,134 @@
+name: Debug APK (Android)
+
+# On-demand debug build for triaging Android startup crashes / runtime issues.
+# Trigger manually from the Actions tab. The resulting APK is:
+#   * built in Rust debug profile (verbose panics, symbols not stripped),
+#   * Android `debuggable=true` so the WebView can be inspected from desktop
+#     Chrome via `chrome://inspect/#devices` over USB,
+#   * signed with the auto-generated Android debug keystore (so it installs
+#     without enabling "Install unknown apps" trust for a release cert),
+#   * uploaded as a workflow artifact (NOT attached to a GitHub Release).
+#
+# The on-screen JS diagnostic overlay (see src/app.html) is always compiled
+# in, so this APK doesn't need any extra build flag for the overlay — it
+# pops up automatically when JS errors fire.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch / tag / SHA to build (default: current ref)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: debug-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      NDK_VERSION: '26.3.11579264'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: |
+          sdkmanager "ndk;${NDK_VERSION}" "platforms;android-34" "platform-tools" "build-tools;34.0.0"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install Rust (Android targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: android-debug
+
+      - name: Install librsvg (icon rendering)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends librsvg2-bin
+
+      - name: Install JS dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+        run: npm ci --no-audit --no-fund
+
+      - name: Prep Stockfish assets
+        run: npm run prep:stockfish
+
+      - name: Render source PNG + generate icons
+        run: |
+          mkdir -p src-tauri/icons
+          rsvg-convert -w 1024 -h 1024 static/icon.svg -o src-tauri/icons/source.png
+          npx tauri icon src-tauri/icons/source.png --output src-tauri/icons
+
+      - name: Initialize Android project
+        run: npx tauri android init --ci
+
+      - name: Place app icons into Android project
+        run: npx tauri icon src-tauri/icons/source.png --output src-tauri/icons
+
+      - name: Build debug Android APK
+        run: npx tauri android build --apk --debug
+
+      - name: Resolve git short SHA
+        id: sha
+        run: echo "value=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          while IFS= read -r -d '' f; do
+            cp "$f" "dist/cobra-debug-${{ steps.sha.outputs.value }}-$(basename "$f")"
+          done < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print0 2>/dev/null)
+          ls -la dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cobra-debug-apk-${{ steps.sha.outputs.value }}
+          path: dist/*.apk
+          retention-days: 14
+
+      - name: Inspection instructions
+        run: |
+          cat <<'EOF'
+          ============================================================
+          Debug APK built. Install with:
+            adb install -r dist/cobra-debug-*.apk
+
+          To inspect the WebView from desktop Chrome:
+            1. Enable USB debugging on the phone, plug it in.
+            2. Open chrome://inspect/#devices in desktop Chrome.
+            3. Find the COBRA WebView and click "inspect".
+
+          On-screen diagnostic: any JS error or `console.error` call
+          opens a red overlay at the bottom of the screen with the
+          stack trace. Captured even before Svelte mounts.
+
+          To stream native logs:
+            adb logcat | grep -iE 'cobra|tauri|chromium|fatal'
+          ============================================================
+          EOF
