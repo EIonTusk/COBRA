@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
+	import { resolve } from '$app/paths';
 
 	import DossierSubpageShell from '$lib/dossier/DossierSubpageShell.svelte';
 	import MastersBaselinePanel from '$lib/dossier/MastersBaselinePanel.svelte';
@@ -95,6 +96,17 @@
 				</div>
 			</div>
 		</section>
+
+		<a
+			href={resolve('/dossier/repertoire-fit')}
+			class="mt-4 block rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-950)] px-4 py-3 text-xs hover:border-[var(--color-brass-300)]/40"
+		>
+			<span class="text-[var(--color-parchment-200)]">Repertoire fit →</span>
+			<span class="ml-2 text-[var(--color-parchment-500)]">
+				Same data sliced by which of your repertoires each game falls into. Useful when one
+				colour-side spans multiple prep trees.
+			</span>
+		</a>
 
 		<section
 			class="mt-6 rounded border border-[var(--color-ink-800)] bg-[var(--color-ink-900)] px-4 py-4"

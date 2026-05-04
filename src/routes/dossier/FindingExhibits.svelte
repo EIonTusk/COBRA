@@ -1,6 +1,9 @@
 <script lang="ts">
 	import type { DossierExhibits } from '$lib/dossier/buildExhibits';
 	import type { InsightCard } from '$lib/dossier/deepInsights';
+	import type { OpeningProfileByRepertoireReport } from '$lib/dossier/openingProfileByRepertoire';
+	import type { OpeningProfileReport } from '$lib/dossier/openingProfile';
+	import type { ClassifiedGame } from '$lib/dossier/classify';
 	import { barWidth, pctFmt, signedPctFmt } from '$lib/dossier/format';
 	import { structureLabel } from '$lib/dossier/structureTaste';
 	import { endgameFamilyLabel } from '$lib/dossier/endgameSubtypes';
@@ -17,9 +20,50 @@
 		/** True when the scan included a Stockfish pass — gates the
 		 *  "Requires engine analysis" message inside repeat-offenders. */
 		hasEvalData: boolean;
+		/** Repertoire-fit data — depends on stored repertoires (LocalContext)
+		 *  rather than the pure scan, so it's threaded in separately from
+		 *  `exhibits`. Null when no repertoires loaded yet. */
+		byRepertoire?: OpeningProfileByRepertoireReport | null;
+		repertoireFitBaseline?: OpeningProfileReport | null;
 	}
 
-	let { exhibits, card, slug, hasEvalData }: Props = $props();
+	let {
+		exhibits,
+		card,
+		slug,
+		hasEvalData,
+		byRepertoire = null,
+		repertoireFitBaseline = null
+	}: Props = $props();
+
+	// Stair-stepped brass opacity: matches the dossier's "single tone, varied
+	// weight" convention rather than rainbowing each repertoire. Earlier
+	// indexes (heavier reps) get more weight; index 0 is the largest bucket.
+	const REP_FIT_OPACITIES = [
+		'bg-[var(--color-brass-300)]/70',
+		'bg-[var(--color-brass-300)]/55',
+		'bg-[var(--color-brass-300)]/45',
+		'bg-[var(--color-brass-300)]/35',
+		'bg-[var(--color-brass-300)]/28',
+		'bg-[var(--color-brass-300)]/22',
+		'bg-[var(--color-brass-300)]/18'
+	];
+
+	function repFitColor(idx: number): string {
+		return REP_FIT_OPACITIES[idx % REP_FIT_OPACITIES.length];
+	}
+
+	function tallyResults(games: ClassifiedGame[]): { w: number; d: number; l: number } {
+		let w = 0,
+			d = 0,
+			l = 0;
+		for (const g of games) {
+			if (g.result === 'win') w += 1;
+			else if (g.result === 'draw') d += 1;
+			else l += 1;
+		}
+		return { w, d, l };
+	}
 
 	function hourHeat(winRate: number): string {
 		if (winRate >= 0.6) return 'bg-emerald-500/70';
@@ -811,6 +855,120 @@
 			· CP Δ {pg.deltaCpLoss != null
 				? `${pg.deltaCpLoss >= 0 ? '+' : ''}${pg.deltaCpLoss.toFixed(1)}`
 				: '—'}.
+		</div>
+	{/if}
+{:else if slug === 'repertoire-fit'}
+	{#if !byRepertoire || byRepertoire.totalGames === 0}
+		<p class="text-[var(--color-parchment-500)]">
+			No scanned games attributed yet — run a scan and create at least one repertoire to populate
+			this exhibit.
+		</p>
+	{:else}
+		{@const baselineWR = repertoireFitBaseline?.userWinRate ?? 0}
+		{@const populated = byRepertoire.buckets.filter((b) => b.games.length > 0)}
+		{@const ranked = [...populated].sort((a, b) => b.games.length - a.games.length)}
+		{@const composition = [
+			...ranked.map((b, i) => {
+				const t = tallyResults(b.games);
+				return {
+					key: b.repertoire.id,
+					title: b.repertoire.name,
+					colorBadge: b.repertoire.color as string | null,
+					games: b.games.length,
+					w: t.w,
+					d: t.d,
+					l: t.l,
+					winRateDelta: b.profile.userWinRate - baselineWR,
+					isUnattributed: false,
+					paletteIdx: i
+				};
+			}),
+			...(byRepertoire.unattributed.length > 0
+				? (() => {
+						const t = tallyResults(byRepertoire.unattributed);
+						return [
+							{
+								key: '__unattributed',
+								title: 'Unattributed',
+								colorBadge: null as string | null,
+								games: byRepertoire.unattributed.length,
+								w: t.w,
+								d: t.d,
+								l: t.l,
+								winRateDelta: byRepertoire.unattributedProfile.userWinRate - baselineWR,
+								isUnattributed: true,
+								paletteIdx: -1
+							}
+						];
+					})()
+				: [])
+		]}
+
+		<!-- Stacked corpus composition -->
+		<div
+			class="flex h-3 overflow-hidden rounded border border-[var(--color-ink-800)]"
+			role="img"
+			aria-label="Scan composition by repertoire"
+		>
+			{#each composition as r (r.key)}
+				<div
+					class={r.isUnattributed
+						? 'bg-[var(--color-parchment-500)]/30'
+						: repFitColor(r.paletteIdx)}
+					style:width={pctFmt(r.games / byRepertoire.totalGames, 2)}
+					title="{r.title}: {r.games} games"
+				></div>
+			{/each}
+		</div>
+
+		<!-- Per-rep rows: swatch · name · W/D/L stripe · games · WR delta -->
+		<ul class="mt-3 grid gap-1.5">
+			{#each composition as r (r.key)}
+				{@const total = r.w + r.d + r.l || 1}
+				<li
+					class="grid grid-cols-[minmax(0,1fr)_1fr_3.5rem_4rem] items-center gap-2 text-[11px] sm:grid-cols-[minmax(0,12rem)_1fr_3.5rem_4.5rem]"
+				>
+					<div class="flex items-center gap-2 truncate">
+						<span
+							class="inline-block size-2.5 shrink-0 rounded-sm {r.isUnattributed
+								? 'bg-[var(--color-parchment-500)]/40'
+								: repFitColor(r.paletteIdx)}"
+						></span>
+						<span class="truncate text-[var(--color-parchment-200)]" title={r.title}>
+							{r.title}
+						</span>
+						{#if r.colorBadge}
+							<span
+								class="rounded border border-[var(--color-ink-700)] bg-[var(--color-ink-950)] px-1 font-mono text-[9px] tracking-wider text-[var(--color-parchment-500)] uppercase"
+							>
+								{r.colorBadge}
+							</span>
+						{/if}
+					</div>
+					<div class="flex h-1.5 overflow-hidden rounded">
+						<div class="bg-emerald-500/45" style:width={pctFmt(r.w / total, 2)}></div>
+						<div
+							class="bg-[var(--color-parchment-400)]/30"
+							style:width={pctFmt(r.d / total, 2)}
+						></div>
+						<div class="bg-amber-500/45" style:width={pctFmt(r.l / total, 2)}></div>
+					</div>
+					<span class="text-right font-mono text-[var(--color-parchment-400)]">{r.games}g</span>
+					<span
+						class="text-right font-mono {r.winRateDelta > 0.05
+							? 'text-emerald-300'
+							: r.winRateDelta < -0.05
+								? 'text-amber-300'
+								: 'text-[var(--color-parchment-400)]'}"
+					>
+						{signedPctFmt(r.winRateDelta, 1)}
+					</span>
+				</li>
+			{/each}
+		</ul>
+		<div class="mt-2 text-[10px] text-[var(--color-parchment-500)]">
+			Top stripe = corpus share. Per-rep stripe = W/D/L share. Right column = win-rate Δ vs your
+			overall.
 		</div>
 	{/if}
 {:else}

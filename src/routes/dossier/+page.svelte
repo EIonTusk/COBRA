@@ -47,6 +47,7 @@
 	import { buildSessionProfile } from '$lib/dossier/sessionProfile';
 	import { buildDossierProfile } from '$lib/dossier/profile';
 	import { buildOpeningProfile } from '$lib/dossier/openingProfile';
+	import { buildOpeningProfileByRepertoire } from '$lib/dossier/openingProfileByRepertoire';
 	import { listStoredBaselines, type StoredBaselineBucket } from '$lib/storage/baselines';
 	import { collectAccountsFromSettings } from '$lib/lichess/mistakeScan';
 	import { type DossierScanResult } from '$lib/dossier/scan';
@@ -544,6 +545,20 @@
 		return buildOpeningProfile(result.classified, evalSummary?.allMoves ?? null);
 	});
 
+	const repertoireFitProfile = $derived.by(() => {
+		if (!result) return null;
+		return buildOpeningProfile(result.classified, evalSummary?.allMoves ?? null);
+	});
+
+	const repertoireFit = $derived.by(() => {
+		if (!result) return null;
+		return buildOpeningProfileByRepertoire(
+			result.classified,
+			evalSummary?.allMoves ?? null,
+			repertoiresWithNodes
+		);
+	});
+
 	const activeBaseline = $derived.by(() => {
 		if (!result) return null;
 		return pickBaseline(result.fingerprint.avgUserRating, primarySpeed(result.fingerprint));
@@ -683,6 +698,7 @@
 		'prophylaxis',
 		'recovery-arc',
 		'repeat-offenders',
+		'repertoire-fit',
 		'repertoire-lint',
 		'session-decay',
 		'structure-taste',
@@ -704,6 +720,8 @@
 				return 'ECO families ranked by fit to your axes';
 			case 'space-control':
 				return 'Per-square attacker diff vs opponents at this rating band';
+			case 'repertoire-fit':
+				return 'Scan corpus split across your repertoires · W/D/L per rep';
 			case 'endgame-subtypes':
 				return 'Conversion & defense rate by endgame family';
 			case 'tactical-motifs':
@@ -1031,6 +1049,8 @@
 										card={c}
 										slug={c.slug}
 										hasEvalData={result?.evalAxes != null}
+										byRepertoire={repertoireFit}
+										repertoireFitBaseline={repertoireFitProfile}
 									/>
 								{/if}
 							</FindingCard>

@@ -34,6 +34,8 @@ import { buildIPR } from './ipr';
 import { analyseDecisionDifficulty } from './decisionDifficulty';
 import { buildBlunderCausality } from './blunderCausality';
 import { buildRepertoireLint } from './repertoireLint';
+import { buildOpeningProfileByRepertoire } from './openingProfileByRepertoire';
+import { buildOpeningProfile } from './openingProfile';
 import type { Repertoire, RepertoireNode } from '$lib/types';
 
 export type InsightGroup = 'preferences' | 'abilities' | 'tendencies' | 'synthesis';
@@ -869,6 +871,57 @@ export function buildDeepInsightCards(
 		});
 	}
 	{
+		const reps = local?.repertoires ?? [];
+		const moves = result.evalAxes?.allMoves ?? null;
+		const byRep = buildOpeningProfileByRepertoire(result.classified, moves, reps);
+		const baseline = buildOpeningProfile(result.classified, moves);
+		const populated = byRep.buckets.filter((b) => b.games.length > 0);
+		let headline: string;
+		let detail: string | undefined;
+		let severity: Severity = 'inconclusive';
+		if (reps.length === 0) {
+			headline = 'No repertoires built — repertoire fit unavailable.';
+		} else if (byRep.totalGames === 0) {
+			headline = 'No scanned games to attribute to your repertoires yet.';
+		} else if (populated.length === 0) {
+			headline = `0 / ${byRep.totalGames} scanned games matched any repertoire — your prep doesn't overlap the games you played in this sample.`;
+			severity = 'concern';
+		} else {
+			const ranked = populated
+				.map((b) => ({
+					name: b.repertoire.name,
+					color: b.repertoire.color,
+					games: b.games.length,
+					wrDelta: b.profile.userWinRate - baseline.userWinRate
+				}))
+				.sort((a, b) => b.games - a.games);
+			const best = [...ranked].sort((a, b) => b.wrDelta - a.wrDelta)[0];
+			const worst = [...ranked].sort((a, b) => a.wrDelta - b.wrDelta)[0];
+			const unattributedPct = byRep.unattributed.length / byRep.totalGames;
+			const sp = (x: number) => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}pp`;
+			headline = `Best fit: ${best.name} (${best.color}) — ${sp(best.wrDelta)} vs your overall win rate.`;
+			detail =
+				populated.length > 1
+					? `${populated.length} reps active · ${byRep.unattributed.length}/${byRep.totalGames} games (${Math.round(unattributedPct * 100)}%) unattributed. Worst: ${worst.name} ${sp(worst.wrDelta)}.`
+					: `${byRep.unattributed.length}/${byRep.totalGames} games (${Math.round(unattributedPct * 100)}%) unattributed.`;
+			if (unattributedPct >= 0.5) severity = 'concern';
+			else if (best.wrDelta >= 0.08) severity = 'strength';
+			else if (worst.wrDelta <= -0.08) severity = 'concern';
+			else severity = 'observation';
+		}
+		cards.push({
+			slug: 'repertoire-fit',
+			title: 'Repertoire fit',
+			group: 'tendencies',
+			headline,
+			detail,
+			needsEngine: false,
+			severity,
+			sampleSize: byRep.totalGames,
+			sampleMin: 10
+		});
+	}
+	{
 		const failures = local?.fsrsFailures ?? [];
 		let headline: string;
 		let detail: string | undefined;
@@ -1103,6 +1156,7 @@ const SLUG_DENOMINATOR: Record<string, string> = {
 	'decision-difficulty': 'multi-PV moves',
 	'blunder-causality': 'blunders',
 	'repertoire-lint': 'costly moves',
+	'repertoire-fit': 'games',
 	'fsrs-retention': 'drill cards',
 	prophylaxis: 'opportunities',
 	'blunder-timing': 'blunders',
