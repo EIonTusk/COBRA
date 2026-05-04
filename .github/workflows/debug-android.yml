@@ -94,9 +94,6 @@ jobs:
       - name: Patch MainActivity.kt (tao onNewIntent panic workaround)
         run: node scripts/patch-android-mainactivity.mjs
 
-      - name: Patch RustWebViewClient.kt (cross-origin-isolation headers)
-        run: node scripts/patch-android-isolation-headers.mjs
-
       - name: Build debug Android APK
         run: npx tauri android build --apk --debug
 
