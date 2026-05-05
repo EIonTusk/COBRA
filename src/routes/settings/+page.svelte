@@ -1080,10 +1080,11 @@
 						<p
 							class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
 						>
-							When on, paints internal trace events at the bottom of the screen — engine init state,
-							cross-origin-isolation status, deep-link routing. Off by default; only genuine
-							JavaScript errors paint the overlay. Useful for diagnosing problems on a device where
-							you can't reach browser devtools.
+							When on, paints internal trace events and JavaScript errors at the bottom of the
+							screen — engine init state, cross-origin-isolation status, deep-link routing. Off by
+							default; nothing paints. Captures still record silently (available from devtools via
+							<code>__cobraDiag.dump()</code>) so toggling on later still has context. Useful for
+							diagnosing problems on a device where you can't reach browser devtools.
 						</p>
 					</div>
 				</label>
