@@ -5,6 +5,241 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 		<meta name="text-scale" content="scale" />
 		<link rel="icon" type="image/svg+xml" href="%sveltekit.assets%/icon.svg" />
+		<!--
+			Bootstrap diagnostic overlay. Loads before any module so it can
+			catch errors in module evaluation, SW registration, or anything
+			else that fires before Svelte mounts.
+
+			Two visibility modes:
+			  * Default (production): the overlay only renders for genuine
+			    failure events — `window.error`, `unhandledrejection`, or
+			    `console.error`. Trace entries from app code via
+			    `__cobraDiag.log(...)` are still recorded silently into
+			    `entries[]` and persisted to localStorage, so they're
+			    available via `__cobraDiag.dump()` from devtools, but they
+			    don't paint the red bar at the bottom of the screen.
+
+			  * Verbose: when `localStorage['cobra:diag-on'] === '1'` (set
+			    by the Settings → Diagnostic overlay toggle), traces also
+			    paint the overlay. Use this on the live GH Pages site to
+			    surface the COI/header probe output on a phone where
+			    chrome://inspect isn't reachable, without shipping a
+			    separate debug build to every visitor.
+
+			Persists captures to localStorage so a hard crash (native panic,
+			WebView process kill, deep-link cold-restart) doesn't erase the
+			trail — the next launch reads them back and renders them with a
+			[prev] prefix. Crucial on Android Tauri specifically because the
+			OS may relaunch the process when a deep-link intent arrives.
+		-->
+		<script>
+			(function () {
+				if (window.__cobraDiag && window.__cobraDiag.version) return;
+				var STORAGE_KEY = 'cobra:diag';
+				var DIAG_ON_KEY = 'cobra:diag-on';
+				var MAX_ENTRIES = 200;
+				var entries = [];
+				var box = null;
+				// Verbose mode: traces paint the overlay too. Toggled from
+				// Settings → Diagnostic overlay; persisted in localStorage
+				// so a reload (including the SW auto-reload on first
+				// GH-Pages visit) keeps the choice.
+				var verbose = (function () {
+					try {
+						return localStorage.getItem(DIAG_ON_KEY) === '1';
+					} catch (_) {
+						return false;
+					}
+				})();
+				function persist() {
+					try {
+						localStorage.setItem(STORAGE_KEY, JSON.stringify(entries.slice(-MAX_ENTRIES)));
+					} catch (_) {
+						/* quota / unavailable — best-effort */
+					}
+				}
+				function loadPrevious() {
+					try {
+						var raw = localStorage.getItem(STORAGE_KEY);
+						if (!raw) return [];
+						var arr = JSON.parse(raw);
+						return Array.isArray(arr) ? arr : [];
+					} catch (_) {
+						return [];
+					}
+				}
+				function clearPersisted() {
+					try {
+						localStorage.removeItem(STORAGE_KEY);
+					} catch (_) {
+						/* ignore */
+					}
+				}
+				function makeBox() {
+					if (box) return box;
+					box = document.createElement('div');
+					box.id = 'cobra-diag-overlay';
+					box.style.cssText =
+						'position:fixed;left:0;right:0;bottom:0;max-height:60vh;overflow:auto;' +
+						'background:#1a0a0a;color:#fdd;font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;' +
+						'padding:8px 32px 8px 10px;z-index:2147483647;border-top:2px solid #c33;' +
+						'white-space:pre-wrap;word-break:break-word;';
+					var close = document.createElement('button');
+					close.type = 'button';
+					close.textContent = '×';
+					close.setAttribute('aria-label', 'Close diagnostic');
+					close.style.cssText =
+						'position:absolute;top:2px;right:6px;background:transparent;color:#fff;' +
+						'border:0;font:18px/1 monospace;cursor:pointer;padding:4px 8px';
+					close.onclick = function () {
+						if (box && box.parentNode) box.parentNode.removeChild(box);
+						box = null;
+					};
+					box.appendChild(close);
+					var hdr = document.createElement('div');
+					hdr.textContent = 'COBRA diagnostic — JS errors and trace';
+					hdr.style.cssText = 'color:#fa8;margin-bottom:4px;font-weight:600';
+					box.appendChild(hdr);
+					if (document.body) {
+						document.body.appendChild(box);
+					} else {
+						document.addEventListener('DOMContentLoaded', function () {
+							if (box && !box.parentNode) document.body.appendChild(box);
+						});
+					}
+					return box;
+				}
+				function colorFor(kind) {
+					if (kind === 'error' || kind === 'unhandled') return '#fdd';
+					if (kind === 'trace') return '#bce';
+					return '#fea';
+				}
+				// Genuine failure events always paint the overlay; trace
+				// entries only paint when verbose mode is on. This is the
+				// gate that keeps the live GH Pages site clean for normal
+				// users while still letting an opted-in debugger see the
+				// full log.
+				function shouldRender(kind) {
+					if (kind === 'error' || kind === 'unhandled' || kind === 'console') return true;
+					return verbose;
+				}
+				function append(line, kind) {
+					var b = makeBox();
+					if (!b) return;
+					var el = document.createElement('div');
+					el.style.cssText =
+						'border-top:1px solid #533;padding-top:4px;margin-top:4px;color:' + colorFor(kind);
+					el.textContent = line;
+					b.appendChild(el);
+					b.scrollTop = b.scrollHeight;
+				}
+				function add(kind, msg, where) {
+					try {
+						var ts = new Date().toISOString().slice(11, 23);
+						var line = '[' + ts + '] ' + kind + ': ' + msg + (where ? '\n  at ' + where : '');
+						entries.push({ kind: kind, line: line });
+						persist();
+						if (shouldRender(kind)) append(line, kind);
+					} catch (_) {
+						/* never let the diagnostic itself throw */
+					}
+				}
+				// Surface previous-session captures (typically present after
+				// a hard crash that relaunched the process). Entries get a
+				// [prev] prefix so they're distinguishable from this session.
+				// Only paint them when verbose mode is on OR the previous
+				// session ended with an error — otherwise a quiet previous
+				// session shouldn't pop the overlay on the next clean load.
+				var prev = loadPrevious();
+				if (prev.length) {
+					var prevHasFailure = prev.some(function (en) {
+						return en && (en.kind === 'error' || en.kind === 'unhandled');
+					});
+					if (verbose || prevHasFailure) {
+						add('trace', 'previous session left ' + prev.length + ' entries');
+						for (var p = 0; p < prev.length; p += 1) {
+							var e = prev[p];
+							if (e && e.line) append('[prev] ' + e.line, e.kind || 'trace');
+						}
+					}
+					clearPersisted();
+				}
+				// Spurious benign Chromium warnings we never want to surface.
+				// `ResizeObserver loop ...` fires whenever an observer callback
+				// triggers layout — it doesn't break anything and Chromium itself
+				// suppresses it in DevTools. Listing exact substrings keeps the
+				// filter narrow so genuine errors still come through.
+				var IGNORED_ERROR_SUBSTRINGS = [
+					'ResizeObserver loop completed with undelivered notifications',
+					'ResizeObserver loop limit exceeded'
+				];
+				function isIgnored(msg) {
+					if (typeof msg !== 'string') return false;
+					for (var i = 0; i < IGNORED_ERROR_SUBSTRINGS.length; i += 1) {
+						if (msg.indexOf(IGNORED_ERROR_SUBSTRINGS[i]) !== -1) return true;
+					}
+					return false;
+				}
+				window.addEventListener(
+					'error',
+					function (e) {
+						var msg =
+							(e && e.error && (e.error.stack || e.error.message)) || e.message || String(e);
+						if (isIgnored(String(msg))) return;
+						var where =
+							e && e.filename ? e.filename + ':' + (e.lineno || '?') + ':' + (e.colno || '?') : '';
+						add('error', String(msg), where);
+					},
+					true
+				);
+				window.addEventListener('unhandledrejection', function (e) {
+					var r = e && e.reason;
+					var msg = r && (r.stack || r.message) ? r.stack || r.message : String(r);
+					if (isIgnored(String(msg))) return;
+					add('unhandled', String(msg));
+				});
+				var origErr = console.error;
+				console.error = function () {
+					try {
+						var parts = [];
+						for (var i = 0; i < arguments.length; i++) {
+							var a = arguments[i];
+							if (a && a.stack) parts.push(a.stack);
+							else if (typeof a === 'string') parts.push(a);
+							else
+								try {
+									parts.push(JSON.stringify(a));
+								} catch (_) {
+									parts.push(String(a));
+								}
+						}
+						add('console', parts.join(' '));
+					} catch (_) {
+						/* ignore */
+					}
+					return origErr.apply(console, arguments);
+				};
+				window.__cobraDiag = {
+					version: 2,
+					entries: entries,
+					/** Append a tagged trace entry from app code. */
+					log: function (msg) {
+						add('trace', String(msg));
+					},
+					show: function () {
+						makeBox();
+					},
+					dump: function () {
+						return entries
+							.map(function (en) {
+								return en.line;
+							})
+							.join('\n');
+					}
+				};
+				add('trace', 'overlay armed (UA=' + navigator.userAgent.slice(0, 120) + ')');
+			})();
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

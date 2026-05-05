@@ -18,11 +18,17 @@
 				"minWidth": 960,
 				"minHeight": 640,
 				"resizable": true,
-				"fullscreen": false
+				"fullscreen": false,
+				"useHttpsScheme": true
 			}
 		],
 		"security": {
-			"csp": null
+			"csp": null,
+			"headers": {
+				"Cross-Origin-Opener-Policy": "same-origin",
+				"Cross-Origin-Embedder-Policy": "credentialless",
+				"Cross-Origin-Resource-Policy": "cross-origin"
+			}
 		}
 	},
 	"bundle": {
@@ -44,8 +50,8 @@
 	},
 	"plugins": {
 		"deep-link": {
-			"mobile": [{ "scheme": ["cobra"], "appLink": false }],
-			"desktop": { "schemes": ["cobra"] }
+			"mobile": [{ "scheme": ["io.github.eiontusk.cobra"], "appLink": false }],
+			"desktop": { "schemes": ["io.github.eiontusk.cobra"] }
 		}
 	}
 }

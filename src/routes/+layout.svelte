@@ -15,6 +15,7 @@
 	import { getEngine } from '$lib/stockfish/engine';
 	import { appearance } from '$lib/board/appearance.svelte';
 	import { openExternal, isExternalHttpUrl } from '$lib/platform/openExternal';
+	import { TAURI_DEEP_LINK_SCHEME } from '$lib/lichess/oauth';
 	import pkg from '../../package.json';
 
 	const appVersion = pkg.version;
@@ -120,6 +121,36 @@
 		appearance.apply();
 	});
 
+	// On-device diagnostic for the cross-origin-isolation status. SAB is only
+	// exposed when the document is COI; if it isn't, threaded Stockfish
+	// won't load. Logging this once per session into the overlay (and
+	// probing the actual response headers Tauri's asset server emits)
+	// lets us tell, on a packaged Android build, whether COOP/COEP are
+	// reaching the WebView at all — without needing chrome://inspect.
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		const diag = (window as unknown as { __cobraDiag?: { log?: (m: string) => void } }).__cobraDiag;
+		const log = (m: string) => diag?.log?.(m);
+		log(
+			`coi=${window.crossOriginIsolated} sab=${typeof SharedArrayBuffer !== 'undefined'} ` +
+				`origin=${window.location.origin}`
+		);
+		// Sniff the actual HTTP headers on a same-origin asset. If
+		// `coi=false` here but COOP/COEP land in the response, then the
+		// WebView is ignoring them (often a scheme/secure-context issue).
+		// If they're absent, the asset server isn't injecting them and we
+		// need to fix that layer.
+		void fetch(window.location.href, { method: 'GET', cache: 'no-store' })
+			.then((r) => {
+				log(
+					`headers: COOP=${r.headers.get('Cross-Origin-Opener-Policy')} ` +
+						`COEP=${r.headers.get('Cross-Origin-Embedder-Policy')} ` +
+						`CORP=${r.headers.get('Cross-Origin-Resource-Policy')}`
+				);
+			})
+			.catch((e) => log(`header-probe failed: ${e instanceof Error ? e.message : e}`));
+	});
+
 	// Tauri-only: route external link clicks to the OS browser instead of
 	// the in-app WebView. Without this, `<a target="_blank" href="https://…">`
 	// either spawns a sandboxed webview (no saved passwords / cookies) or
@@ -153,67 +184,112 @@
 		return () => document.removeEventListener('click', onClick);
 	});
 
-	// Tauri-only: receive `cobra://…` deep-links from the OS and route the
-	// SvelteKit app to the matching internal page. Currently the only
-	// scheme we handle is the Lichess OAuth callback — the user authorises
-	// in their system browser, Lichess redirects to
-	// `cobra://auth/lichess/callback?code=…&state=…`, the OS hands the URL
-	// to us, and we hop the router onto the existing /auth/lichess/callback
-	// page so it can finish the token exchange and surface success/error.
+	// Tauri-only: receive deep-links from the OS and route the SvelteKit
+	// app to the matching internal page. Currently the only scheme we
+	// handle is the Lichess OAuth callback — the user authorises in their
+	// system browser, Lichess redirects to
+	// `io.github.eiontusk.cobra://auth/lichess/callback?code=…&state=…`,
+	// the OS hands the URL to us, and we hop the router onto the existing
+	// /auth/lichess/callback page so it can finish the token exchange and
+	// surface success/error.
 	$effect(() => {
 		if (typeof window === 'undefined') return;
 		const inTauri = '__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window;
 		if (!inTauri) return;
 
+		// Trace via the diagnostic overlay. `__cobraDiag` is set up by the
+		// inline script in app.html; entries persist across crashes / cold
+		// restarts via localStorage, which is essential here because an
+		// incoming deep-link intent can relaunch the process and erase the
+		// in-memory log. Defensive `?.` chain so a stripped overlay (web
+		// build, future refactor) doesn't make this throw.
+		const trace = (msg: string) => {
+			try {
+				(window as unknown as { __cobraDiag?: { log?: (m: string) => void } }).__cobraDiag?.log?.(
+					msg
+				);
+			} catch {
+				/* ignore */
+			}
+		};
+
+		trace('deep-link effect armed');
+
 		let cancelled = false;
 		let unlisten: (() => void) | undefined;
 
-		function dispatch(rawUrls: string[] | null | undefined) {
+		function dispatch(rawUrls: string[] | null | undefined, source: string) {
+			trace(`dispatch[${source}] urls=${rawUrls ? rawUrls.length : 0}`);
 			if (!rawUrls) return;
 			for (const raw of rawUrls) {
+				trace(`dispatch[${source}] raw=${raw}`);
 				let parsed: URL;
 				try {
 					parsed = new URL(raw);
-				} catch {
+				} catch (e) {
+					trace(`dispatch[${source}] URL parse threw: ${e instanceof Error ? e.message : e}`);
 					continue;
 				}
-				if (parsed.protocol !== 'cobra:') continue;
-				// `new URL("cobra://auth/lichess/callback?…")` parses host="auth"
+				if (parsed.protocol !== `${TAURI_DEEP_LINK_SCHEME}:`) {
+					trace(`dispatch[${source}] skip — protocol=${parsed.protocol}`);
+					continue;
+				}
+				// `new URL("<scheme>://auth/lichess/callback?…")` parses host="auth"
 				// and pathname="/lichess/callback". Stitch them back together
 				// for matching so the path is whole regardless of how the OS
 				// formatted the incoming URL.
 				const fullPath = `${parsed.host}${parsed.pathname}`.replace(/\/+$/, '');
+				trace(`dispatch[${source}] fullPath=${fullPath}`);
 				if (fullPath !== 'auth/lichess/callback') continue;
-				// Reuse the existing callback page so users see the same
-				// "Linking your account…" UX whether they came from web or
-				// the deep-link. The eslint rule wants the whole string to
-				// be `resolve(...)`-prefixed; we *are* resolving the route,
-				// then tacking on an arbitrary query string the OS handed us.
-				// eslint-disable-next-line svelte/no-navigation-without-resolve
-				void goto(resolve('/auth/lichess/callback') + parsed.search);
+				const target = resolve('/auth/lichess/callback') + parsed.search;
+				trace(`dispatch[${source}] navigating → ${target.slice(0, 80)}`);
+				try {
+					// Reuse the existing callback page so users see the same
+					// "Linking your account…" UX whether they came from web or
+					// the deep-link. The eslint rule wants the whole string to
+					// be `resolve(...)`-prefixed; we *are* resolving the route,
+					// then tacking on an arbitrary query string the OS handed us.
+					// eslint-disable-next-line svelte/no-navigation-without-resolve
+					void goto(target);
+				} catch (e) {
+					trace(`dispatch[${source}] goto threw: ${e instanceof Error ? e.message : e}`);
+				}
 			}
 		}
 
 		(async () => {
 			try {
+				trace('importing @tauri-apps/plugin-deep-link');
 				const dl = await import('@tauri-apps/plugin-deep-link');
+				trace('deep-link plugin imported');
 				// Cold-start: the app may have just been launched *by* the
 				// callback URL, in which case the URL is queued from before
 				// our listener was registered.
 				try {
+					trace('calling getCurrent()');
 					const startUrls = await dl.getCurrent();
-					if (!cancelled) dispatch(startUrls);
+					trace(`getCurrent() returned ${startUrls ? startUrls.length : 'null'} url(s)`);
+					if (!cancelled) dispatch(startUrls, 'getCurrent');
 				} catch (e) {
+					const msg = e instanceof Error ? e.message : String(e);
+					trace(`getCurrent threw: ${msg}`);
 					console.warn('[cobra] deep-link getCurrent failed:', e);
 				}
 				if (cancelled) return;
-				const off = await dl.onOpenUrl((urls) => dispatch(urls));
+				trace('registering onOpenUrl listener');
+				const off = await dl.onOpenUrl((urls) => {
+					trace(`onOpenUrl fired: ${urls ? urls.length : 0} url(s)`);
+					dispatch(urls, 'onOpenUrl');
+				});
+				trace('onOpenUrl listener registered');
 				if (cancelled) {
 					off();
 				} else {
 					unlisten = off;
 				}
 			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				trace(`deep-link plugin unavailable: ${msg}`);
 				console.warn('[cobra] deep-link plugin unavailable:', e);
 			}
 		})();
@@ -278,10 +354,17 @@
 		work on GH Pages), and those headers only apply to responses that
 		go *through* the SW — which doesn't happen until the first time
 		the page is controlled.
+
+		Skipped in Tauri (desktop and mobile): the PWA isn't registered
+		there (see vite.config.ts), so `serviceWorker.ready` would resolve
+		never. On Android Tauri WebView the URL is `http://tauri.localhost`,
+		which Chromium refuses to register a SW against, so this script
+		would also surface a noisy console.error in the diagnostic overlay.
 	-->
 	<script>
 		(function () {
 			if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
+			if ('__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window) return;
 			if (window.crossOriginIsolated) return;
 			if (navigator.serviceWorker.controller) return;
 			navigator.serviceWorker.ready.then(function () {

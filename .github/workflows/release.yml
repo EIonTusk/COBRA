@@ -376,6 +376,9 @@ jobs:
       - name: Place app icons into Android project
         run: npx tauri icon src-tauri/icons/source.png --output src-tauri/icons
 
+      - name: Patch MainActivity.kt (tao onNewIntent panic workaround)
+        run: node scripts/patch-android-mainactivity.mjs
+
       - name: Configure signing
         id: signing
         env:
