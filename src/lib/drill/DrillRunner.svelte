@@ -820,6 +820,23 @@
 
 		// Chain into next user reply — same segment only.
 		if (outcome === 'correct' || outcome === 'easy' || outcome === 'peeked') {
+			// Alt-move pruning: when the user picked a prepared reply other
+			// than card.expectedSan at a multi-child decision point, drop
+			// queued entries that sit exclusively under the unchosen
+			// siblings. Without this, the rest of the session would still
+			// surface those siblings' continuation cards even though the
+			// user never visited them on this run.
+			const decisionNode = seg.nodes.get(ratedCard.fenKey);
+			const playedSan = userPlayedSan;
+			if (
+				decisionNode &&
+				decisionNode.children.length > 1 &&
+				playedSan &&
+				playedSan !== ratedCard.expectedSan
+			) {
+				const chosen = decisionNode.children.find((c) => c.san === playedSan);
+				if (chosen) pruneUnchosenSiblings(entry.segIdx, ratedCard.fenKey, chosen.toFenKey);
+			}
 			const next = await findNextInLine(entry);
 			if (next) {
 				await playChainTransition(entry, next);
@@ -854,6 +871,61 @@
 		entries = filtered;
 	}
 
+	/**
+	 * Drop queued entries that sit exclusively under the user's *un*chosen
+	 * siblings at a multi-child decision point. Without this, after the user
+	 * picks alt move x at a position with prepared replies {x, y}, the
+	 * already-queued y-continuation cards would still get surfaced later in
+	 * the session — even though the user never visited those positions on
+	 * this run. Entries that share a fenKey with the chosen subtree (a real
+	 * transposition) are kept; only fenKeys reachable solely through the
+	 * unchosen branch are dropped.
+	 */
+	function pruneUnchosenSiblings(segIdx: number, decisionFenKey: string, chosenChildKey: string) {
+		const seg = segments[segIdx];
+		const node = seg.nodes.get(decisionFenKey);
+		if (!node || node.children.length <= 1) return;
+
+		const collect = (rootKey: string): SvelteSet<string> => {
+			const out = new SvelteSet<string>();
+			const stack: string[] = [rootKey];
+			while (stack.length > 0) {
+				const k = stack.pop()!;
+				if (out.has(k)) continue;
+				out.add(k);
+				const n = seg.nodes.get(k);
+				if (!n) continue;
+				for (const e of n.children) stack.push(e.toFenKey);
+			}
+			return out;
+		};
+
+		const unchosenSubtree = new SvelteSet<string>();
+		for (const child of node.children) {
+			if (child.toFenKey === chosenChildKey) continue;
+			for (const k of collect(child.toFenKey)) unchosenSubtree.add(k);
+		}
+		const chosenSubtree = collect(chosenChildKey);
+
+		const filtered: DrillEntry[] = [];
+		for (let i = 0; i < entries.length; i++) {
+			if (i <= idx) {
+				filtered.push(entries[i]);
+				continue;
+			}
+			const other = entries[i];
+			if (other.segIdx !== segIdx) {
+				filtered.push(other);
+				continue;
+			}
+			if (unchosenSubtree.has(other.card.fenKey) && !chosenSubtree.has(other.card.fenKey)) {
+				continue;
+			}
+			filtered.push(other);
+		}
+		entries = filtered;
+	}
+
 	function effectivePlayedSan(entry: DrillEntry): string {
 		const seg = segments[entry.segIdx];
 		const node = seg.nodes.get(entry.card.fenKey);
@@ -880,8 +952,22 @@
 		const oppEdge = nodeAfterUser.children[0];
 		const nextKey = ck(entry.segIdx, oppEdge.toFenKey);
 		if (drilledKeys.has(nextKey)) return null;
-		// Cap respect: never chain past the planned queue.
-		if (seg.mode === 'due' && !plannedKeys.has(nextKey)) return null;
+		// Cap respect: never chain past the planned queue, *except* when the
+		// user just diverged onto an alt prepared reply at a multi-child card.
+		// In that case the alt-line continuation almost certainly wasn't
+		// pre-planned (the line walk was built around `card.expectedSan`),
+		// and bailing here would surface the unchosen branch's queued card
+		// next — exactly the "I played x but it continued with y" bug.
+		// Promote the alt-continuation into plannedKeys so progress
+		// accounting stays consistent with the new chained card.
+		if (seg.mode === 'due' && !plannedKeys.has(nextKey)) {
+			const decisionNode = seg.nodes.get(entry.card.fenKey);
+			const isAltDivergence =
+				!!decisionNode && decisionNode.children.length > 1 && playedSan !== entry.card.expectedSan;
+			if (!isAltDivergence) return null;
+			plannedKeys.add(nextKey);
+			sessionPlannedTotal += 1;
+		}
 		const nextCard = await getCard(seg.rep.id, oppEdge.toFenKey);
 		if (!nextCard) return null;
 		return { card: nextCard, segIdx: entry.segIdx };
