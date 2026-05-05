@@ -301,6 +301,31 @@
 	let importing = $state(false);
 	let importMsg = $state<string | null>(null);
 
+	// Diagnostic-overlay toggle. Read at boot by the inline script in
+	// src/app.html via `localStorage['cobra:diag-on']`. When on, trace
+	// entries (engine init state, deep-link steps, COI/header probe)
+	// paint the on-screen overlay; when off, only genuine errors do.
+	// Lets us flip diagnostics on for a single device without shipping
+	// a separate debug build.
+	const DIAG_OVERLAY_KEY = 'cobra:diag-on';
+	let diagOverlay = $state(false);
+	onMount(() => {
+		try {
+			diagOverlay = localStorage.getItem(DIAG_OVERLAY_KEY) === '1';
+		} catch {
+			/* ignore */
+		}
+	});
+	function toggleDiagOverlay(next: boolean) {
+		diagOverlay = next;
+		try {
+			if (next) localStorage.setItem(DIAG_OVERLAY_KEY, '1');
+			else localStorage.removeItem(DIAG_OVERLAY_KEY);
+		} catch {
+			/* ignore */
+		}
+	}
+
 	async function onExportAll() {
 		const bundle = await exportAll();
 		const blob = new Blob([JSON.stringify(bundle, null, 2)], {
@@ -1036,6 +1061,32 @@
 						<span>Wipe all data</span>
 					</Button>
 				</div>
+
+				<label
+					class="mt-6 flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
+				>
+					<input
+						type="checkbox"
+						checked={diagOverlay}
+						onchange={(e) => toggleDiagOverlay((e.currentTarget as HTMLInputElement).checked)}
+						class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
+					/>
+					<div class="min-w-0 flex-1">
+						<div class="flex items-baseline gap-2">
+							<span class="font-serif text-sm text-[var(--color-parchment-100)]"
+								>Diagnostic overlay</span
+							>
+						</div>
+						<p
+							class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+						>
+							When on, paints internal trace events at the bottom of the screen — engine init state,
+							cross-origin-isolation status, deep-link routing. Off by default; only genuine
+							JavaScript errors paint the overlay. Useful for diagnosing problems on a device where
+							you can't reach browser devtools.
+						</p>
+					</div>
+				</label>
 			</section>
 
 			<Separator />

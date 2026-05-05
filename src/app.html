@@ -8,26 +8,49 @@
 		<!--
 			Bootstrap diagnostic overlay. Loads before any module so it can
 			catch errors in module evaluation, SW registration, or anything
-			else that fires before Svelte mounts. Pins a scrollable log to
-			the bottom of the screen with a × to dismiss.
+			else that fires before Svelte mounts.
+
+			Two visibility modes:
+			  * Default (production): the overlay only renders for genuine
+			    failure events — `window.error`, `unhandledrejection`, or
+			    `console.error`. Trace entries from app code via
+			    `__cobraDiag.log(...)` are still recorded silently into
+			    `entries[]` and persisted to localStorage, so they're
+			    available via `__cobraDiag.dump()` from devtools, but they
+			    don't paint the red bar at the bottom of the screen.
+
+			  * Verbose: when `localStorage['cobra:diag-on'] === '1'` (set
+			    by the Settings → Diagnostic overlay toggle), traces also
+			    paint the overlay. Use this on the live GH Pages site to
+			    surface the COI/header probe output on a phone where
+			    chrome://inspect isn't reachable, without shipping a
+			    separate debug build to every visitor.
 
 			Persists captures to localStorage so a hard crash (native panic,
 			WebView process kill, deep-link cold-restart) doesn't erase the
 			trail — the next launch reads them back and renders them with a
 			[prev] prefix. Crucial on Android Tauri specifically because the
 			OS may relaunch the process when a deep-link intent arrives.
-
-			App code can call `__cobraDiag.log('message')` to add tagged
-			trace entries (used by the deep-link handler in +layout.svelte
-			to make each step visible without flooding the dev console).
 		-->
 		<script>
 			(function () {
 				if (window.__cobraDiag && window.__cobraDiag.version) return;
 				var STORAGE_KEY = 'cobra:diag';
+				var DIAG_ON_KEY = 'cobra:diag-on';
 				var MAX_ENTRIES = 200;
 				var entries = [];
 				var box = null;
+				// Verbose mode: traces paint the overlay too. Toggled from
+				// Settings → Diagnostic overlay; persisted in localStorage
+				// so a reload (including the SW auto-reload on first
+				// GH-Pages visit) keeps the choice.
+				var verbose = (function () {
+					try {
+						return localStorage.getItem(DIAG_ON_KEY) === '1';
+					} catch (_) {
+						return false;
+					}
+				})();
 				function persist() {
 					try {
 						localStorage.setItem(STORAGE_KEY, JSON.stringify(entries.slice(-MAX_ENTRIES)));
@@ -91,6 +114,15 @@
 					if (kind === 'trace') return '#bce';
 					return '#fea';
 				}
+				// Genuine failure events always paint the overlay; trace
+				// entries only paint when verbose mode is on. This is the
+				// gate that keeps the live GH Pages site clean for normal
+				// users while still letting an opted-in debugger see the
+				// full log.
+				function shouldRender(kind) {
+					if (kind === 'error' || kind === 'unhandled' || kind === 'console') return true;
+					return verbose;
+				}
 				function append(line, kind) {
 					var b = makeBox();
 					if (!b) return;
@@ -107,7 +139,7 @@
 						var line = '[' + ts + '] ' + kind + ': ' + msg + (where ? '\n  at ' + where : '');
 						entries.push({ kind: kind, line: line });
 						persist();
-						append(line, kind);
+						if (shouldRender(kind)) append(line, kind);
 					} catch (_) {
 						/* never let the diagnostic itself throw */
 					}
@@ -115,12 +147,20 @@
 				// Surface previous-session captures (typically present after
 				// a hard crash that relaunched the process). Entries get a
 				// [prev] prefix so they're distinguishable from this session.
+				// Only paint them when verbose mode is on OR the previous
+				// session ended with an error — otherwise a quiet previous
+				// session shouldn't pop the overlay on the next clean load.
 				var prev = loadPrevious();
 				if (prev.length) {
-					add('trace', 'previous session left ' + prev.length + ' entries');
-					for (var p = 0; p < prev.length; p += 1) {
-						var e = prev[p];
-						if (e && e.line) append('[prev] ' + e.line, e.kind || 'trace');
+					var prevHasFailure = prev.some(function (en) {
+						return en && (en.kind === 'error' || en.kind === 'unhandled');
+					});
+					if (verbose || prevHasFailure) {
+						add('trace', 'previous session left ' + prev.length + ' entries');
+						for (var p = 0; p < prev.length; p += 1) {
+							var e = prev[p];
+							if (e && e.line) append('[prev] ' + e.line, e.kind || 'trace');
+						}
 					}
 					clearPersisted();
 				}

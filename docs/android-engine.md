@@ -114,3 +114,65 @@ Ranked by effort / risk:
 - Patching `RustWebViewClient.kt` post-init — the file isn't there.
 - Bumping wry / tao patch versions hoping for a fix — single-process
   is intentional WebView design, not a bug.
+
+## Adjacent (different) issue: same toast on the GH-Pages mobile-browser deploy
+
+You can also see `Engine unavailable: SharedArrayBuffer unavailable —
+check COOP/COEP headers` on the **regular web build** when you open
+the GH Pages site in mobile Chrome / Samsung Internet, even though it
+works fine in desktop Chrome. **The toast itself only fires once per
+session — it has `dedupKey: 'engine-init'` — so "I only see it once"
+doesn't mean the issue is intermittent; the engine is broken every
+time.**
+
+This is **not** the Android-WebView constraint (the GH-Pages deploy
+has no Tauri WebView in the picture). The first hypothesis to rule out
+is a service-worker race — the SW that grafts COOP/COEP onto
+responses only controls _subsequent_ page loads, and the bootstrap
+script in `src/routes/+layout.svelte` does one `location.reload()`
+once the SW activates. If a manual reload makes it work, that was the
+race. If not, the SW isn't actually serving with the headers — most
+likely candidates:
+
+- The SW didn't register (private/incognito, in-app browser, content
+  blocker, Samsung Internet lifecycle quirks).
+- The SW registered but the browser is serving the document from
+  HTTP cache without going through the SW (some mobile browsers do
+  this on cold starts).
+- Mobile Chrome variant honors the SW headers for assets but not for
+  the navigation request that determines `crossOriginIsolated` — in
+  which case the document origin never qualifies as isolated even
+  though the headers arrive.
+
+**Diagnose by inspecting the overlay, not by guessing.** The
+overlay's `headers:` line is dispositive:
+
+- `headers: COOP=same-origin COEP=credentialless ...` _and_
+  `coi=false` → headers reach the document but the browser refuses
+  isolation (mobile browser variant; would need a different deploy).
+- `headers: COOP=null COEP=null` _and_ `coi=false` → SW is _not_ in
+  the response chain (race, registration failure, or HTTP cache).
+
+**Realistic fixes, ranked:**
+
+1. **Block engine init until SAB is exposed.** In
+   `src/lib/stockfish/engine.ts`, when `SharedArrayBuffer` is
+   undefined and a SW is registered, wait on
+   `navigator.serviceWorker.ready` before throwing — give the SW one
+   chance to take over (with a timeout cap so we don't hang on
+   private mode). Cheapest fix, addresses the race without changing
+   infrastructure.
+2. **Move to a host that can set headers directly** — Cloudflare
+   Pages reads `static/_headers` natively, removing the SW from the
+   COOP/COEP path entirely. The repo already has the `_headers` file
+   sitting there from an earlier deploy; just point the workflow at
+   Cloudflare. This also fixes the in-app browser / private-mode
+   variants where the SW never activates.
+3. **Tighten the bootstrap reload script** — keep retrying if
+   `controller` stays null after `ready` resolves. Fragile, but
+   contains the bug to its current footprint.
+
+This case is **not** in the Tauri-Android scope — packaged Android
+builds don't have a SW (we disabled it in `vite.config.ts` because
+`*.localhost` rejects SW registration anyway). The two failures look
+identical to the user but have different roots.
