@@ -1,9 +1,24 @@
 /**
- * Lazy-loaded Stockfish UCI client backed by lila-stockfish-web.
+ * Lazy-loaded Stockfish UCI client. Picks one of two backends at init
+ * time depending on whether the runtime exposes `SharedArrayBuffer`:
  *
- * Assets must be present at /stockfish/sf16-7.js, /stockfish/sf16-7.wasm, and
- * the NNUE file named by getRecommendedNnue(0). Run `npm run prep:stockfish`
- * once after cloning to populate `static/stockfish/`.
+ *   * Threaded — lila-stockfish-web (sf16-7.js + sf16-7.wasm + a
+ *     downloaded NNUE). Fastest, used wherever cross-origin isolation
+ *     is available (Chrome desktop, Tauri desktop, the GH Pages web
+ *     build under Chrome where the SW grafts COOP/COEP onto every
+ *     response).
+ *
+ *   * Single-threaded — nmrugg/stockfish.js's lite-single build
+ *     (stockfish-18-lite-single.js + .wasm, NNUE embedded). Used
+ *     wherever COI is unavailable: Tauri Android (single-process
+ *     WebView), Firefox Android (Fission's Android implementation
+ *     doesn't satisfy the COI gate), in-app browsers, etc. Roughly
+ *     half the strength of the threaded build at the same depth, but
+ *     keeps engine-dependent features alive on those platforms.
+ *
+ * Both ship into `static/stockfish/` via `npm run prep:stockfish`.
+ * See `docs/android-engine.md` for the platform background on why
+ * the fallback is needed.
  */
 
 export interface EngineInfo {
@@ -112,64 +127,33 @@ export class Engine {
 					`coi=${typeof window !== 'undefined' ? window.crossOriginIsolated : '?'} ` +
 					`sab=${typeof SharedArrayBuffer !== 'undefined'}`
 			);
-			if (typeof SharedArrayBuffer === 'undefined') {
-				const err = new StockfishUnavailable(
-					'SharedArrayBuffer unavailable — check COOP/COEP headers.'
-				);
-				this.emitError({ kind: 'init', message: err.message });
-				throw err;
-			}
 			// Honour SvelteKit's base path so deployments under a subpath
 			// (GH Pages at /COBRA) find the assets under the right prefix.
 			const { base } = await import('$app/paths');
-			const jsUrl = new URL(`${base}/stockfish/sf16-7.js`, window.location.origin).href;
-			let mod: { default: () => Promise<StockfishWebInstance> };
-			try {
-				mod = await import(/* @vite-ignore */ jsUrl);
-			} catch (_e) {
-				const err = new StockfishUnavailable(
-					'Stockfish script not found. Run `npm run prep:stockfish`.'
-				);
-				this.emitError({ kind: 'init', message: err.message });
-				throw err;
-			}
-			const sf = await mod.default();
-			sf.listen = (line: string) => this.onLine(line);
-			sf.onError = (msg: string) => {
+			const onLine = (line: string) => this.onLine(line);
+			const onErrorFromEngine = (msg: string) => {
 				// Emscripten surfaces stderr here; log but don't throw. Most of
 				// these are routine NNUE / search-info noise — surface them as
 				// the low-priority `stderr` kind so subscribers can filter.
 				console.warn('[stockfish]', msg);
 				this.emitError({ kind: 'stderr', message: msg });
 			};
-			sf.uci('uci');
-			const nnueName = sf.getRecommendedNnue(0);
-			const res = await fetch(`${base}/stockfish/${nnueName}`);
-			if (!res.ok) {
-				const err = new StockfishUnavailable(
-					`Stockfish NNUE (${nnueName}) missing. Run \`npm run prep:stockfish\`.`
-				);
-				this.emitError({ kind: 'init', message: err.message });
-				throw err;
+			let sf: StockfishWebInstance;
+			try {
+				sf =
+					typeof SharedArrayBuffer !== 'undefined'
+						? await loadThreadedEngine(base, onLine, onErrorFromEngine, trace)
+						: await loadSingleThreadEngine(base, onLine, onErrorFromEngine, trace);
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				if (e instanceof StockfishUnavailable) {
+					this.emitError({ kind: 'init', message: msg });
+					throw e;
+				}
+				const wrapped = new StockfishUnavailable(`Engine failed to load: ${msg}`);
+				this.emitError({ kind: 'init', message: wrapped.message });
+				throw wrapped;
 			}
-			const buf = new Uint8Array(await res.arrayBuffer());
-			sf.setNnueBuffer(buf, 0);
-
-			// Performance options. lila-stockfish-web defaults to 1 thread
-			// and 16 MB hash, which makes the dossier scan crawl and triggers
-			// "no info arrived" timeouts on complex positions. Bump both to
-			// numbers that match what Lichess analysis itself uses in the
-			// browser. `hardwareConcurrency` is widely supported (workers
-			// included); the Math.min cap protects users on extreme machines
-			// where running too many threads against a small NNUE wastes
-			// CPU on synchronisation.
-			const cores =
-				typeof navigator !== 'undefined' && typeof navigator.hardwareConcurrency === 'number'
-					? navigator.hardwareConcurrency
-					: 4;
-			const threads = Math.max(1, Math.min(cores, 8));
-			sf.uci(`setoption name Threads value ${threads}`);
-			sf.uci(`setoption name Hash value 64`);
 
 			this.sf = sf;
 			// Block until Stockfish has acknowledged init + the setoptions
@@ -715,6 +699,144 @@ export class Engine {
 		};
 		for (const h of this.handlers) h(info);
 	}
+}
+
+/**
+ * Threaded path: lila-stockfish-web. Runs each search worker in its
+ * own thread sharing memory via `SharedArrayBuffer`. Strongest engine
+ * we ship; needs `crossOriginIsolated === true` (i.e. COOP+COEP plus
+ * a browser/process-model that supports per-origin isolation).
+ */
+async function loadThreadedEngine(
+	base: string,
+	onLine: (line: string) => void,
+	onErrorFromEngine: (msg: string) => void,
+	trace: (msg: string) => void
+): Promise<StockfishWebInstance> {
+	trace('loading threaded engine (lila-stockfish-web)');
+	const jsUrl = new URL(`${base}/stockfish/sf16-7.js`, window.location.origin).href;
+	let mod: { default: () => Promise<StockfishWebInstance> };
+	try {
+		mod = await import(/* @vite-ignore */ jsUrl);
+	} catch (_e) {
+		throw new StockfishUnavailable('Stockfish script not found. Run `npm run prep:stockfish`.');
+	}
+	const sf = await mod.default();
+	sf.listen = onLine;
+	sf.onError = onErrorFromEngine;
+	sf.uci('uci');
+	const nnueName = sf.getRecommendedNnue(0);
+	const res = await fetch(`${base}/stockfish/${nnueName}`);
+	if (!res.ok) {
+		throw new StockfishUnavailable(
+			`Stockfish NNUE (${nnueName}) missing. Run \`npm run prep:stockfish\`.`
+		);
+	}
+	const buf = new Uint8Array(await res.arrayBuffer());
+	sf.setNnueBuffer(buf, 0);
+	// Performance options. lila-stockfish-web defaults to 1 thread and
+	// 16 MB hash, which makes the dossier scan crawl and triggers
+	// "no info arrived" timeouts on complex positions. Bump both to
+	// numbers that match what Lichess analysis itself uses.
+	const cores =
+		typeof navigator !== 'undefined' && typeof navigator.hardwareConcurrency === 'number'
+			? navigator.hardwareConcurrency
+			: 4;
+	const threads = Math.max(1, Math.min(cores, 8));
+	sf.uci(`setoption name Threads value ${threads}`);
+	sf.uci(`setoption name Hash value 64`);
+	return sf;
+}
+
+/**
+ * Fallback path: nmrugg/stockfish.js's lite single-threaded WASM build
+ * (`stockfish-18-lite-single`). NNUE is embedded in the .wasm — no
+ * separate net file to fetch. Runs entirely without `SharedArrayBuffer`,
+ * so it works in environments where `crossOriginIsolated` is permanently
+ * `false`:
+ *
+ *   * Tauri Android / iOS — single-process WebView; see
+ *     `docs/android-engine.md` for the platform note.
+ *   * Firefox Android — Fission's Android implementation doesn't
+ *     satisfy the COI gate even on Firefox 147+.
+ *   * In-app browsers, Chrome variants without site isolation.
+ *
+ * Strength: roughly half the threaded build at the same depth, but keeps
+ * the engine alive everywhere. Loaded as a Worker so the search doesn't
+ * block the main thread; we wrap the Worker behind the same
+ * `StockfishWebInstance` shape consumers expect, with
+ * `getRecommendedNnue` / `setNnueBuffer` as no-ops because this build
+ * carries its own net.
+ */
+async function loadSingleThreadEngine(
+	base: string,
+	onLine: (line: string) => void,
+	onErrorFromEngine: (msg: string) => void,
+	trace: (msg: string) => void
+): Promise<StockfishWebInstance> {
+	trace('loading single-threaded engine (nmrugg/stockfish-18-lite-single)');
+	const url = new URL(`${base}/stockfish/stockfish-18-lite-single.js`, window.location.origin).href;
+	let worker: Worker;
+	try {
+		worker = new Worker(url);
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		throw new StockfishUnavailable(
+			`Single-threaded engine failed to load: ${msg}. Run \`npm run prep:stockfish\`.`
+		);
+	}
+	// `listen` and `onError` are mutable so callers (Engine.init, in
+	// particular) can reassign them after the loader returns. The Worker
+	// callbacks always read the current value through these closures.
+	let listen: (line: string) => void = onLine;
+	let onError: (msg: string) => void = onErrorFromEngine;
+	worker.onmessage = (e: MessageEvent) => {
+		const data = typeof e.data === 'string' ? e.data : String(e.data);
+		try {
+			listen(data);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			onError(`listen handler threw: ${msg}`);
+		}
+	};
+	worker.onerror = (e: ErrorEvent) => {
+		onError(e.message ?? String(e));
+	};
+	const instance: StockfishWebInstance = {
+		uci(command: string) {
+			worker.postMessage(command);
+		},
+		set listen(fn: (line: string) => void) {
+			listen = fn;
+		},
+		get listen() {
+			return listen;
+		},
+		set onError(fn: (msg: string) => void) {
+			onError = fn;
+		},
+		get onError() {
+			return onError;
+		},
+		// NNUE is embedded in the lite-single WASM. Both methods exist
+		// to satisfy the shared interface; both are no-ops here. The
+		// init() flow only routes through these on the threaded path,
+		// so they're never called when this loader is in use — keep
+		// them defensive anyway.
+		getRecommendedNnue(_index?: number): string {
+			return '';
+		},
+		setNnueBuffer(_data: Uint8Array, _index?: number): void {
+			/* embedded; no-op */
+		}
+	};
+	instance.uci('uci');
+	// 16 MB hash for mobile-class environments — the single-thread
+	// build mostly runs on phones/tablets and stays inside any
+	// device's process budget. Threads option is irrelevant (this
+	// build is single-threaded by construction).
+	instance.uci('setoption name Hash value 16');
+	return instance;
 }
 
 let globalEngine: Engine | null = null;
