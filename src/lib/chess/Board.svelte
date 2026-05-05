@@ -122,7 +122,30 @@
 				// so it's safe to bind them unconditionally; the second
 				// effect below immediately applies the real viewOnly value.
 				viewOnly: false,
-				drawable: { enabled: true, visible: true, autoShapes: shapes ?? [] }
+				drawable: {
+					enabled: true,
+					visible: true,
+					autoShapes: shapes ?? [],
+					// Override chessground's pale-* defaults: the upstream 0.4
+					// opacity reads as washed-out on our parchment squares,
+					// so the level-1 hint ring (paleGreen circle) and pale
+					// arrow brushes get bumped to 0.7 for legibility. Solid
+					// brushes match upstream defaults.
+					brushes: {
+						green: { key: 'g', color: '#15781B', opacity: 1, lineWidth: 10 },
+						red: { key: 'r', color: '#882020', opacity: 1, lineWidth: 10 },
+						blue: { key: 'b', color: '#003088', opacity: 1, lineWidth: 10 },
+						yellow: { key: 'y', color: '#e68f00', opacity: 1, lineWidth: 10 },
+						paleBlue: { key: 'pb', color: '#003088', opacity: 0.7, lineWidth: 15 },
+						paleGreen: { key: 'pg', color: '#15781B', opacity: 0.7, lineWidth: 15 },
+						paleRed: { key: 'pr', color: '#882020', opacity: 0.7, lineWidth: 15 },
+						paleGrey: { key: 'pgr', color: '#4a4a4a', opacity: 0.35, lineWidth: 15 },
+						purple: { key: 'purple', color: '#68217a', opacity: 0.65, lineWidth: 10 },
+						pink: { key: 'pink', color: '#ee2080', opacity: 0.5, lineWidth: 10 },
+						white: { key: 'white', color: 'white', opacity: 1, lineWidth: 10 },
+						paleWhite: { key: 'pwhite', color: 'white', opacity: 0.6, lineWidth: 10 }
+					}
+				}
 			}))
 		);
 		return () => {

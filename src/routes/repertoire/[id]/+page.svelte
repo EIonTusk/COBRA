@@ -128,6 +128,18 @@
 			}
 			loading = false;
 
+			// Auto-recompute coverage when the snapshot is missing or stale
+			// against the current threshold. Replaces the old manual recompute
+			// button — the panel always reflects the live goal without the
+			// user having to remember to refresh it.
+			if (
+				fetched &&
+				fetched.coverageGoal &&
+				(!fetched.coverageSnapshot || fetched.coverageSnapshot.goal !== fetched.coverageGoal)
+			) {
+				void onComputeCoverage();
+			}
+
 			// Fire post-game reconciliation in the background: any pending
 			// spar game whose Lichess PGN is ready gets its result + any
 			// deviation recorded, then the strip refreshes. Non-blocking
@@ -194,6 +206,9 @@
 		if (!rep) return;
 		await setCoverageGoal(rep.id, goal);
 		rep = { ...rep, coverageGoal: goal, coverageSnapshot: null };
+		// Auto-recompute against the new threshold so the % updates without
+		// the user having to hunt for a recompute button.
+		void onComputeCoverage();
 	}
 
 	async function onComputeCoverage() {
@@ -880,17 +895,12 @@
 					</span>
 				</div>
 				<div class="flex items-center gap-3">
-					<Button size="sm" variant="secondary" onclick={onComputeCoverage} disabled={computing}>
-						<span
-							>{computing
-								? 'Probing…'
-								: rep.coverageSnapshot
-									? 'Recompute'
-									: 'Compute coverage'}</span
-						>
-					</Button>
 					<span class="flex-1 font-serif text-[11px] text-[var(--color-parchment-500)] italic">
-						{coverageStatus ?? coverageLabel(rep.coverageSnapshot)}
+						{#if computing}
+							{coverageStatus ?? 'Recomputing coverage…'}
+						{:else}
+							{coverageStatus ?? coverageLabel(rep.coverageSnapshot)}
+						{/if}
 						{#if rep.coverageSnapshot?.incomplete}
 							<span class="text-[var(--color-brass-300)]"> · partial walk</span>
 						{/if}

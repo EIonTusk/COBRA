@@ -11,7 +11,9 @@
 		Bot,
 		ChevronDown,
 		ChevronFirst,
+		ChevronLast,
 		ChevronLeft,
+		ChevronRight,
 		Check,
 		Compass,
 		Copy,
@@ -182,6 +184,12 @@
 	let engineByMultipv = $state<Map<number, EngineInfo>>(new Map());
 	let cloudEval = $state<CloudEval | null>(null);
 	let explorerShapes = $state<DrawShape[]>([]);
+	// Explorer total games at the current position. Reset on every position
+	// change, populated when the explorer fetch resolves. Drives the
+	// "line reached the coverage threshold" glow on the Save-line pill: if
+	// the position is rare enough that no opponent move at it can be
+	// above-threshold, the line is naturally complete and worth saving.
+	let currentExplorerGames = $state<number | null>(null);
 	let engineUnsub: (() => void) | null = null;
 	let cloudEvalAbort: AbortController | null = null;
 
@@ -623,6 +631,7 @@
 		engineByMultipv = new Map();
 		cloudEval = null;
 		explorerShapes = [];
+		currentExplorerGames = null;
 
 		const fen = currentFen;
 		// lila-stockfish-web emits cp/mate from the side-to-move POV (UCI
@@ -679,6 +688,7 @@
 					});
 					candidateUcis = res.moves.map((m) => m.uci);
 					const totalGames = res.moves.reduce((s, m) => s + m.white + m.draws + m.black, 0);
+					currentExplorerGames = totalGames;
 					const threshold = rep?.coverageGoal ? totalGames / rep.coverageGoal : 0;
 					explorerShapes = explorerHintShapes({
 						totalGames,
@@ -900,6 +910,11 @@
 		clearJustSaved();
 		const fromKey = currentFenKey;
 		const fromFen = currentFen;
+		// Keep the forward stack consistent with the move just played: pop
+		// the matching top so a back-then-forward round-trip leaves the
+		// stack empty, or wipe the stack if the user has forked off the
+		// retraced line.
+		reconcileForwardWithMove(fromKey, edge);
 		const persistedNode = nodes.get(fromKey);
 		const alreadyPersisted = persistedNode?.children.some((c) => c.uci === edge.uci) ?? false;
 		const alreadyPending = pendingEdges.some(
@@ -1009,12 +1024,95 @@
 		}
 	}
 
+	// Browser-style forward stack. `goBack` pushes the dropped step here so
+	// the right-arrow can retrace the last viewed line; any new move played
+	// off the path clears the stack (you can't both fork and "go forward").
+	type ForwardStep = { fromKey: string; edge: Edge };
+	let forwardHistory = $state<ForwardStep[]>([]);
+
+	function reconcileForwardWithMove(fromKey: string, edge: Edge) {
+		if (forwardHistory.length === 0) return;
+		const top = forwardHistory[forwardHistory.length - 1];
+		if (top.fromKey === fromKey && top.edge.toFenKey === edge.toFenKey) {
+			forwardHistory = forwardHistory.slice(0, -1);
+		} else {
+			forwardHistory = [];
+		}
+	}
+
 	function goBack() {
 		if (history.length === 0) return;
 		cancelJumpAnim();
+		const dropped = history[history.length - 1];
+		const parentKey = history.length === 1 ? rep!.rootFenKey : history[history.length - 2].fenKey;
+		// Reconstruct the Edge that took us into the dropped step. Prefer the
+		// canonical persisted Edge (carries promotion + UCI exactly); fall
+		// back to the lastMove tuple for pending steps that aren't yet in
+		// `nodes`. Pending edges don't carry promotion info on the history
+		// step, but board history only ever produces queen-promotions today,
+		// so the synthesized UCI matches what `commitMove` would produce.
+		let edge: Edge | null =
+			nodes.get(parentKey)?.children.find((c) => c.toFenKey === dropped.fenKey) ?? null;
+		if (!edge && dropped.lastMove && dropped.san) {
+			edge = {
+				san: dropped.san,
+				uci: `${dropped.lastMove[0]}${dropped.lastMove[1]}`,
+				toFenKey: dropped.fenKey
+			};
+		}
 		untrackDroppedSteps(history.length - 1);
 		history = history.slice(0, -1);
 		currentFen = history.at(-1)?.fen ?? rep!.rootFen;
+		if (edge) forwardHistory = [...forwardHistory, { fromKey: parentKey, edge }];
+	}
+
+	/**
+	 * Step forward by one ply: replay the next entry from `forwardHistory`
+	 * if the user just retreated, otherwise descend the only-prepared move
+	 * at the current position. Goes nowhere if the position branches and
+	 * there's nothing to retrace.
+	 */
+	function goForward() {
+		if (!rep) return;
+		if (forwardHistory.length > 0) {
+			const top = forwardHistory[forwardHistory.length - 1];
+			if (top.fromKey === currentFenKey) {
+				void commitMove(top.edge);
+				return;
+			}
+			// Stale stack (we forked into a different branch). Drop it and
+			// fall through to the only-child rule below.
+			forwardHistory = [];
+		}
+		const node = nodes.get(currentFenKey);
+		if (!node || node.children.length !== 1) return;
+		void commitMove(node.children[0]);
+	}
+
+	/**
+	 * Jump to the leaf of the previously viewed line — replays the whole
+	 * `forwardHistory` stack — then keeps walking forward through any
+	 * single-prepared-child positions until the line branches or ends. With
+	 * no prior viewed line this collapses to "advance to the first
+	 * branching".
+	 */
+	function goEnd() {
+		if (!rep) return;
+		// Hard cap: pathological tree shouldn't be able to spin forever.
+		let safety = 256;
+		while (safety-- > 0) {
+			if (forwardHistory.length > 0) {
+				const top = forwardHistory[forwardHistory.length - 1];
+				if (top.fromKey === currentFenKey) {
+					void commitMove(top.edge);
+					continue;
+				}
+				forwardHistory = [];
+			}
+			const node = nodes.get(currentFenKey);
+			if (!node || node.children.length !== 1) break;
+			void commitMove(node.children[0]);
+		}
 	}
 
 	// Cancellation token for the staged "build from branching point" animation.
@@ -1045,6 +1143,8 @@
 		const edges = pathToFenKey(nodes, rep.rootFenKey, targetKey);
 		if (!edges) return;
 		const token = ++jumpAnimToken;
+		// Arbitrary jump invalidates the back/forward retrace stack.
+		forwardHistory = [];
 		if (edges.length === 0) {
 			history = [];
 			currentFen = rep.rootFen;
@@ -1365,6 +1465,10 @@
 		untrackDroppedSteps(0);
 		history = [];
 		currentFen = rep!.rootFen;
+		// Jumping to root is an arbitrary navigation, not a single back
+		// step — the right-arrow shouldn't try to retrace from an unknown
+		// midpoint.
+		forwardHistory = [];
 	}
 
 	function goToPly(index: number) {
@@ -1377,6 +1481,7 @@
 		untrackDroppedSteps(index + 1);
 		history = history.slice(0, index + 1);
 		currentFen = history[index].fen;
+		forwardHistory = [];
 	}
 
 	/**
@@ -1423,6 +1528,7 @@
 			}
 		];
 		currentFen = newFen;
+		forwardHistory = [];
 	}
 
 	async function saveComment() {
@@ -1442,15 +1548,35 @@
 		if (e.key === 'ArrowLeft') {
 			e.preventDefault();
 			goBack();
+		} else if (e.key === 'ArrowRight') {
+			e.preventDefault();
+			goForward();
 		} else if (e.key === 'Home') {
 			e.preventDefault();
 			goStart();
+		} else if (e.key === 'End') {
+			e.preventDefault();
+			goEnd();
 		}
 	}
 
 	function moveNumberPrefix(i: number): string | null {
 		return i % 2 === 0 ? `${Math.floor(i / 2) + 1}.` : null;
 	}
+
+	// Forward/end nav enable state. The right-arrow lights up when the user
+	// has just stepped back (forwardHistory has a matching top), or when the
+	// current position has exactly one prepared continuation. The end arrow
+	// is enabled whenever there's at least one ply to advance through —
+	// either the retrace stack or a single-child node ahead.
+	const canGoForward = $derived.by(() => {
+		if (forwardHistory.length > 0) {
+			return forwardHistory[forwardHistory.length - 1].fromKey === currentFenKey;
+		}
+		const node = nodes.get(currentFenKey);
+		return !!node && node.children.length === 1;
+	});
+	const canGoEnd = $derived(canGoForward);
 
 	// "Save line" tracks how many moves the user has added since the last
 	// explicit save — moves auto-persist as they're played, but the user
@@ -1467,7 +1593,34 @@
 	// and just disables when there's nothing new to save, so it doesn't
 	// pop in and out of the toolbar.
 	const saveNothingToDo = $derived(movesSinceSave === 0 && !justSaved);
-	const saveNudge = $derived(!justSaved && movesSinceSave >= 5);
+	// Transposed-into-prep: the user added new moves that landed back on a
+	// position already in the tree (reachable via some other edge). That's
+	// a natural save moment — the new line is closing a circuit, not just
+	// stretching further into uncharted territory.
+	const transposedIntoSaved = $derived(
+		movesSinceSave > 0 &&
+			!!rep &&
+			currentFenKey !== rep.rootFenKey &&
+			currentFenKey !== '' &&
+			reachableFenKeys.has(currentFenKey)
+	);
+	// "Reached threshold": the current position is rare enough that no
+	// further opponent move at it can be above the coverage threshold
+	// (totalGames < rootGames / goal). The line is naturally complete to
+	// the user's chosen depth — no reason to keep building before saving.
+	const reachedCoverageThreshold = $derived.by(() => {
+		if (movesSinceSave === 0) return false;
+		if (!rep?.coverageGoal) return false;
+		const cur = currentExplorerGames;
+		const thresholdGames = rep.coverageSnapshot?.thresholdGames;
+		if (cur === null || !thresholdGames || thresholdGames <= 0) return false;
+		return cur < thresholdGames;
+	});
+	const saveNudge = $derived(
+		!justSaved &&
+			movesSinceSave > 0 &&
+			(movesSinceSave >= 5 || transposedIntoSaved || reachedCoverageThreshold)
+	);
 	const saveToneClass = $derived(
 		justSaved
 			? 'border-[var(--color-olive-400)] bg-[var(--color-olive-500)]/30 text-[var(--color-olive-300)]'
@@ -2159,6 +2312,24 @@
 				>
 					<ChevronLeft class="size-4" />
 				</button>
+				<button
+					type="button"
+					onclick={goForward}
+					disabled={!canGoForward}
+					title="Forward (→)"
+					class="flex size-8 items-center justify-center rounded-[3px] text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)] disabled:pointer-events-none disabled:opacity-30"
+				>
+					<ChevronRight class="size-4" />
+				</button>
+				<button
+					type="button"
+					onclick={goEnd}
+					disabled={!canGoEnd}
+					title="End (End)"
+					class="flex size-8 items-center justify-center rounded-[3px] text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)] disabled:pointer-events-none disabled:opacity-30"
+				>
+					<ChevronLast class="size-4" />
+				</button>
 				<!-- Save pill. `ml-auto` anchors it to the right edge so
 					 the toolbar's left-aligned items don't shift when the
 					 pill transitions between enabled/disabled states.
@@ -2256,6 +2427,24 @@
 							class="hidden size-8 items-center justify-center rounded-[3px] text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)] disabled:pointer-events-none disabled:opacity-30 lg:flex"
 						>
 							<ChevronLeft class="size-4" />
+						</button>
+						<button
+							type="button"
+							onclick={goForward}
+							disabled={!canGoForward}
+							title="Forward (→)"
+							class="hidden size-8 items-center justify-center rounded-[3px] text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)] disabled:pointer-events-none disabled:opacity-30 lg:flex"
+						>
+							<ChevronRight class="size-4" />
+						</button>
+						<button
+							type="button"
+							onclick={goEnd}
+							disabled={!canGoEnd}
+							title="End (End)"
+							class="hidden size-8 items-center justify-center rounded-[3px] text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)] disabled:pointer-events-none disabled:opacity-30 lg:flex"
+						>
+							<ChevronLast class="size-4" />
 						</button>
 						<div class="eyebrow ml-2">Line</div>
 						<!-- Desktop save pill: sits at the right of the Line
