@@ -42,9 +42,12 @@ scripts/setup-android-signing.sh
 *.keystore
 *.jks
 
-# Stockfish assets (fetched by scripts/prep-stockfish.mjs, too large for git)
+# Stockfish assets (fetched / copied by scripts/prep-stockfish.mjs, too large for git)
 static/stockfish/*.wasm
 static/stockfish/*.js
 static/stockfish/*.nnue
 static/stockfish/*.d.ts
 !static/stockfish/.gitkeep
+# nmrugg/stockfish single-threaded fallback for browsers without COI
+# (Tauri Android, Firefox Android, in-app browsers).
+# Same prep script, separate filename pattern documented for clarity.
