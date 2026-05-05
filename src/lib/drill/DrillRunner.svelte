@@ -134,6 +134,13 @@
 	const introducedKeys = new SvelteSet<string>();
 	const failedWalkIndices = new SvelteSet<number>();
 	const failedKeysByWalk = new SvelteMap<number, SvelteSet<string>>();
+	// Composite keys actually drilled BY each walk (Learn pass). Distinct
+	// from `flatWalkFenKeys`, which contains every fenKey scheduled into
+	// the walk — including keys that were already drilled by an earlier
+	// walk (transposition) and got skipped here. The Train-pass setup
+	// uses this to clear ONLY the keys this walk drilled, so a shared
+	// fenKey doesn't get re-drilled by every walk that schedules it.
+	const drilledByWalk = new SvelteMap<number, SvelteSet<string>>();
 	let walkPhase = $state<'learn' | 'train'>('learn');
 
 	// Tracks the "tail" we're working through when we cross out of a
@@ -788,7 +795,20 @@
 
 		const willReDrill =
 			!lineWalkMode && (isIntroductionPass || (outcome === 'wrong' && !isLineWalkStep));
-		if (!willReDrill) drilledKeys.add(compositeKey);
+		if (!willReDrill) {
+			drilledKeys.add(compositeKey);
+			if (lineWalkMode) {
+				const w = walkOfIdx(idx);
+				if (w >= 0) {
+					let s = drilledByWalk.get(w);
+					if (!s) {
+						s = new SvelteSet<string>();
+						drilledByWalk.set(w, s);
+					}
+					s.add(compositeKey);
+				}
+			}
+		}
 		if (isIntroductionPass) {
 			introducedKeys.add(compositeKey);
 			entries = [...entries, entry];
@@ -850,25 +870,32 @@
 	function pruneDeeperInLine(segIdx: number, failedFenKey: string) {
 		const seg = segments[segIdx];
 		const filtered: DrillEntry[] = [];
+		const oldToNew: (number | null)[] = new Array(entries.length).fill(null);
+		const keep = (i: number, e: DrillEntry) => {
+			oldToNew[i] = filtered.length;
+			filtered.push(e);
+		};
 		for (let i = 0; i < entries.length; i++) {
 			if (i <= idx) {
-				filtered.push(entries[i]);
+				keep(i, entries[i]);
 				continue;
 			}
 			const other = entries[i];
 			if (other.segIdx !== segIdx) {
-				filtered.push(other);
+				keep(i, other);
 				continue;
 			}
 			const path = pathToFenKey(seg.nodes, seg.rep.rootFenKey, other.card.fenKey);
 			if (!path) {
-				filtered.push(other);
+				keep(i, other);
 				continue;
 			}
 			const passes = path.some((e) => e.toFenKey === failedFenKey);
-			if (!passes) filtered.push(other);
+			if (!passes) keep(i, other);
 		}
+		if (filtered.length === entries.length) return;
 		entries = filtered;
+		rewriteWalkArraysAfterPrune(oldToNew);
 	}
 
 	/**
@@ -908,22 +935,94 @@
 		const chosenSubtree = collect(chosenChildKey);
 
 		const filtered: DrillEntry[] = [];
+		const oldToNew: (number | null)[] = new Array(entries.length).fill(null);
+		const keep = (i: number, e: DrillEntry) => {
+			oldToNew[i] = filtered.length;
+			filtered.push(e);
+		};
 		for (let i = 0; i < entries.length; i++) {
 			if (i <= idx) {
-				filtered.push(entries[i]);
+				keep(i, entries[i]);
 				continue;
 			}
 			const other = entries[i];
 			if (other.segIdx !== segIdx) {
-				filtered.push(other);
+				keep(i, other);
 				continue;
 			}
 			if (unchosenSubtree.has(other.card.fenKey) && !chosenSubtree.has(other.card.fenKey)) {
 				continue;
 			}
-			filtered.push(other);
+			keep(i, other);
 		}
+		if (filtered.length === entries.length) return;
 		entries = filtered;
+		rewriteWalkArraysAfterPrune(oldToNew);
+	}
+
+	/**
+	 * Rebuild `flatWalkStarts` / `flatWalkSeg` / `flatWalkFenKeys` after a
+	 * prune mutated `entries`. Without this, walk-end indices computed by
+	 * `walkEndOf` reference positions past the new `entries.length` and
+	 * `advanceQueue`'s line-walk loop reads `entries[next]` as `undefined`,
+	 * crashing `rateAndAdvance` and stranding `phase` at `'correct'` — the
+	 * "drill stops and hangs after an alt move" symptom.
+	 *
+	 * `oldToNew[i]` is the new index of `entries_old[i]`, or `null` if it
+	 * was pruned. For each walk we map its original start to the smallest
+	 * surviving new index in its original [start, end) range. Walks whose
+	 * entries were all pruned are dropped, and any `failedWalkIndices` /
+	 * `failedKeysByWalk` references are remapped or dropped accordingly.
+	 */
+	function rewriteWalkArraysAfterPrune(oldToNew: (number | null)[]) {
+		const newStarts: number[] = [];
+		const newSegs: number[] = [];
+		const newFenKeys: SvelteSet<string>[] = [];
+		const oldWalkToNewWalk = new SvelteMap<number, number>();
+		for (let w = 0; w < flatWalkStarts.length; w++) {
+			const startOld = flatWalkStarts[w];
+			const endOld = w + 1 < flatWalkStarts.length ? flatWalkStarts[w + 1] : oldToNew.length;
+			let firstSurviving: number | null = null;
+			for (let i = startOld; i < endOld; i++) {
+				const ni = oldToNew[i];
+				if (ni !== null) {
+					firstSurviving = ni;
+					break;
+				}
+			}
+			if (firstSurviving === null) continue;
+			oldWalkToNewWalk.set(w, newStarts.length);
+			newStarts.push(firstSurviving);
+			newSegs.push(flatWalkSeg[w]);
+			newFenKeys.push(flatWalkFenKeys[w]);
+		}
+		flatWalkStarts = newStarts;
+		flatWalkSeg = newSegs;
+		flatWalkFenKeys = newFenKeys;
+
+		const remappedFailed: number[] = [];
+		for (const w of failedWalkIndices) {
+			const nw = oldWalkToNewWalk.get(w);
+			if (nw !== undefined) remappedFailed.push(nw);
+		}
+		failedWalkIndices.clear();
+		for (const nw of remappedFailed) failedWalkIndices.add(nw);
+
+		const remappedKeys = new SvelteMap<number, SvelteSet<string>>();
+		for (const [w, keys] of failedKeysByWalk) {
+			const nw = oldWalkToNewWalk.get(w);
+			if (nw !== undefined) remappedKeys.set(nw, keys);
+		}
+		failedKeysByWalk.clear();
+		for (const [nw, keys] of remappedKeys) failedKeysByWalk.set(nw, keys);
+
+		const remappedDrilled = new SvelteMap<number, SvelteSet<string>>();
+		for (const [w, keys] of drilledByWalk) {
+			const nw = oldWalkToNewWalk.get(w);
+			if (nw !== undefined) remappedDrilled.set(nw, keys);
+		}
+		drilledByWalk.clear();
+		for (const [nw, keys] of remappedDrilled) drilledByWalk.set(nw, keys);
 	}
 
 	function effectivePlayedSan(entry: DrillEntry): string {
@@ -952,6 +1051,34 @@
 		const oppEdge = nodeAfterUser.children[0];
 		const nextKey = ck(entry.segIdx, oppEdge.toFenKey);
 		if (drilledKeys.has(nextKey)) return null;
+		// Walk-boundary gate (line-walk mode only). With shared-prefix
+		// extraction (see buildSegment), a single line of play is split
+		// across multiple walks: shared trunk + per-line tails. If the
+		// chain crossed those boundaries, the next walk's cards would
+		// drill during *this* walk's Learn pass, then again during this
+		// walk's Train pass, and yet again when the next walk actually
+		// starts — inflating plannedSlotsDone and producing duplicate
+		// Train passes. Bail when the chain target lives in a different
+		// admitted walk in the same segment; alt-divergence (target not
+		// in any admitted walk) is allowed to fall through below.
+		if (isLineWalkSegment(entry.segIdx)) {
+			const currentWalk = walkOfIdx(idx);
+			if (currentWalk >= 0) {
+				const inCurrent = flatWalkFenKeys[currentWalk]?.has(oppEdge.toFenKey) ?? false;
+				if (!inCurrent) {
+					let inOtherAdmitted = false;
+					for (let w = 0; w < flatWalkFenKeys.length; w++) {
+						if (w === currentWalk) continue;
+						if (flatWalkSeg[w] !== entry.segIdx) continue;
+						if (flatWalkFenKeys[w].has(oppEdge.toFenKey)) {
+							inOtherAdmitted = true;
+							break;
+						}
+					}
+					if (inOtherAdmitted) return null;
+				}
+			}
+		}
 		// Cap respect: never chain past the planned queue, *except* when the
 		// user just diverged onto an alt prepared reply at a multi-child card.
 		// In that case the alt-line continuation almost certainly wasn't
@@ -1051,6 +1178,7 @@
 			while (next < entries.length) {
 				maybeOpenWalkAt(next);
 				const nextEntry = entries[next];
+				if (!nextEntry) break;
 				if (
 					drilledKeys.has(ck(nextEntry.segIdx, nextEntry.card.fenKey)) ||
 					(nextEntry.segIdx === currentSegIdx && nextEntry.card.fenKey === justRatedKey)
@@ -1077,10 +1205,11 @@
 		}
 
 		// Line-walk mode: stay inside the current walk.
-		const walkEnd = walkEndOf(currentWalk);
+		const walkEnd = Math.min(walkEndOf(currentWalk), entries.length);
 		let next = idx + 1;
 		while (next < walkEnd) {
 			const nextEntry = entries[next];
+			if (!nextEntry) break;
 			if (
 				drilledKeys.has(ck(nextEntry.segIdx, nextEntry.card.fenKey)) ||
 				(nextEntry.segIdx === currentSegIdx && nextEntry.card.fenKey === justRatedKey)
@@ -1100,9 +1229,15 @@
 		if (walkPhase === 'learn' && walkNeedsTrain(currentWalk)) {
 			setTimeout(() => {
 				walkPhase = 'train';
-				const segIdx = flatWalkSeg[currentWalk];
-				const keys = flatWalkFenKeys[currentWalk];
-				for (const k of keys) drilledKeys.delete(ck(segIdx, k));
+				// Only clear drilled-keys this walk actually drilled. Shared
+				// trunks now live in their own walk (see buildSegment); for
+				// transposed fenKeys that show up in multiple walks, we
+				// still avoid unwinding the prior walk's progress.
+				const drilledHere = drilledByWalk.get(currentWalk);
+				if (drilledHere) {
+					for (const ck_ of drilledHere) drilledKeys.delete(ck_);
+					drilledByWalk.delete(currentWalk);
+				}
 				failedWalkIndices.delete(currentWalk);
 				failedKeysByWalk.delete(currentWalk);
 				chainedEntry = null;

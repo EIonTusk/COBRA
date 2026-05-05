@@ -42,17 +42,35 @@ interface LineWalkResult {
 }
 
 /**
- * Greedy line-walk session builder. Iterates the due-card pool in
- * (depth desc, dueAt asc) order; each candidate's full path back to the
- * line head is admitted only if it fits the session/new-card budgets. The
- * deepest candidate's walk subsumes shallower siblings on the same line,
- * so deep-first iteration avoids duplicate prefixes for the same line
- * while keeping the deepest position the schedule surfaced.
+ * Greedy line-walk session builder.
  *
- * Each walk adds an entry to `walkStarts`/`walkFenKeys` so the runner can
- * sequence Learn → Train passes per walk, and `dueOriginalKeys` records
- * which fenKeys were FSRS-due (vs. line-walk prefix steps that don't
- * update FSRS state on rate).
+ * Two-stage construction:
+ *
+ * 1. **Admit candidates.** Iterate the due-card pool in (depth asc, dueAt
+ *    asc) order — shallower lines first. Each candidate's full path back
+ *    to the line head is admitted if it fits the session/new-card budgets.
+ *    The well-learned filter still drops prefix cards the user has already
+ *    consolidated.
+ *
+ * 2. **Factor out shared prefixes.** Build a trie keyed by fenKey-path
+ *    from the line head. A maximal run of nodes whose path is shared by
+ *    ≥2 admitted walks is emitted as its OWN walk before the walks fork.
+ *    The unique tails follow as their own walks. This produces the
+ *    "drill the trunk first, then each line's unique tail" order:
+ *
+ *    Walks {[A,B,C,D], [A,B,C,E,F], [A,B,G,H]} →
+ *    [A,B] · [C] · [D] · [E,F] · [G,H]
+ *
+ *    Why: on a fresh session the user actively plays the shared base
+ *    once (Learn + Train) instead of replaying it once per descendant
+ *    walk's Train pass. The runner's per-card lead-in animation still
+ *    shows the trunk during each tail walk, but recall is no longer
+ *    duplicated.
+ *
+ * Each emitted walk adds an entry to `walkStarts`/`walkFenKeys` so the
+ * runner can sequence Learn → Train per walk, and `dueOriginalKeys`
+ * records which fenKeys were FSRS-due (vs. line-walk prefix steps that
+ * don't update FSRS state on rate).
  */
 async function pickWithLineWalk(
 	pool: Card[],
@@ -71,24 +89,25 @@ async function pickWithLineWalk(
 		const path = pathToFenKey(nodes, lineHead, c.fenKey);
 		depthByKey.set(c.fenKey, path ? path.length : -1);
 	}
+	// Depth-ASC: shallower candidates first so the trunk-extraction step
+	// emits shallow shared segments before deep tails, mirroring how a
+	// human builds a repertoire.
 	const sortedPool = pool.slice().sort((a, b) => {
 		const dA = depthByKey.get(a.fenKey) ?? -1;
 		const dB = depthByKey.get(b.fenKey) ?? -1;
-		if (dA !== dB) return dB - dA;
+		if (dA !== dB) return dA - dB;
 		return a.dueAt - b.dueAt;
 	});
 
-	const out: Card[] = [];
-	const walkStarts: number[] = [];
-	const walkFenKeys: Set<string>[] = [];
-	const dueOriginalKeys = new Set<string>();
-	const ledBy = new Set<string>();
 	const poolKeys = new Set<string>();
 	for (const c of pool) poolKeys.add(c.fenKey);
+
+	const admittedWalks: Card[][] = [];
+	const ledBy = new Set<string>();
+	const admittedFenKeys = new Set<string>();
 	const uniqueNewSeen = new Set<string>();
 	let totalRemaining = Math.max(0, sessionCap);
 	let newRemaining = Math.max(0, newCap);
-	const admittedFenKeys = new Set<string>();
 
 	for (const candidate of sortedPool) {
 		if (totalRemaining <= 0) break;
@@ -113,6 +132,9 @@ async function pickWithLineWalk(
 		}
 		walk.push(candidate);
 
+		// Budget the walk as if it were emitted whole. Trunk extraction
+		// can only reduce the actual cost (shared cards become one walk
+		// instead of N), so this is a conservative upper bound.
 		const newInWalk = walk.reduce(
 			(sum, c) => sum + (!c.lastReview && !uniqueNewSeen.has(c.fenKey) ? 1 : 0),
 			0
@@ -123,21 +145,98 @@ async function pickWithLineWalk(
 		if (newInWalk > newRemaining) continue;
 
 		ledBy.add(candidate.fenKey);
-		const walkStart = out.length;
-		const fenSet = new Set<string>();
 		for (const c of walk) {
-			out.push(c);
-			fenSet.add(c.fenKey);
 			admittedFenKeys.add(c.fenKey);
-			if (poolKeys.has(c.fenKey)) dueOriginalKeys.add(c.fenKey);
 			if (!c.lastReview) uniqueNewSeen.add(c.fenKey);
 		}
-		walkStarts.push(walkStart);
-		walkFenKeys.push(fenSet);
+		admittedWalks.push(walk);
 		totalRemaining -= eventCost;
 		newRemaining -= newInWalk;
 	}
 
+	return extractSharedPrefixWalks(admittedWalks, poolKeys);
+}
+
+/**
+ * Trie node for shared-prefix extraction. `count` is the number of
+ * admitted walks descending through this node — count ≥ 2 marks a
+ * shared run, count == 1 marks a unique tail.
+ */
+interface PrefixTrieNode {
+	card: Card | null;
+	count: number;
+	children: Map<string, PrefixTrieNode>;
+}
+
+/**
+ * Build a fenKey-path trie from admitted walks and emit walks in
+ * trunk-first order: a maximal run of shared nodes (count ≥ 2) is
+ * flushed as one walk before the trie forks; the per-branch recursion
+ * then emits each subtree's own shared run + unique tails. Sibling
+ * branches are visited shared-first (more walks descending → drilled
+ * earlier) so the most-leveraged moves get active-recall priority.
+ *
+ * Exported for unit testing. Pure: no IDB / engine / settings reads.
+ */
+export function extractSharedPrefixWalks(
+	admittedWalks: Card[][],
+	poolKeys: Set<string>
+): LineWalkResult {
+	if (admittedWalks.length === 0) {
+		return { cards: [], walkStarts: [], walkFenKeys: [], dueOriginalKeys: new Set() };
+	}
+
+	const root: PrefixTrieNode = { card: null, count: 0, children: new Map() };
+	for (const walk of admittedWalks) {
+		let node = root;
+		for (const c of walk) {
+			let child = node.children.get(c.fenKey);
+			if (!child) {
+				child = { card: c, count: 0, children: new Map() };
+				node.children.set(c.fenKey, child);
+			}
+			child.count += 1;
+			node = child;
+		}
+	}
+
+	const out: Card[] = [];
+	const walkStarts: number[] = [];
+	const walkFenKeys: Set<string>[] = [];
+	const dueOriginalKeys = new Set<string>();
+
+	const flushSegment = (seg: Card[]) => {
+		if (seg.length === 0) return;
+		const start = out.length;
+		const fenSet = new Set<string>();
+		for (const c of seg) {
+			out.push(c);
+			fenSet.add(c.fenKey);
+			if (poolKeys.has(c.fenKey)) dueOriginalKeys.add(c.fenKey);
+		}
+		walkStarts.push(start);
+		walkFenKeys.push(fenSet);
+	};
+
+	const visit = (node: PrefixTrieNode, accumulated: Card[]) => {
+		const seg = node.card ? [...accumulated, node.card] : [...accumulated];
+		const kids = [...node.children.values()];
+		if (kids.length === 0) {
+			flushSegment(seg);
+			return;
+		}
+		if (kids.length === 1) {
+			visit(kids[0], seg);
+			return;
+		}
+		// Branching: emit the accumulated shared segment, then recurse
+		// into each child branch with shared-first ordering.
+		flushSegment(seg);
+		kids.sort((a, b) => b.count - a.count);
+		for (const child of kids) visit(child, []);
+	};
+
+	visit(root, []);
 	return { cards: out, walkStarts, walkFenKeys, dueOriginalKeys };
 }
 
