@@ -10,21 +10,18 @@
 			catch errors in module evaluation, SW registration, or anything
 			else that fires before Svelte mounts.
 
-			Two visibility modes:
-			  * Default (production): the overlay only renders for genuine
-			    failure events — `window.error`, `unhandledrejection`, or
-			    `console.error`. Trace entries from app code via
-			    `__cobraDiag.log(...)` are still recorded silently into
-			    `entries[]` and persisted to localStorage, so they're
-			    available via `__cobraDiag.dump()` from devtools, but they
-			    don't paint the red bar at the bottom of the screen.
+			Off by default: nothing paints. Errors, unhandled rejections,
+			console.error calls and trace entries are all still recorded
+			silently into `entries[]` and persisted to localStorage, so
+			they're available via `__cobraDiag.dump()` from devtools, but
+			the red bar at the bottom never appears.
 
-			  * Verbose: when `localStorage['cobra:diag-on'] === '1'` (set
-			    by the Settings → Diagnostic overlay toggle), traces also
-			    paint the overlay. Use this on the live GH Pages site to
-			    surface the COI/header probe output on a phone where
-			    chrome://inspect isn't reachable, without shipping a
-			    separate debug build to every visitor.
+			Opted in: when `localStorage['cobra:diag-on'] === '1'` (set by
+			the Settings → Diagnostic overlay toggle), every captured
+			entry — failures and traces alike — paints the overlay. Use
+			this on the live GH Pages site to surface the COI/header probe
+			output on a phone where chrome://inspect isn't reachable,
+			without shipping a separate debug build to every visitor.
 
 			Persists captures to localStorage so a hard crash (native panic,
 			WebView process kill, deep-link cold-restart) doesn't erase the
@@ -40,10 +37,10 @@
 				var MAX_ENTRIES = 200;
 				var entries = [];
 				var box = null;
-				// Verbose mode: traces paint the overlay too. Toggled from
-				// Settings → Diagnostic overlay; persisted in localStorage
-				// so a reload (including the SW auto-reload on first
-				// GH-Pages visit) keeps the choice.
+				// Master gate: when off, nothing paints — not even errors.
+				// Toggled from Settings → Diagnostic overlay; persisted in
+				// localStorage so a reload (including the SW auto-reload on
+				// first GH-Pages visit) keeps the choice.
 				var verbose = (function () {
 					try {
 						return localStorage.getItem(DIAG_ON_KEY) === '1';
@@ -114,13 +111,14 @@
 					if (kind === 'trace') return '#bce';
 					return '#fea';
 				}
-				// Genuine failure events always paint the overlay; trace
-				// entries only paint when verbose mode is on. This is the
-				// gate that keeps the live GH Pages site clean for normal
-				// users while still letting an opted-in debugger see the
-				// full log.
-				function shouldRender(kind) {
-					if (kind === 'error' || kind === 'unhandled' || kind === 'console') return true;
+				// Single gate: nothing paints unless the user opted in via
+				// Settings → Diagnostic overlay. Failures still get
+				// captured into `entries[]` and persisted to localStorage,
+				// so they're available via `__cobraDiag.dump()` from
+				// devtools — they just don't paint the red bar. This keeps
+				// the live site clean for users on browsers/devices where
+				// the overlay would otherwise pop on benign errors.
+				function shouldRender(_kind) {
 					return verbose;
 				}
 				function append(line, kind) {
@@ -147,15 +145,12 @@
 				// Surface previous-session captures (typically present after
 				// a hard crash that relaunched the process). Entries get a
 				// [prev] prefix so they're distinguishable from this session.
-				// Only paint them when verbose mode is on OR the previous
-				// session ended with an error — otherwise a quiet previous
-				// session shouldn't pop the overlay on the next clean load.
+				// Only paint them when the overlay is opted in — otherwise a
+				// previous-session failure shouldn't pop the overlay for
+				// users who explicitly turned it off.
 				var prev = loadPrevious();
 				if (prev.length) {
-					var prevHasFailure = prev.some(function (en) {
-						return en && (en.kind === 'error' || en.kind === 'unhandled');
-					});
-					if (verbose || prevHasFailure) {
+					if (verbose) {
 						add('trace', 'previous session left ' + prev.length + ' entries');
 						for (var p = 0; p < prev.length; p += 1) {
 							var e = prev[p];
