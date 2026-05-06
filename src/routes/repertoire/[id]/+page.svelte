@@ -128,15 +128,21 @@
 			}
 			loading = false;
 
-			// Auto-recompute coverage when the snapshot is missing or stale
-			// against the current threshold. Replaces the old manual recompute
-			// button — the panel always reflects the live goal without the
-			// user having to remember to refresh it.
-			if (
-				fetched &&
-				fetched.coverageGoal &&
-				(!fetched.coverageSnapshot || fetched.coverageSnapshot.goal !== fetched.coverageGoal)
-			) {
+			// Auto-recompute coverage when the snapshot is missing, stale
+			// against the current threshold, or out of date with the live
+			// tree (the user added/removed moves in the builder since we
+			// last measured). edgeCount is the structural fingerprint —
+			// undefined on snapshots predating the field, in which case we
+			// also recompute on first visit so they pick up the new field.
+			const snap = fetched?.coverageSnapshot;
+			const needsRecompute =
+				!!fetched &&
+				!!fetched.coverageGoal &&
+				(!snap ||
+					snap.goal !== fetched.coverageGoal ||
+					snap.edgeCount === undefined ||
+					snap.edgeCount !== edgeCount);
+			if (needsRecompute) {
 				void onComputeCoverage();
 			}
 

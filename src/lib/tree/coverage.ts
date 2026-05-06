@@ -10,6 +10,15 @@
  * The walk stops at a probe cap (default 40) so coverage runs complete even
  * on big trees without hammering Lichess. When capped, `incomplete: true`
  * signals the UI to render a "partial" indicator.
+ *
+ * Walk shape is deliberately threshold-independent: BFS visits every
+ * position reachable through the user's prepared edges (their replies plus
+ * every opponent move they've answered, regardless of how popular). Only
+ * the needed/covered tally at each opponent position is filtered by the
+ * "1 in N" threshold. If the walk shape were threshold-dependent, the
+ * coverage % at different N values would be measured over different
+ * subsets of the tree and could be non-monotonic across goals — e.g.
+ * 1 in 200 lower than 1 in 300, which makes the metric uninterpretable.
  */
 
 import { Chess } from 'chessops/chess';
@@ -66,7 +75,8 @@ export async function computeCoverage(
 			probed: 1,
 			incomplete: false,
 			computedAt: Date.now(),
-			goal: rep.goal
+			goal: rep.goal,
+			edgeCount: totalEdges
 		};
 	}
 	const threshold = rootTotal / rep.goal;
@@ -90,52 +100,51 @@ export async function computeCoverage(
 		if (!node) continue;
 		const ourTurn = colorToMove(fenKey) === rep.color;
 
-		if (ourTurn) {
-			for (const edge of node.children) {
-				if (!visited.has(edge.toFenKey)) {
-					visited.add(edge.toFenKey);
-					queue.push(edge.toFenKey);
+		if (!ourTurn) {
+			// Opponent turn: probe explorer (root was probed up top; skip
+			// the re-fetch there) and tally needed/covered at this position.
+			let moves: typeof rootRes.moves | null = null;
+			if (fenKey === rep.rootFenKey) {
+				moves = rootRes.moves;
+			} else {
+				try {
+					const res = await fetchExplorer({
+						fen: fenFromKey(fenKey),
+						speeds: opts.speeds,
+						ratings: opts.ratings,
+						token: opts.token,
+						moves: 30
+					});
+					probed += 1;
+					moves = res.moves;
+					opts.onProgress?.(probed, null);
+				} catch {
+					// Rate limit / network failure — flag the snapshot but
+					// keep walking the tree so other positions still count.
+					incomplete = true;
 				}
 			}
-			continue;
-		}
 
-		// Opponent turn: probe explorer if we haven't already (root was probed
-		// up top; skip a re-probe there).
-		let moves = rootRes.moves;
-		if (fenKey !== rep.rootFenKey) {
-			try {
-				const res = await fetchExplorer({
-					fen: fenFromKey(fenKey),
-					speeds: opts.speeds,
-					ratings: opts.ratings,
-					token: opts.token,
-					moves: 30
-				});
-				probed += 1;
-				moves = res.moves;
-				opts.onProgress?.(probed, null);
-			} catch {
-				// On any error (rate limit, network), count this branch as
-				// not-probed and keep going.
-				incomplete = true;
-				continue;
+			if (moves) {
+				for (const m of moves) {
+					const games = m.white + m.draws + m.black;
+					if (games < threshold) continue;
+					needed += 1;
+					const childKey = applyUciToFenKey(fenKey, m.uci, fenFromKey);
+					if (!childKey) continue;
+					const edge = node.children.find((e) => e.toFenKey === childKey);
+					if (edge) covered += 1;
+				}
 			}
 		}
 
-		for (const m of moves) {
-			const games = m.white + m.draws + m.black;
-			if (games < threshold) continue;
-			needed += 1;
-			const childKey = applyUciToFenKey(fenKey, m.uci, fenFromKey);
-			if (!childKey) continue;
-			const edge = node.children.find((e) => e.toFenKey === childKey);
-			if (edge) {
-				covered += 1;
-				if (!visited.has(childKey)) {
-					visited.add(childKey);
-					queue.push(childKey);
-				}
+		// Walk every prepared continuation regardless of threshold or turn.
+		// Keeping the walk shape independent of N is what makes coverage %
+		// monotonically interpretable across goals (see header comment).
+		for (const edge of node.children) {
+			if (!visited.has(edge.toFenKey)) {
+				visited.add(edge.toFenKey);
+				queue.push(edge.toFenKey);
 			}
 		}
 	}
@@ -153,7 +162,8 @@ export async function computeCoverage(
 		probed,
 		incomplete,
 		computedAt: Date.now(),
-		goal: rep.goal
+		goal: rep.goal,
+		edgeCount: totalEdges
 	};
 }
 

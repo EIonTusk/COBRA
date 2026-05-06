@@ -12,6 +12,14 @@ export interface CoverageSnapshot {
 	incomplete: boolean;
 	computedAt: number;
 	goal: number;
+	/**
+	 * Total edges in the repertoire tree at compute time. Used to detect
+	 * tree mutations (adds/removes from the builder) so the overview page
+	 * can auto-recompute when the snapshot is structurally stale, even if
+	 * the coverage goal itself hasn't moved. Optional for back-compat with
+	 * snapshots stored before the field was introduced.
+	 */
+	edgeCount?: number;
 }
 
 export interface Repertoire {
