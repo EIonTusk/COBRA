@@ -34,6 +34,8 @@ playwright-report
 TODO.md
 CLAUDE.md
 /plans
+/docs
+*.md
 
 # Local-only secrets provisioning script (generates the Android release keystore)
 scripts/setup-android-signing.sh
