@@ -186,6 +186,11 @@
 	const currentCard = $derived<Card | undefined>(currentEntry?.card);
 	const currentRep = $derived(currentSegment?.rep);
 	const currentMode = $derived(currentSegment?.mode ?? 'due');
+	// Mistake-review modes are pure practice — they don't drive FSRS state and
+	// don't get the new-card "introduction" arrow that `due` mode shows. Cards
+	// in these modes are surfaced because they were missed in real games or
+	// lapsed during drill, not because the schedule chose them.
+	const currentIsMistakeReview = $derived(currentMode === 'mistakes' || currentMode === 'retrain');
 	const currentLineLabel = $derived<string | null>(
 		currentEntry && currentSegment
 			? (currentSegment.lineLabelByKey.get(currentEntry.card.fenKey) ?? null)
@@ -270,7 +275,8 @@
 	const isFirstEverCard = $derived(
 		!!currentEntry &&
 			!currentEntry.card.lastReview &&
-			!introducedKeys.has(ck(currentEntry.segIdx, currentEntry.card.fenKey))
+			!introducedKeys.has(ck(currentEntry.segIdx, currentEntry.card.fenKey)) &&
+			!currentIsMistakeReview
 	);
 	const hintSuppressed = $derived(correctEdges.length > 1 && !isFirstEverCard);
 
@@ -406,10 +412,12 @@
 		untrack(() => {
 			const seg = segments[entry.segIdx];
 			const isLineWalkStepCard = seg.mode === 'due' && !seg.dueOriginalKeys.has(entry.card.fenKey);
+			const isMistakeReviewMode = seg.mode === 'mistakes' || seg.mode === 'retrain';
 			hintLevel =
 				entry.card.lastReview ||
 				introducedKeys.has(ck(entry.segIdx, entry.card.fenKey)) ||
-				isLineWalkStepCard
+				isLineWalkStepCard ||
+				isMistakeReviewMode
 					? 0
 					: 2;
 			wrongAttempts = 0;
@@ -444,7 +452,7 @@
 		}
 		if (phase === 'pending' && hintLevel > 0) {
 			const hints = correctEdges.length > 0 ? correctEdges : correctEdge ? [correctEdge] : [];
-			const firstEver = !!currentCard && !currentCard.lastReview;
+			const firstEver = !!currentCard && !currentCard.lastReview && !currentIsMistakeReview;
 			const multiMove = hints.length > 1;
 			const showArrows = !multiMove || firstEver;
 			if (showArrows) {
@@ -710,7 +718,7 @@
 	function showHint() {
 		if (phase !== 'pending') return;
 		if (hintSuppressed) return;
-		if (hintLevel === 0 && currentCard && !currentCard.lastReview) {
+		if (hintLevel === 0 && currentCard && !currentCard.lastReview && !currentIsMistakeReview) {
 			hintLevel = 2;
 			return;
 		}
@@ -744,6 +752,7 @@
 
 		const isLineWalkStep = seg.mode === 'due' && !seg.dueOriginalKeys.has(ratedCard.fenKey);
 		const lineWalkMode = isLineWalkSegment(entry.segIdx);
+		const isMistakeReviewMode = seg.mode === 'mistakes' || seg.mode === 'retrain';
 
 		const isIntroductionPass =
 			!ratedCard.lastReview &&
@@ -752,7 +761,11 @@
 			!isLineWalkStep &&
 			!lineWalkMode;
 
-		if (!isLineWalkStep) {
+		// Mistake-review is pure practice: it doesn't touch the FSRS schedule.
+		// Drilling a missed-in-game position shouldn't shorten the next due
+		// date or count as a Good rating against a card the user may not have
+		// seen in normal review yet.
+		if (!isLineWalkStep && !isMistakeReviewMode) {
 			const updated = reviewCard(ratedCard, outcomeToRating(outcome), settings.fsrsParams);
 			await upsertCard(updated);
 		}
