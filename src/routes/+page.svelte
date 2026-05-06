@@ -60,7 +60,15 @@
 			const accounts = collectAccountsFromSettings(settings);
 			if (accounts.length === 0) return;
 			const { saveSettings } = await import('$lib/storage/settings');
-			const since = settings.lastScannedGameAt ? settings.lastScannedGameAt + 1 : undefined;
+			// Combine the incremental anchor (newest game we've already seen)
+			// with the user's global Game-query-window setting. Whichever is
+			// later wins — so a user who sets `gamesSince` to clip out an old
+			// style era doesn't get those games re-included on the next visit.
+			const incremental = settings.lastScannedGameAt ? settings.lastScannedGameAt + 1 : undefined;
+			const since =
+				incremental != null && settings.gamesSince != null
+					? Math.max(incremental, settings.gamesSince)
+					: (incremental ?? settings.gamesSince);
 			const result = await scanAllAccounts(settings, {
 				maxGamesPerAccount: 50,
 				rated: true,

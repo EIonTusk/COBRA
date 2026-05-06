@@ -83,6 +83,7 @@
 				token,
 				source,
 				rated: ratedOnly ? true : undefined,
+				since: settings.gamesSince,
 				signal: controller.signal,
 				onProgress: (s, f) => {
 					scanStatus = `Scanned ${s} games · ${f} deviations detected`;
@@ -192,6 +193,21 @@
 		/>
 		<span>Rated only</span>
 	</label>
+
+	{#if settings?.gamesSince != null}
+		<p class="mt-2 font-mono text-[11px] text-[var(--color-parchment-500)]">
+			Skipping games before {new Date(settings.gamesSince).toLocaleDateString(undefined, {
+				year: 'numeric',
+				month: 'short',
+				day: 'numeric'
+			})} ·
+			<a
+				href={resolve('/settings#games-since')}
+				class="underline decoration-[var(--color-parchment-500)]/60 underline-offset-2 hover:text-[var(--color-parchment-200)]"
+				>change</a
+			>
+		</p>
+	{/if}
 
 	{#if error}
 		<p class="mt-4 text-sm text-[var(--color-oxblood-300)]">{error}</p>

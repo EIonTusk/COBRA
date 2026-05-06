@@ -63,12 +63,16 @@ function computeScanHash(opts: DossierScanStartOpts): string {
 		.sort()
 		.join('|');
 	const useServerEval = opts.settings.useLichessServerEval !== false;
+	// Include the since-cutoff so a checkpoint produced under one window
+	// can't be silently rehydrated under a different one.
+	const since = opts.settings.gamesSince ?? 0;
 	return [
 		'v1',
 		`acc=${accountKey}`,
 		`max=${opts.maxGamesPerAccount}`,
 		`depth=${opts.evalDepth}`,
-		`server=${useServerEval ? 1 : 0}`
+		`server=${useServerEval ? 1 : 0}`,
+		`since=${since}`
 	].join(';');
 }
 
@@ -213,6 +217,7 @@ class DossierScanStore {
 			const r = await scanDossierAcrossAccounts(opts.settings, {
 				maxGamesPerAccount: opts.maxGamesPerAccount,
 				rated: true,
+				since: opts.settings.gamesSince,
 				accountsOverride: opts.accountsOverride,
 				useServerEval: opts.settings.useLichessServerEval !== false,
 				signal: this.#controller.signal,

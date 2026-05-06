@@ -34,6 +34,12 @@ export interface AuditScope {
 	evalDepth: number;
 	dateFrom: number | null;
 	dateTo: number | null;
+	/**
+	 * The user-set "games since" cutoff at scan time, or null if the scan
+	 * was unbounded. Distinguishes "earliest game = X because we hit the
+	 * cap" from "earliest game = X because the user excluded older play".
+	 */
+	sinceCutoff: number | null;
 	baselineSource: string;
 	baselineBucket: string | null;
 }
@@ -84,6 +90,7 @@ export function buildAuditSummary(result: DossierScanResult): AuditSummary {
 		evalDepth: result.evalDepth ?? 14,
 		dateFrom,
 		dateTo,
+		sinceCutoff: result.sinceCutoff ?? null,
 		baselineSource: baseline.source,
 		baselineBucket: baseline.bucket
 			? `${baseline.bucket.bucket ?? 'any'} · ${baseline.bucket.ratingMin}–${baseline.bucket.ratingMax} (${baseline.bucket.games} games)`

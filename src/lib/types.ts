@@ -206,6 +206,15 @@ export interface AppSettings {
 	 */
 	scanAccounts?: ScanAccount[];
 	/**
+	 * Lower bound (ms since epoch) applied to every game-querying scan —
+	 * mistakes, dossier, opponent prep, autobuild. Useful when the player's
+	 * recent games stop being representative: returning after a long break,
+	 * a sharp rating jump, a deliberate style shift. Empty / undefined =
+	 * no cutoff (keep the last-N behaviour). Lichess passes this server-side
+	 * as `since=<ms>`; chess.com filters client-side after fetching.
+	 */
+	gamesSince?: number;
+	/**
 	 * When true, the dossier review asks Lichess for per-move `%eval`
 	 * annotations and adopts them wherever Fishnet has analysed the game.
 	 * Adopted moves skip the local Stockfish pass — faster and typically

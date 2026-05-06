@@ -27,7 +27,7 @@
 	import TensionManagementCard from './TensionManagementCard.svelte';
 	import FindingExhibits from './FindingExhibits.svelte';
 	import StudyPlanSection from './StudyPlanSection.svelte';
-	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
+	import { getSettings, effectiveLichessToken, saveSettings } from '$lib/storage/settings';
 	import { analyseEvalAxes, type EvalAxesSummary } from '$lib/dossier/evalAxes';
 	import { interpretEvalAxes } from '$lib/dossier/evalInterpreter';
 	import { buildScorecard } from '$lib/dossier/scorecard';
@@ -364,6 +364,23 @@
 		const added = await saveMistakes(rows);
 		savedLeakIds = new Set([...savedLeakIds, ...result.leaks.worst.map(leakRowId)]);
 		saveAllStatus = `Saved ${rows.length} drill${rows.length === 1 ? '' : 's'} (${added} new) to "${rep.name}".`;
+	}
+
+	/**
+	 * Persist a new "games since" cutoff to settings so it propagates to
+	 * mistakes / opponent prep / autobuild too. Update the in-memory
+	 * `settings` ref on the way out so subsequent scan launches and the
+	 * inline display reflect the change without a page reload.
+	 */
+	async function onGamesSinceChange(next: number | undefined) {
+		if (!settings) return;
+		const updated: AppSettings = { ...settings, gamesSince: next };
+		settings = updated;
+		try {
+			await saveSettings(JSON.parse(JSON.stringify(updated)));
+		} catch (e) {
+			console.warn('[dossier] failed to persist gamesSince:', e);
+		}
 	}
 
 	async function run() {
@@ -955,10 +972,12 @@
 					{accountByValue}
 					{maxGames}
 					{evalDepth}
+					gamesSince={settings?.gamesSince}
 					{running}
 					onSelectAccounts={(next) => (selectedAccountKeys = next)}
 					onMaxGamesChange={(n) => (maxGames = n)}
 					onDepthChange={(d) => (evalDepth = d)}
+					{onGamesSinceChange}
 					onRun={run}
 					onSecondary={discardReport}
 					primaryLabel="Generate new report"
@@ -974,10 +993,12 @@
 			{accountByValue}
 			{maxGames}
 			{evalDepth}
+			gamesSince={settings?.gamesSince}
 			{running}
 			onSelectAccounts={(next) => (selectedAccountKeys = next)}
 			onMaxGamesChange={(n) => (maxGames = n)}
 			onDepthChange={(d) => (evalDepth = d)}
+			{onGamesSinceChange}
 			onRun={run}
 			onSecondary={() => dossierScan.cancel()}
 			primaryLabel="Scan"

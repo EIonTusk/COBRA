@@ -76,6 +76,7 @@
 				ourColor: selectedRep.color,
 				maxGames,
 				rated: ratedOnly ? true : undefined,
+				since: settings.gamesSince,
 				token,
 				signal: controller.signal,
 				rep: {

@@ -27,6 +27,8 @@ export interface ChesscomBuildOpts {
 	username: string;
 	/** Hard cap on chess.com games streamed for aggregation. */
 	maxGames?: number;
+	/** Skip games played before this timestamp (ms since epoch). */
+	since?: number;
 	/** Fan-out at opponent-to-move positions. 1 = mainline only. */
 	opponentFanout?: number;
 	signal?: AbortSignal;
@@ -78,6 +80,7 @@ export async function buildFromChesscom(opts: ChesscomBuildOpts): Promise<Chessc
 	const stats = new Map<string, Map<string, MoveStats>>();
 	for await (const game of streamChesscomGames(opts.username, {
 		max: maxGames,
+		since: opts.since,
 		signal: opts.signal
 	})) {
 		if (opts.signal?.aborted) break;

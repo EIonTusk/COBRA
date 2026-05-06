@@ -79,6 +79,14 @@
 			<dt class="text-[var(--color-parchment-500)]">Date range</dt>
 			<dd class="mt-0.5 font-mono text-[var(--color-parchment-100)]">
 				{formatDateShort(audit.scope.dateFrom)} → {formatDateShort(audit.scope.dateTo)}
+				{#if audit.scope.sinceCutoff != null}
+					<span
+						class="text-[var(--color-parchment-500)]"
+						title="Older games were excluded by the user-set Game query window"
+					>
+						· cutoff {formatDateShort(audit.scope.sinceCutoff)}
+					</span>
+				{/if}
 			</dd>
 		</div>
 		<div>
