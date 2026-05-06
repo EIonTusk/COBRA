@@ -23,6 +23,7 @@
 	import {
 		Button,
 		DashboardBacklink,
+		DatePicker,
 		Input,
 		Label,
 		MultiSelect,
@@ -117,6 +118,11 @@
 		settings.scanAccounts = (settings.scanAccounts ?? []).filter(
 			(a) => !(a.source === account.source && a.username === account.username)
 		);
+	}
+
+	function onGamesSinceChange(next: number | undefined) {
+		if (!settings) return;
+		settings.gamesSince = next;
 	}
 
 	interface DisplayedScanAccount extends ScanAccount {
@@ -802,6 +808,35 @@
 					>
 						Add
 					</Button>
+				</div>
+			</section>
+
+			<Separator />
+
+			<!-- Game query window — global since-date applied to every scan
+			     that pulls games (mistakes, dossier, opponent prep, autobuild
+			     chess.com). Useful when recent games stop being representative:
+			     return after a long break, sharp rating change, deliberate
+			     style shift. -->
+			<section id="games-since" class="scroll-mt-24" style:--i="4b2">
+				<div class="mb-4 flex items-baseline gap-3">
+					<h2 class="font-serif text-2xl">Game query window</h2>
+					<span class="eyebrow text-[var(--color-parchment-500)]">Since date</span>
+				</div>
+				<p class="mb-4 max-w-md font-serif text-sm text-[var(--color-parchment-400)] italic">
+					Skip games played before this date in every scan — mistakes, dossier, opponent prep,
+					autobuild. Set this when your recent play stops being representative: returning after a
+					break, a rating jump, or a deliberate style shift. Leave empty to scan as far back as the
+					per-scan game cap allows.
+				</p>
+
+				<div class="max-w-xs">
+					<Label for="games-since-input">Since</Label>
+					<DatePicker
+						id="games-since-input"
+						value={settings.gamesSince}
+						onchange={onGamesSinceChange}
+					/>
 				</div>
 			</section>
 

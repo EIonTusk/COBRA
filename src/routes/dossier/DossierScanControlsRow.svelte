@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Button, Label, Select } from '$lib/ui';
+	import { Button, DatePicker, Label, Select } from '$lib/ui';
 	import DossierAccountSelector from './DossierAccountSelector.svelte';
 	import type { AccountOption } from './DossierAccountSelector.svelte';
 	import type { ScanAccount } from '$lib/types';
@@ -24,10 +24,16 @@
 		accountByValue: Map<string, ScanAccount>;
 		maxGames: number;
 		evalDepth: number;
+		/** Global since-date in ms-epoch from AppSettings, or undefined for
+		 *  "no cutoff". The control reads from and writes back to this value
+		 *  via `onGamesSinceChange` — edits here propagate to settings so
+		 *  every other scan picks up the same cutoff. */
+		gamesSince: number | undefined;
 		running: boolean;
 		onSelectAccounts: (next: string[]) => void;
 		onMaxGamesChange: (next: number) => void;
 		onDepthChange: (next: number) => void;
+		onGamesSinceChange: (next: number | undefined) => void;
 		onRun: () => void;
 		/** Optional secondary action — "Cancel" while running, "Discard" when on file. */
 		onSecondary?: () => void;
@@ -44,10 +50,12 @@
 		accountByValue,
 		maxGames,
 		evalDepth,
+		gamesSince,
 		running,
 		onSelectAccounts,
 		onMaxGamesChange,
 		onDepthChange,
+		onGamesSinceChange,
 		onRun,
 		onSecondary,
 		primaryLabel,
@@ -92,6 +100,14 @@
 				max="500"
 				class="h-10 w-24 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 font-sans text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-ink-600)] focus:border-[var(--color-brass-300)] focus:ring-[3px] focus:ring-[var(--color-brass-300)]/15 focus:outline-none"
 			/>
+		</label>
+		<label class="inline-flex items-center gap-2">
+			<span
+				class="text-[var(--color-parchment-400)]"
+				title="Skip games played before this date. Empty = scan as far back as the per-account cap allows. Saved globally — applies to mistakes and other scans too."
+				>Since</span
+			>
+			<DatePicker value={gamesSince} onchange={onGamesSinceChange} class="w-44" />
 		</label>
 		<label class="inline-flex items-center gap-2">
 			<span
@@ -156,6 +172,15 @@
 				max="500"
 				class="h-10 w-20 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 font-sans text-sm text-[var(--color-parchment-100)] transition-colors hover:border-[var(--color-ink-600)] focus:border-[var(--color-brass-300)] focus:ring-[3px] focus:ring-[var(--color-brass-300)]/15 focus:outline-none"
 			/>
+		</label>
+		<label class="flex flex-col gap-1 text-sm">
+			<span
+				class="cursor-help text-[var(--color-parchment-400)] underline decoration-[var(--color-parchment-500)]/60 decoration-dotted underline-offset-2"
+				title="Skip games played before this date. Empty = scan as far back as the per-account cap allows. Saved globally — applies to mistakes and other scans too."
+			>
+				Since
+			</span>
+			<DatePicker value={gamesSince} onchange={onGamesSinceChange} class="w-44" />
 		</label>
 		<label class="flex flex-col gap-1 text-sm">
 			<span

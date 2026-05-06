@@ -102,6 +102,14 @@ export interface DossierScanResult {
 	 * existed — consumers should default to 14 in that case.
 	 */
 	evalDepth?: number;
+	/**
+	 * The "games played since" cutoff (ms since epoch) that was active for
+	 * this scan. Recorded so the saved report can render a methodology
+	 * note explaining why older games are absent ("Since cutoff: 2026-01-01")
+	 * — without it the user can't tell whether the early date was hit by
+	 * the cap or by the cutoff. Undefined when no cutoff was set.
+	 */
+	sinceCutoff?: number;
 }
 
 export async function scanDossierAcrossAccounts(
@@ -241,6 +249,7 @@ export async function scanDossierAcrossAccounts(
 		perAccount,
 		evalAxes,
 		evalError,
-		evalDepth: evalAxes ? effectiveDepth : undefined
+		evalDepth: evalAxes ? effectiveDepth : undefined,
+		sinceCutoff: opts.since
 	};
 }

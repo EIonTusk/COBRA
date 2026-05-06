@@ -394,6 +394,7 @@
 					depth,
 					username: playerHandle,
 					maxGames: chesscomMaxGames,
+					since: settings.gamesSince,
 					opponentFanout,
 					signal: controller.signal,
 					onProgress: (p: ChesscomBuildProgress) => {

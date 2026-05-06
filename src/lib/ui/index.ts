@@ -6,6 +6,7 @@ export { default as SourceIcon } from './SourceIcon.svelte';
 export { default as DashboardBacklink } from './DashboardBacklink.svelte';
 export { default as MultiSelect } from './MultiSelect.svelte';
 export { default as Select } from './Select.svelte';
+export { default as DatePicker } from './DatePicker.svelte';
 export { default as ConfirmDialog } from './ConfirmDialog.svelte';
 export { confirmDialog, type ConfirmOptions } from './confirm';
 export { default as Toaster } from './Toaster.svelte';
