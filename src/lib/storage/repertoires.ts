@@ -1,6 +1,7 @@
 import { getDB } from './db';
 import type { Repertoire, Color, RepertoireNode, LichessStudyLink } from '$lib/types';
 import { STARTPOS_FEN, fenKeyFromFen } from '$lib/chess/fen';
+import { markRepDirty } from '$lib/sync/dirtyMark';
 
 export async function listRepertoires(): Promise<Repertoire[]> {
 	const db = await getDB();
@@ -40,6 +41,7 @@ export async function createRepertoire(
 	};
 	await tx.objectStore('nodes').put(rootNode);
 	await tx.done;
+	markRepDirty(rep.id);
 	return rep;
 }
 
@@ -49,6 +51,7 @@ export async function touchRepertoire(id: string): Promise<void> {
 	if (!rep) return;
 	rep.updatedAt = Date.now();
 	await db.put('repertoires', rep);
+	markRepDirty(id);
 }
 
 export async function renameRepertoire(id: string, name: string): Promise<void> {
@@ -58,6 +61,7 @@ export async function renameRepertoire(id: string, name: string): Promise<void> 
 	rep.name = name.trim() || rep.name;
 	rep.updatedAt = Date.now();
 	await db.put('repertoires', rep);
+	markRepDirty(id);
 }
 
 export async function setCoverageGoal(id: string, goal: number | null): Promise<void> {
@@ -68,6 +72,7 @@ export async function setCoverageGoal(id: string, goal: number | null): Promise<
 	rep.coverageSnapshot = null;
 	rep.updatedAt = Date.now();
 	await db.put('repertoires', JSON.parse(JSON.stringify(rep)));
+	markRepDirty(id);
 }
 
 export async function saveCoverageSnapshot(
@@ -80,6 +85,7 @@ export async function saveCoverageSnapshot(
 	rep.coverageSnapshot = snapshot ?? null;
 	rep.updatedAt = Date.now();
 	await db.put('repertoires', JSON.parse(JSON.stringify(rep)));
+	markRepDirty(id);
 }
 
 export async function setStartingPosition(
@@ -92,6 +98,7 @@ export async function setStartingPosition(
 	rep.startingFenKey = fenKey ?? undefined;
 	rep.updatedAt = Date.now();
 	await db.put('repertoires', JSON.parse(JSON.stringify(rep)));
+	markRepDirty(id);
 }
 
 export async function setLichessStudyLink(
@@ -104,6 +111,7 @@ export async function setLichessStudyLink(
 	rep.lichessStudy = link;
 	rep.updatedAt = Date.now();
 	await db.put('repertoires', JSON.parse(JSON.stringify(rep)));
+	markRepDirty(id);
 }
 
 export async function deleteRepertoire(id: string): Promise<void> {
@@ -115,4 +123,5 @@ export async function deleteRepertoire(id: string): Promise<void> {
 	const cardKeys = await tx.objectStore('cards').index('by-repertoire').getAllKeys(id);
 	for (const key of cardKeys) await tx.objectStore('cards').delete(key);
 	await tx.done;
+	markRepDirty(id);
 }

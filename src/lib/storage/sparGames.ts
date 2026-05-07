@@ -9,10 +9,12 @@
 
 import { ensureStore } from './db';
 import type { SparGame } from '$lib/types';
+import { markRepDirty } from '$lib/sync/dirtyMark';
 
 export async function upsertSparGame(game: SparGame): Promise<void> {
 	const db = await ensureStore('spar_games');
 	await db.put('spar_games', JSON.parse(JSON.stringify(game)));
+	markRepDirty(game.repertoireId);
 }
 
 export async function getSparGame(id: string): Promise<SparGame | null> {
@@ -41,7 +43,9 @@ export async function listPendingSparGames(): Promise<SparGame[]> {
 
 export async function deleteSparGame(id: string): Promise<void> {
 	const db = await ensureStore('spar_games');
+	const existing = await db.get('spar_games', id);
 	await db.delete('spar_games', id);
+	if (existing) markRepDirty(existing.repertoireId);
 }
 
 /**

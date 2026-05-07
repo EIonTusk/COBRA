@@ -9,6 +9,7 @@
 import type { ClassifiedGame } from '$lib/dossier/classify';
 import type { Color } from '$lib/types';
 import { ensureStore, type StoredMastersBaseline } from './db';
+import { markGlobalDirty } from '$lib/sync/dirtyMark';
 
 const MASTERS_BASELINE_VERSION = 1;
 
@@ -62,12 +63,14 @@ export async function saveMastersBaseline(
 		payload
 	};
 	await db.put('masters_baseline', row);
+	markGlobalDirty();
 }
 
 export async function clearMastersBaseline(): Promise<void> {
 	try {
 		const db = await ensureStore('masters_baseline');
 		await db.delete('masters_baseline', 'latest');
+		markGlobalDirty();
 	} catch {
 		/* best-effort */
 	}

@@ -11,6 +11,7 @@
 
 import { getDB } from './db';
 import type { PositionWdlRow } from './db';
+import { markRepsDirty, markRepDirty } from '$lib/sync/dirtyMark';
 
 export type { PositionWdlRow };
 
@@ -90,6 +91,7 @@ export async function recordPositionWdlHits(hits: PositionWdlHit[]): Promise<num
 		modified += 1;
 	}
 	await tx.done;
+	if (modified > 0) markRepsDirty(hits.map((h) => h.repertoireId));
 	return modified;
 }
 
@@ -118,4 +120,5 @@ export async function clearPositionWdlForRepertoire(repertoireId: string): Promi
 	const rows = await tx.store.index('by-repertoire').getAllKeys(repertoireId);
 	for (const k of rows) await tx.store.delete(k);
 	await tx.done;
+	markRepDirty(repertoireId);
 }

@@ -9,6 +9,9 @@
 	import { ConfirmDialog, Toaster, toast } from '$lib/ui';
 	import ScanProgressBar from '$lib/dossier/ScanProgressBar.svelte';
 	import BaselineProgressBar from '$lib/dossier/BaselineProgressBar.svelte';
+	import SyncStatusPill from '$lib/sync/SyncStatusPill.svelte';
+	import SyncConflictModal from '$lib/sync/SyncConflictModal.svelte';
+	import { sync } from '$lib/sync/syncStore.svelte';
 	import { getSettings, saveSettings } from '$lib/storage/settings';
 	import { scanAllAccounts, collectAccountsFromSettings } from '$lib/lichess/mistakeScan';
 	import { applySoundSettings } from '$lib/ui/sounds';
@@ -311,6 +314,14 @@
 			applySoundSettings(s);
 			appearance.setBoard(s.boardTheme);
 			appearance.setPieces(s.pieceSet);
+			// Sync init + opportunistic background pull. Both no-op when sync
+			// is disabled or unconfigured.
+			void sync
+				.init()
+				.then(() => sync.maybePullOnLoad())
+				.catch((e) => {
+					console.warn('[cobra] sync init failed:', e);
+				});
 			const lastScan = s.lastMistakeScanAt ?? 0;
 			if (Date.now() - lastScan < AUTOSCAN_INTERVAL_MS) return;
 			if (collectAccountsFromSettings(s).length === 0) return;
@@ -434,6 +445,9 @@
 			<!-- Spacer on mobile so the New button sticks to the right. -->
 			<div class="flex-1 md:hidden"></div>
 
+			<!-- Sync status pill. Self-hides when sync is disabled. -->
+			<SyncStatusPill />
+
 			<!-- Theme toggle. Sits on the right of the header in all breakpoints. -->
 			<button
 				type="button"
@@ -539,6 +553,8 @@
 <BaselineProgressBar />
 
 <ConfirmDialog />
+
+<SyncConflictModal />
 
 <Toaster />
 

@@ -7,6 +7,7 @@
 
 import { getDB } from './db';
 import type { EmpiricalGap } from '$lib/types';
+import { markRepsDirty } from '$lib/sync/dirtyMark';
 
 export interface GapHit {
 	repertoireId: string;
@@ -48,17 +49,26 @@ export async function recordGapHits(hits: GapHit[]): Promise<number> {
 		const existing = await tx.store.get(id);
 		const newGameIds = new Set(batchHits.map((h) => h.gameId));
 		if (existing) {
-			// Only count games we haven't counted before. `lastGameId` alone
-			// isn't perfect dedup but batches in practice are small and
-			// ordered; we also guard against the trivially-repeated case.
-			if (existing.lastGameId && newGameIds.has(existing.lastGameId)) {
-				newGameIds.delete(existing.lastGameId);
+			// Migrate pre-v2 rows that only carried `lastGameId`. New batch
+			// IDs already in the persisted set are dedup'd here so we never
+			// double-count, regardless of which device first saw the game.
+			const counted = new Set(
+				existing.gameIds ?? (existing.lastGameId ? [existing.lastGameId] : [])
+			);
+			for (const id of [...newGameIds]) {
+				if (counted.has(id)) newGameIds.delete(id);
 			}
 			if (newGameIds.size === 0) continue;
+			for (const id of newGameIds) counted.add(id);
 			existing.count += newGameIds.size;
 			existing.lastSeenAt = latest.playedAt;
 			existing.lastGameId = latest.gameId;
 			existing.fen = latest.fen;
+			// Cap at the most recent 500 entries so the row stays small even
+			// for users whose scans accumulate over years; the trailing IDs
+			// stop being useful for dedup once they fall out of any future
+			// scan window anyway.
+			existing.gameIds = Array.from(counted).slice(-500);
 			await tx.store.put(existing);
 			modified += 1;
 		} else {
@@ -70,13 +80,15 @@ export async function recordGapHits(hits: GapHit[]): Promise<number> {
 				count: newGameIds.size,
 				firstSeenAt: latest.playedAt,
 				lastSeenAt: latest.playedAt,
-				lastGameId: latest.gameId
+				lastGameId: latest.gameId,
+				gameIds: Array.from(newGameIds).slice(-500)
 			};
 			await tx.store.put(row);
 			modified += 1;
 		}
 	}
 	await tx.done;
+	if (modified > 0) markRepsDirty(hits.map((h) => h.repertoireId));
 	return modified;
 }
 

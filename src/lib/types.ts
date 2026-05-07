@@ -100,6 +100,15 @@ export interface Edge {
 	toFenKey: string;
 	annotation?: string;
 	weight?: number;
+	/**
+	 * Wall-clock ms-since-epoch of the most recent write to this edge.
+	 * Populated by the storage layer on every mutation; used by the
+	 * sync v2 merge to break ties on `annotation`/`weight` collisions
+	 * across devices. Optional for back-compat with edges written before
+	 * the field existed — sync v2 treats missing values as "older than
+	 * any explicit timestamp" and lets a stamped row win.
+	 */
+	updatedAt?: number;
 }
 
 export interface RepertoireNode {
@@ -108,6 +117,13 @@ export interface RepertoireNode {
 	comment?: string;
 	nags?: number[];
 	children: Edge[];
+	/**
+	 * Wall-clock ms-since-epoch of the most recent write to this node's
+	 * own fields (`comment`/`nags`). Optional for back-compat — pre-v2
+	 * rows have no timestamp, so the merge treats them as "missing" and
+	 * yields to whichever side has an explicit one.
+	 */
+	updatedAt?: number;
 }
 
 export interface Card {
@@ -158,6 +174,28 @@ export interface LichessOAuthToken {
 export interface ScanAccount {
 	source: 'lichess' | 'chesscom';
 	username: string;
+}
+
+/**
+ * Multi-device sync settings. Off by default (beta). When enabled, COBRA
+ * mirrors local IDB state to a private "COBRA Sync" Lichess study, one
+ * chapter per repertoire plus one GLOBAL chapter for non-rep data.
+ *
+ * `studyId` is set on first-run setup. `deviceId` is generated once per
+ * device and embedded in pushed payloads so the conflict UI can name
+ * which other device wrote a competing version. `lastKnownRevisions`
+ * tracks the revision counter we expect to see for each chapter — a
+ * higher remote revision triggers the conflict prompt instead of a
+ * silent overwrite.
+ */
+export interface SyncSettings {
+	enabled: boolean;
+	studyId?: string;
+	deviceId?: string;
+	lastPushAt?: number;
+	lastPullAt?: number;
+	/** Map keyed by `'global'` or `'rep:<id>'` → last revision we wrote/read. */
+	lastKnownRevisions?: Record<string, number>;
 }
 
 export interface AppSettings {
@@ -257,6 +295,11 @@ export interface AppSettings {
 	 * the settings record small.
 	 */
 	viewedWalkthroughGames?: Array<{ id: string; viewedAt: number }>;
+	/**
+	 * Multi-device sync via private Lichess study (Beta). Off by default;
+	 * users opt in from Settings → Sync. See `SyncSettings`.
+	 */
+	sync?: SyncSettings;
 }
 
 export interface StoredMistake {
@@ -278,6 +321,16 @@ export interface StoredMistake {
 	status: 'pending' | 'corrected' | 'dismissed';
 	correctCount: number;
 	lastDrilledAt?: number;
+	/**
+	 * Wall-clock ms-since-epoch the row was last marked `dismissed`. Lets
+	 * the sync v2 merge break ties between a `dismissed` row on one device
+	 * and a `corrected` row on another by picking the more recent
+	 * deliberate action. Pre-v2 dismissed rows have no value here and
+	 * yield to any stamped row of either status. Cleared back to
+	 * `undefined` if a row is later un-dismissed (not a flow today, but
+	 * documented for the future).
+	 */
+	dismissedAt?: number;
 }
 
 /**
@@ -296,6 +349,15 @@ export interface EmpiricalGap {
 	firstSeenAt: number;
 	lastSeenAt: number;
 	lastGameId: string;
+	/**
+	 * Game IDs that have already been counted into `count`. Sync v2's
+	 * sum-merge uses the union of two devices' sets so overlapping scans
+	 * don't double-count. Capped at ~500 most-recent entries to keep the
+	 * row size bounded; older IDs fall off but `count` keeps the running
+	 * total. Optional for back-compat with rows written before the field
+	 * existed — the v2 merge treats missing values as `[lastGameId]`.
+	 */
+	gameIds?: string[];
 }
 
 export const DRILL_INTRO_MS: Record<DrillIntroSpeed, number> = {

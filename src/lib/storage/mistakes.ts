@@ -4,6 +4,7 @@ import { nodesMap } from './nodes';
 import { furthestNonBranchingFenKey, pathToFenKey } from '$lib/tree/traversal';
 import type { StoredMistake } from '$lib/types';
 import type { MistakeRecord } from '$lib/lichess/mistakes';
+import { markRepsDirty, markRepDirty } from '$lib/sync/dirtyMark';
 
 export function toStored(r: MistakeRecord, detectedAt = Date.now()): StoredMistake {
 	return {
@@ -50,6 +51,7 @@ export async function saveMistakes(mistakes: StoredMistake[]): Promise<number> {
 		}
 	}
 	await tx.done;
+	markRepsDirty(mistakes.map((m) => m.repertoireId));
 	return added;
 }
 
@@ -132,6 +134,7 @@ export async function markMistakeCorrected(id: string): Promise<void> {
 	m.correctCount += 1;
 	m.lastDrilledAt = Date.now();
 	await db.put('mistakes', m);
+	markRepDirty(m.repertoireId);
 }
 
 export async function markMistakeByPosition(repertoireId: string, fenKey: string): Promise<void> {
@@ -139,14 +142,17 @@ export async function markMistakeByPosition(repertoireId: string, fenKey: string
 	const matches = await db.getAllFromIndex('mistakes', 'by-repertoire', repertoireId);
 	const now = Date.now();
 	const tx = db.transaction('mistakes', 'readwrite');
+	let touched = false;
 	for (const m of matches) {
 		if (m.fenKey !== fenKey || m.status === 'corrected') continue;
 		m.status = 'corrected';
 		m.correctCount += 1;
 		m.lastDrilledAt = now;
 		await tx.store.put(m);
+		touched = true;
 	}
 	await tx.done;
+	if (touched) markRepDirty(repertoireId);
 }
 
 export async function dismissMistake(id: string): Promise<void> {
@@ -154,5 +160,7 @@ export async function dismissMistake(id: string): Promise<void> {
 	const m = await db.get('mistakes', id);
 	if (!m) return;
 	m.status = 'dismissed';
+	m.dismissedAt = Date.now();
 	await db.put('mistakes', m);
+	markRepDirty(m.repertoireId);
 }

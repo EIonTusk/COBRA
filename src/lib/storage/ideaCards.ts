@@ -1,6 +1,7 @@
 import { createEmptyCard } from 'ts-fsrs';
 import { getDB } from './db';
 import type { IdeaCard } from '$lib/types';
+import { markRepDirty } from '$lib/sync/dirtyMark';
 
 export async function getIdeaCard(
 	repertoireId: string,
@@ -13,11 +14,13 @@ export async function getIdeaCard(
 export async function upsertIdeaCard(card: IdeaCard): Promise<void> {
 	const db = await getDB();
 	await db.put('idea_cards', JSON.parse(JSON.stringify(card)));
+	markRepDirty(card.repertoireId);
 }
 
 export async function deleteIdeaCard(repertoireId: string, fenKey: string): Promise<void> {
 	const db = await getDB();
 	await db.delete('idea_cards', [repertoireId, fenKey]);
+	markRepDirty(repertoireId);
 }
 
 export async function listIdeaCards(repertoireId: string): Promise<IdeaCard[]> {
