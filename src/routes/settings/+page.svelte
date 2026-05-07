@@ -21,6 +21,7 @@
 		ALL_SCOPES
 	} from '$lib/lichess/oauth';
 	import {
+		Badge,
 		Button,
 		DashboardBacklink,
 		DatePicker,
@@ -31,8 +32,10 @@
 		SourceIcon,
 		SourceUsernameInput,
 		cn,
-		confirmDialog
+		confirmDialog,
+		toast
 	} from '$lib/ui';
+	import { sync } from '$lib/sync/syncStore.svelte';
 	import {
 		listStoredBaselines,
 		deleteStoredBaseline,
@@ -379,6 +382,118 @@
 		if ((e.metaKey || e.ctrlKey) && e.key === 's') {
 			e.preventDefault();
 			void save();
+		}
+	}
+
+	// --- Sync (Beta) -----------------------------------------------------
+	const syncEnabled = $derived(sync.enabled);
+	const syncStatus = $derived(sync.status);
+	const syncBusy = $derived(syncStatus === 'pulling' || syncStatus === 'pushing');
+	const syncLastPushAt = $derived(sync.lastPushAt);
+	const syncLastPullAt = $derived(sync.lastPullAt);
+	const syncStudyId = $derived(sync.studyId);
+	const syncDirtyCount = $derived(sync.dirty.size);
+	const syncError = $derived(sync.error);
+	let syncBusyLocal = $state(false);
+
+	const lichessReadyForSync = $derived.by(() => {
+		if (!settings) return false;
+		if (!tokenIsFresh(settings.lichessOAuth)) return false;
+		if (!tokenHasStudyScopes(settings.lichessOAuth)) return false;
+		return true;
+	});
+
+	function fmtAgo(ms: number | null): string {
+		if (!ms) return '—';
+		const delta = Date.now() - ms;
+		if (delta < 60_000) return 'just now';
+		if (delta < 60 * 60_000) return `${Math.floor(delta / 60_000)}m ago`;
+		if (delta < 24 * 60 * 60_000) return `${Math.floor(delta / (60 * 60_000))}h ago`;
+		try {
+			return new Date(ms).toLocaleDateString();
+		} catch {
+			return '—';
+		}
+	}
+
+	async function enableSync() {
+		if (!settings) return;
+		syncBusyLocal = true;
+		try {
+			// First: probe-only enable so we can tell whether remote already
+			// has data; we tear that probe down before deciding direction.
+			const { remoteHasData } = await sync.enable({ mode: 'fresh' }).catch(async (e) => {
+				// enable() with mode:'fresh' will push if remote is empty, but
+				// we want to ask the user before clobbering. So: if it failed
+				// purely on the probe step, surface the error; otherwise treat
+				// success as "first-run pushed up local data".
+				throw e;
+			});
+			if (remoteHasData) {
+				const useRemote = await confirmDialog({
+					title: 'Existing data on Lichess',
+					message:
+						'A COBRA Sync study with chapters already exists on Lichess. Pull that data down (replaces local), or overwrite the remote with this device?',
+					confirmLabel: 'Pull remote',
+					cancelLabel: 'Overwrite remote'
+				});
+				if (useRemote) {
+					await sync.pullAll();
+				} else {
+					await sync.pushAll();
+				}
+			}
+			settings = await getSettings();
+			savedSnapshot = JSON.stringify(settings);
+		} catch (e) {
+			toast.warn('Couldn’t enable sync', {
+				body: e instanceof Error ? e.message : String(e)
+			});
+		} finally {
+			syncBusyLocal = false;
+		}
+	}
+
+	async function disableSync() {
+		const ok = await confirmDialog({
+			title: 'Disable sync?',
+			message:
+				'Stops mirroring this device to your private Lichess study. The study and its data stay on Lichess — re-enable any time to resume. Use “Disconnect & forget” if you also want to wipe the Lichess copy.',
+			confirmLabel: 'Disable'
+		});
+		if (!ok) return;
+		await sync.disable();
+		settings = await getSettings();
+		savedSnapshot = JSON.stringify(settings);
+	}
+
+	async function disconnectAndForget() {
+		const ok = await confirmDialog({
+			title: 'Disconnect and forget?',
+			message:
+				'Stops sync AND deletes every COBRA-SYNC chapter from your Lichess study. The empty study itself stays — you can delete it on Lichess if you like. Local data is untouched.',
+			confirmLabel: 'Disconnect',
+			variant: 'destructive'
+		});
+		if (!ok) return;
+		syncBusyLocal = true;
+		try {
+			await sync.disconnectAndForget();
+			settings = await getSettings();
+			savedSnapshot = JSON.stringify(settings);
+		} finally {
+			syncBusyLocal = false;
+		}
+	}
+
+	async function syncNow() {
+		syncBusyLocal = true;
+		try {
+			await sync.syncNow();
+			settings = await getSettings();
+			savedSnapshot = JSON.stringify(settings);
+		} finally {
+			syncBusyLocal = false;
 		}
 	}
 </script>
@@ -1048,6 +1163,153 @@
 						<Button variant="ghost" size="sm" onclick={() => playIncorrect()}>Test error</Button>
 					</div>
 				</div>
+			</section>
+
+			<Separator />
+
+			<!-- Sync (Beta) section -->
+			<section id="sync" class="scroll-mt-24" style:--i="4d">
+				<div class="mb-4 flex items-baseline gap-3">
+					<h2 class="font-serif text-2xl">Sync</h2>
+					<Badge variant="brass">Beta</Badge>
+					<span class="eyebrow text-[var(--color-parchment-500)]">Multi-device</span>
+				</div>
+				<p class="mb-5 max-w-md font-serif text-sm text-[var(--color-parchment-400)] italic">
+					Mirror this device's repertoires, drill progress, mistakes, and dossier into a private
+					Lichess study. Sign in on another device with the same Lichess account, enable Sync there,
+					and the two stay in step. Off by default — your data only leaves this browser when you
+					turn it on.
+				</p>
+
+				{#if !lichessReadyForSync}
+					<div
+						class="ink-panel mb-4 p-4 font-serif text-sm leading-relaxed text-[var(--color-parchment-300)]"
+					>
+						Connect Lichess (above, with study scopes) before enabling Sync. The feature uses a
+						private study under your Lichess account as the storage backend — there's no separate
+						COBRA server.
+					</div>
+				{:else if !syncEnabled}
+					<div class="ink-panel mb-4 flex flex-wrap items-center justify-between gap-3 p-4">
+						<div class="flex-1">
+							<div class="eyebrow mb-1">Status</div>
+							<p class="font-serif text-sm text-[var(--color-parchment-400)] italic">
+								Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA
+								Sync".
+							</p>
+						</div>
+						<Button
+							variant="primary"
+							size="sm"
+							onclick={enableSync}
+							disabled={syncBusyLocal || syncBusy}
+						>
+							{syncBusyLocal ? 'Working…' : 'Enable Sync'}
+						</Button>
+					</div>
+				{:else}
+					<div class="ink-panel mb-4 grid gap-3 p-4">
+						<div class="grid grid-cols-2 gap-3 font-mono text-xs">
+							<div>
+								<div class="eyebrow mb-1">Last push</div>
+								<div class="text-[var(--color-parchment-200)]">
+									{fmtAgo(syncLastPushAt)}
+								</div>
+							</div>
+							<div>
+								<div class="eyebrow mb-1">Last pull</div>
+								<div class="text-[var(--color-parchment-200)]">
+									{fmtAgo(syncLastPullAt)}
+								</div>
+							</div>
+							<div>
+								<div class="eyebrow mb-1">Pending</div>
+								<div class="text-[var(--color-parchment-200)]">
+									{syncDirtyCount === 0 ? 'nothing dirty' : `${syncDirtyCount} pending`}
+								</div>
+							</div>
+							<div>
+								<div class="eyebrow mb-1">Study</div>
+								<div class="truncate text-[var(--color-parchment-200)]">
+									{#if syncStudyId}
+										<a
+											href="https://lichess.org/study/{syncStudyId}"
+											target="_blank"
+											rel="noopener"
+											class="text-[var(--color-brass-300)] underline underline-offset-2 hover:text-[var(--color-brass-200)]"
+											>{syncStudyId}</a
+										>
+									{:else}
+										—
+									{/if}
+								</div>
+							</div>
+						</div>
+						{#if syncError}
+							<p class="text-xs text-[var(--color-oxblood-300)]">{syncError}</p>
+						{/if}
+						<div class="flex flex-wrap gap-2">
+							<Button
+								variant="primary"
+								size="sm"
+								onclick={syncNow}
+								disabled={syncBusyLocal || syncBusy}
+							>
+								{syncBusyLocal || syncBusy ? 'Working…' : 'Sync now'}
+							</Button>
+							<Button
+								variant="outline"
+								size="sm"
+								onclick={disableSync}
+								disabled={syncBusyLocal || syncBusy}
+							>
+								Disable
+							</Button>
+							<Button
+								variant="ghost"
+								size="sm"
+								onclick={disconnectAndForget}
+								disabled={syncBusyLocal || syncBusy}
+							>
+								Disconnect &amp; forget
+							</Button>
+						</div>
+					</div>
+				{/if}
+
+				<details class="ink-panel p-4 font-serif text-sm text-[var(--color-parchment-400)]">
+					<summary
+						class="cursor-pointer text-[var(--color-parchment-200)] transition-colors hover:text-[var(--color-parchment-50)]"
+					>
+						What's actually synced, and what stays on this device?
+					</summary>
+					<ul class="mt-3 list-disc space-y-1 pl-5 italic">
+						<li>
+							Synced: repertoires, FSRS card progress, idea cards, mistakes, baselines, settings.
+						</li>
+						<li>
+							Not synced: Lichess token (stays device-local), explorer + opening name caches
+							(rebuild themselves), in-flight scan checkpoints, the latest dossier scan + masters
+							baseline (too large for Lichess study chapters — re-run a dossier scan on each device
+							to populate them locally).
+						</li>
+						<li>
+							Pulls merge per-record: the more recent review wins per card, edges union, mistake
+							status follows whichever side drilled-or-dismissed it more recently. Concurrent
+							same-day drilling on two devices doesn't lose progress on either side. The header pill
+							shows live sync activity.
+						</li>
+						<li>
+							If two devices push to the same chapter without one pulling first, the second push
+							gets a manual conflict prompt (pull / overwrite / cancel) — that's the only case the
+							merge can't resolve silently.
+						</li>
+						<li>
+							Data lives in a private Lichess study under your account. Lichess staff can see
+							private study contents. If that's a problem, don't enable this.
+						</li>
+					</ul>
+				</details>
 			</section>
 
 			<Separator />

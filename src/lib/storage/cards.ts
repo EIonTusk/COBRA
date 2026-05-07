@@ -1,5 +1,6 @@
 import { getDB } from './db';
 import type { Card } from '$lib/types';
+import { markRepDirty } from '$lib/sync/dirtyMark';
 
 export async function getCard(repertoireId: string, fenKey: string): Promise<Card | undefined> {
 	const db = await getDB();
@@ -9,11 +10,13 @@ export async function getCard(repertoireId: string, fenKey: string): Promise<Car
 export async function upsertCard(card: Card): Promise<void> {
 	const db = await getDB();
 	await db.put('cards', card);
+	markRepDirty(card.repertoireId);
 }
 
 export async function deleteCard(repertoireId: string, fenKey: string): Promise<void> {
 	const db = await getDB();
 	await db.delete('cards', [repertoireId, fenKey]);
+	markRepDirty(repertoireId);
 }
 
 export async function dueCards(
@@ -130,4 +133,5 @@ export async function resetAllFsrs(repertoireId: string): Promise<void> {
 		cursor = await cursor.continue();
 	}
 	await tx.done;
+	markRepDirty(repertoireId);
 }

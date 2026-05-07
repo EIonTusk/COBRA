@@ -1,5 +1,6 @@
 import { getDB } from './db';
 import type { RepertoireNode, Edge } from '$lib/types';
+import { markRepDirty } from '$lib/sync/dirtyMark';
 
 /**
  * Bulk-replace every node of `repertoireId` with the supplied parsed edges.
@@ -39,11 +40,12 @@ export async function replaceRepertoireTree(
 		return n;
 	};
 	ensure(rootFenKey);
+	const now = Date.now();
 	for (const { fromFenKey, edge, comment, nags } of edges) {
 		const parent = ensure(fromFenKey);
 		ensure(edge.toFenKey);
 		if (!parent.children.find((e) => e.toFenKey === edge.toFenKey)) {
-			parent.children.push({ ...edge });
+			parent.children.push({ ...edge, updatedAt: edge.updatedAt ?? now });
 		}
 		// Comments/nags on the edge live on the child node (the resulting
 		// position), matching how parseRepertoirePgn carries them over.
@@ -51,9 +53,11 @@ export async function replaceRepertoireTree(
 			const child = ensure(edge.toFenKey);
 			if (comment) child.comment = comment;
 			if (nags && nags.length > 0) child.nags = nags;
+			child.updatedAt = now;
 		}
 	}
 	for (const node of map.values()) {
+		node.updatedAt = node.updatedAt ?? now;
 		await nodes.put(JSON.parse(JSON.stringify(node)) as RepertoireNode);
 	}
 
@@ -72,6 +76,7 @@ export async function replaceRepertoireTree(
 	}
 
 	await tx.done;
+	markRepDirty(repertoireId);
 	return { fenKeys: liveKeys, edgeCount: edges.length };
 }
 
@@ -85,15 +90,23 @@ export async function getNode(
 
 export async function upsertNode(node: RepertoireNode): Promise<void> {
 	const db = await getDB();
-	await db.put('nodes', node);
+	const stamped: RepertoireNode = { ...node, updatedAt: Date.now() };
+	await db.put('nodes', stamped);
+	markRepDirty(node.repertoireId);
 }
 
 export async function ensureNode(repertoireId: string, fenKey: string): Promise<RepertoireNode> {
 	const db = await getDB();
 	const existing = await db.get('nodes', [repertoireId, fenKey]);
 	if (existing) return existing;
-	const fresh: RepertoireNode = { repertoireId, fenKey, children: [] };
+	const fresh: RepertoireNode = {
+		repertoireId,
+		fenKey,
+		children: [],
+		updatedAt: Date.now()
+	};
 	await db.put('nodes', fresh);
+	markRepDirty(repertoireId);
 	return fresh;
 }
 
@@ -105,23 +118,26 @@ export async function addEdge(
 	const db = await getDB();
 	const tx = db.transaction(['nodes'], 'readwrite');
 	const store = tx.objectStore('nodes');
+	const now = Date.now();
 	let parent = await store.get([repertoireId, fromFenKey]);
 	if (!parent) {
-		parent = { repertoireId, fenKey: fromFenKey, children: [] };
+		parent = { repertoireId, fenKey: fromFenKey, children: [], updatedAt: now };
 	}
 	let created = false;
 	if (!parent.children.find((e) => e.toFenKey === edge.toFenKey)) {
 		// Strip any $state proxies before the edge hits IDB — structuredClone
 		// (which IDB uses) can't clone Proxy objects and throws DataCloneError.
-		parent.children.push(JSON.parse(JSON.stringify(edge)) as Edge);
+		const stamped: Edge = { ...edge, updatedAt: edge.updatedAt ?? now };
+		parent.children.push(JSON.parse(JSON.stringify(stamped)) as Edge);
 		created = true;
 	}
 	await store.put(JSON.parse(JSON.stringify(parent)) as RepertoireNode);
 	const child = await store.get([repertoireId, edge.toFenKey]);
 	if (!child) {
-		await store.put({ repertoireId, fenKey: edge.toFenKey, children: [] });
+		await store.put({ repertoireId, fenKey: edge.toFenKey, children: [], updatedAt: now });
 	}
 	await tx.done;
+	markRepDirty(repertoireId);
 	return { created };
 }
 
@@ -134,7 +150,9 @@ export async function removeEdge(
 	const node = await db.get('nodes', [repertoireId, fromFenKey]);
 	if (!node) return;
 	node.children = node.children.filter((e) => e.toFenKey !== toFenKey);
+	node.updatedAt = Date.now();
 	await db.put('nodes', node);
+	markRepDirty(repertoireId);
 }
 
 export async function setNodeComment(
@@ -149,7 +167,9 @@ export async function setNodeComment(
 		children: []
 	};
 	node.comment = comment || undefined;
+	node.updatedAt = Date.now();
 	await db.put('nodes', node);
+	markRepDirty(repertoireId);
 }
 
 /**
@@ -176,7 +196,9 @@ export async function applyImportedNote(
 	};
 	if (hasComment) node.comment = note.comment;
 	if (hasNags) node.nags = note.nags;
+	node.updatedAt = Date.now();
 	await db.put('nodes', node);
+	markRepDirty(repertoireId);
 }
 
 export async function listNodes(repertoireId: string): Promise<RepertoireNode[]> {

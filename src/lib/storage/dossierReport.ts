@@ -10,6 +10,7 @@
  * are expected to validate before use.
  */
 import { ensureStore, type StoredDossierReport } from './db';
+import { markGlobalDirty } from '$lib/sync/dirtyMark';
 
 export type { StoredDossierReport };
 
@@ -88,11 +89,13 @@ export async function saveDossierReport(payload: unknown): Promise<void> {
 		version: DOSSIER_REPORT_VERSION,
 		payload: snapshot(payload)
 	});
+	markGlobalDirty();
 }
 
 export async function clearDossierReport(): Promise<void> {
 	const db = await ensureStore('style_reports');
 	await db.delete('style_reports', KEY);
+	markGlobalDirty();
 }
 
 function snapshot<T>(v: T): T {

@@ -16,6 +16,7 @@ import {
 	type BaselineCriticalMoments,
 	type BaselineClockSpend
 } from './db';
+import { markGlobalDirty } from '$lib/sync/dirtyMark';
 
 export type {
 	StoredBaselineBucket,
@@ -52,9 +53,11 @@ export async function listStoredBaselines(): Promise<StoredBaselineBucket[]> {
 export async function saveStoredBaseline(b: StoredBaselineBucket): Promise<void> {
 	const db = await ensureStore('baselines');
 	await db.put('baselines', b);
+	markGlobalDirty();
 }
 
 export async function deleteStoredBaseline(id: string): Promise<void> {
 	const db = await ensureStore('baselines');
 	await db.delete('baselines', id);
+	markGlobalDirty();
 }

@@ -2,8 +2,9 @@
 	import { SvelteSet, SvelteMap } from 'svelte/reactivity';
 	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
-	import { goto } from '$app/navigation';
+	import { goto, beforeNavigate } from '$app/navigation';
 	import { page } from '$app/state';
+	import { sync } from '$lib/sync/syncStore.svelte';
 	import { createEmptyCard } from 'ts-fsrs';
 	import {
 		ArrowLeft,
@@ -730,6 +731,16 @@
 				/* ignore */
 			}
 		};
+	});
+
+	// Auto-push this rep on edit-mode exit. Edit is the bulk-write phase, so
+	// "leaving the editor" is the natural save moment. Fire-and-forget — we
+	// don't block navigation, and the dirty mark sticks around if the push
+	// fails so the next debounced retry catches it. No-op when sync is off
+	// or the rep wasn't actually touched.
+	beforeNavigate(() => {
+		const id = rep?.id;
+		if (id) sync.flushOnExit(`rep:${id}`);
 	});
 
 	onMount(async () => {
