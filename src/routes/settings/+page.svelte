@@ -1285,12 +1285,13 @@
 					</summary>
 					<ul class="mt-3 list-disc space-y-1 pl-5 italic">
 						<li>
-							Synced: repertoires, FSRS card progress, idea cards, mistakes, dossier (latest),
-							baselines, masters baseline, settings.
+							Synced: repertoires, FSRS card progress, idea cards, mistakes, baselines, settings.
 						</li>
 						<li>
 							Not synced: Lichess token (stays device-local), explorer + opening name caches
-							(rebuild themselves), in-flight scan checkpoints.
+							(rebuild themselves), in-flight scan checkpoints, the latest dossier scan + masters
+							baseline (too large for Lichess study chapters — re-run a dossier scan on each device
+							to populate them locally).
 						</li>
 						<li>
 							Pulls merge per-record: the more recent review wins per card, edges union, mistake

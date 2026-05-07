@@ -29,8 +29,6 @@ import { listGapsForRepertoire } from '$lib/storage/empiricalGaps';
 import { listSparGames } from '$lib/storage/sparGames';
 import { listPositionWdlForRepertoire } from '$lib/storage/positionWdl';
 import { listStoredBaselines } from '$lib/storage/baselines';
-import { loadDossierReport } from '$lib/storage/dossierReport';
-import { loadMastersBaseline } from '$lib/storage/mastersBaseline';
 import type {
 	AppSettings,
 	Card,
@@ -124,28 +122,25 @@ export async function buildRepBundle(repertoireId: string): Promise<RepBundle | 
 	};
 }
 
+/**
+ * Build the global-slice bundle. The dossier report and masters baseline
+ * are deliberately *excluded* — both run into the hundreds of KB for
+ * users who've done a substantial scan, which trips Lichess's per-chapter
+ * PGN size limit. They're also fully regenerable by re-running the
+ * dossier scan on the receiving device, so the cost of skipping them is
+ * "the user runs a scan on each device" rather than data loss. See the
+ * Settings disclosure for the user-facing copy.
+ */
 export async function buildGlobalBundle(settings: AppSettings): Promise<GlobalBundle> {
-	const [baselines, dossier, masters] = await Promise.all([
-		listStoredBaselines(),
-		loadDossierReport(),
-		loadMastersBaseline()
-	]);
+	const baselines = await listStoredBaselines();
 	return {
 		version: BUNDLE_VERSION,
 		kind: 'global',
 		exportedAt: Date.now(),
 		settings: sanitizeSettingsForSync(settings),
 		baselines: clone(baselines),
-		dossierReport: dossier
-			? { savedAt: dossier.savedAt, version: dossier.version, payload: clone(dossier.payload) }
-			: null,
-		mastersBaseline: masters
-			? {
-					fetchedAt: masters.fetchedAt,
-					targetsHash: masters.targetsHash,
-					payload: clone({ games: masters.games, coverage: masters.coverage })
-				}
-			: null
+		dossierReport: null,
+		mastersBaseline: null
 	};
 }
 

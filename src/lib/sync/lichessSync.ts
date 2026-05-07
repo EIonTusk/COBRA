@@ -239,7 +239,23 @@ export async function pushBlob(
 	const pgn = wrapBlobAsPgn(blob, meta);
 	const chapterName =
 		meta.kind === 'rep' ? chapterNameForRep(meta.repId as string) : chapterNameForGlobal();
-	const created = await importPgnToStudy(token, studyId, pgn, chapterName);
+	// One-line size diagnostic so a "PGN too large" rejection surfaces
+	// which chapter and how big it was without the user having to dig.
+	console.log(`[sync] pushing ${chapterName}: blob=${blob.length} pgn=${pgn.length} bytes`);
+	let created;
+	try {
+		created = await importPgnToStudy(token, studyId, pgn, chapterName);
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		if (/too large/i.test(msg)) {
+			throw new Error(
+				`Sync chapter ${chapterName} is too large for Lichess (${pgn.length} bytes). ` +
+					'Try clearing scan history (mistakes / WDL data) for this repertoire on this device.',
+				{ cause: e }
+			);
+		}
+		throw e;
+	}
 	if (created.length === 0) {
 		throw new Error('Lichess accepted the import but returned no chapter ID.');
 	}
