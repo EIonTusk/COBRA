@@ -194,15 +194,32 @@ export async function importPgnToStudy(
 		throw new Error(`PGN import failed: HTTP ${res.status}${t ? ` — ${t.slice(0, 180)}` : ''}`);
 	}
 	// Response shape is an NDJSON stream of {chapter: {id, name}} or bare
-	// {id, name}; handle both permissively.
+	// {id, name}; handle both permissively. Read the body once into a
+	// string so a parse-yields-nothing case can surface the actual server
+	// payload — Lichess sometimes 200s with an empty / unexpected body
+	// (e.g. when the PGN had no movetext for it to chapterize) and we
+	// want the user-facing error to carry that detail rather than a
+	// generic "no chapter ID".
+	const rawBody = await res.text();
 	type Row = { chapter?: { id: string; name?: string }; id?: string; name?: string };
-	const rows = await parseNdjson<Row>(res);
 	const out: ImportedChapter[] = [];
-	for (const r of rows) {
+	for (const line of rawBody.split('\n')) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		let r: Row;
+		try {
+			r = JSON.parse(trimmed) as Row;
+		} catch {
+			continue;
+		}
 		const c = r.chapter ?? r;
 		if (c && typeof c === 'object' && typeof (c as { id?: string }).id === 'string') {
 			out.push({ id: (c as { id: string }).id, name: (c as { name?: string }).name });
 		}
+	}
+	if (out.length === 0) {
+		const snippet = rawBody.slice(0, 200).replace(/\s+/g, ' ').trim() || '(empty body)';
+		throw new Error(`Lichess accepted the import but produced no chapter. Response: ${snippet}`);
 	}
 	return out;
 }

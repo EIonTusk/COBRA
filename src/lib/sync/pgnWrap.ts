@@ -17,6 +17,10 @@
  *
  *     [Event "COBRA-SYNC:rep:9f8a"]
  *     [Site "https://cobra.chess/sync"]
+ *     [Date "????.??.??"]
+ *     [Round "?"]
+ *     [White "COBRA"]
+ *     [Black "Sync"]
  *     [Result "*"]
  *     [CobraKind "rep"]
  *     [CobraRepId "9f8a..."]      // omitted for kind="global"
@@ -26,11 +30,19 @@
  *     [CobraSchema "1"]
  *     [CobraBlobLen "12345"]      // length of the base64 payload, for sanity
  *
- *     { cobra-sync-v1:H4sIAA... } *
+ *     1. e4 { cobra-sync-v1:H4sIAA... } *
  *
  * The blank line between headers and movetext is required by the PGN spec.
- * The sentinel prefix `cobra-sync-v1:` lets the parser distinguish our
- * payloads from any other comment Lichess might inject.
+ * The Seven Tag Roster (Event/Site/Date/Round/White/Black/Result) is the
+ * minimum strict PGN parsers accept; Lichess's `import-pgn` endpoint
+ * silently produces zero chapters for blob-only PGNs that omit them.
+ *
+ * The body carries one dummy move (`1. e4`) so Lichess sees an actual
+ * game, not just an empty position with a comment — the latter chapterizes
+ * to nothing on Lichess's side. The blob lives as a post-move comment
+ * which round-trips cleanly through Lichess's PGN export. The sentinel
+ * prefix `cobra-sync-v1:` lets the parser distinguish our payloads from
+ * any other comment Lichess might inject.
  */
 
 export type SyncKind = 'rep' | 'global';
@@ -79,6 +91,10 @@ export function wrapBlobAsPgn(blob: string, meta: BlobMeta): string {
 	const headers: string[] = [
 		`[Event "${escapeHeader(event)}"]`,
 		`[Site "https://cobra.chess/sync"]`,
+		`[Date "????.??.??"]`,
+		`[Round "?"]`,
+		`[White "COBRA"]`,
+		`[Black "Sync"]`,
 		`[Result "*"]`,
 		`[CobraKind "${meta.kind}"]`
 	];
@@ -91,9 +107,11 @@ export function wrapBlobAsPgn(blob: string, meta: BlobMeta): string {
 	headers.push(`[CobraSchema "${meta.schema ?? CURRENT_SCHEMA}"]`);
 	headers.push(`[CobraBlobLen "${blob.length}"]`);
 
-	// PGN body: a single comment carrying the payload, then a result token.
-	// We keep this on one line so studies render it as an empty chapter.
-	const body = `{ ${PGN_BLOB_PREFIX}${blob} } *`;
+	// PGN body: one dummy move + the blob as a post-move comment, then a
+	// result token. The dummy move is what makes Lichess actually create a
+	// chapter — `import-pgn` silently returns no chapters for blob-only
+	// PGNs that don't have any movetext. See the file header for context.
+	const body = `1. e4 { ${PGN_BLOB_PREFIX}${blob} } *`;
 	return `${headers.join('\n')}\n\n${body}\n`;
 }
 
