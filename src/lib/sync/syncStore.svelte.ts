@@ -476,6 +476,7 @@ class SyncStore {
 		);
 		this.#rememberRevisionByKey(`rep:${repId}`, result.revision);
 		this.lastPushAt = result.pushedAt;
+		warnNearCap(result.totalChapters);
 		await this.#persistRevisions();
 	}
 
@@ -503,6 +504,7 @@ class SyncStore {
 		);
 		this.#rememberRevisionByKey('global', result.revision);
 		this.lastPushAt = result.pushedAt;
+		warnNearCap(result.totalChapters);
 		await this.#persistRevisions();
 	}
 
@@ -560,6 +562,33 @@ class SyncStore {
 
 function conflictDirtyKey(c: { kind: 'rep' | 'global'; repId?: string }): DirtyKey {
 	return c.kind === 'global' ? 'global' : (`rep:${c.repId as string}` as DirtyKey);
+}
+
+/**
+ * Surface a one-shot warning when the user's sync study is approaching
+ * Lichess's 64-chapter hard cap. The toast carries `dedupKey` so it stays
+ * out of the way after the first time it fires, even if the user keeps
+ * pushing. Stays silent when the count is unknown (cleanup pass failed)
+ * or comfortably below the threshold.
+ *
+ * Threshold of 50 leaves enough headroom (14 chapters) to act before a
+ * push would actually fail: deleting unused chapters on Lichess, archiving
+ * an unused rep, or — if/when the spill-on-cap path lands — auto-creating
+ * a secondary study.
+ */
+const NEAR_CAP_THRESHOLD = 50;
+
+function warnNearCap(total: number | undefined): void {
+	if (typeof total !== 'number') return;
+	if (total < NEAR_CAP_THRESHOLD) return;
+	const remaining = Math.max(0, 64 - total);
+	toast.warn('Sync study approaching Lichess chapter cap', {
+		body:
+			remaining === 0
+				? `The COBRA Sync study is at Lichess's 64-chapter limit. Future pushes will fail until you delete unused chapters on Lichess.`
+				: `${total}/64 chapters used. Pushes will start failing when you hit 64 — clean up unused chapters on Lichess to make room.`,
+		dedupKey: 'sync-near-cap'
+	});
 }
 
 /** Sum a per-chapter merge result into the running pull-aggregate. */

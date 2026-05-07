@@ -130,16 +130,34 @@ export async function findOrCreateSyncStudy(
  * and matching chapter blocks by `[Event "COBRA-SYNC:..."]`.
  */
 export async function listSyncChapters(token: string, studyId: string): Promise<SyncChapterRef[]> {
+	const { syncChapters } = await inspectStudy(token, studyId);
+	return syncChapters;
+}
+
+/**
+ * Single-fetch read of a study: returns both the COBRA-SYNC chapters
+ * (parsed) *and* the total chapter count (sync + non-sync). Counting
+ * the total lets the caller flag a near-cap warning before Lichess's
+ * 64-chapter hard limit actually fires; doing it in one fetch avoids
+ * a second round-trip from `listSyncChapters` when the caller wants
+ * both pieces (push cleanup, "near cap" probe).
+ */
+export async function inspectStudy(
+	token: string,
+	studyId: string
+): Promise<{ syncChapters: SyncChapterRef[]; totalChapters: number }> {
 	const pgn = await fetchStudyPgn(token, studyId);
-	const out: SyncChapterRef[] = [];
-	for (const block of splitPgnBlocks(pgn)) {
-		// The chapter ID lives in the [Site] header that Lichess injects.
+	const blocks = splitPgnBlocks(pgn);
+	const syncChapters: SyncChapterRef[] = [];
+	let totalChapters = 0;
+	for (const block of blocks) {
 		const siteMatch =
 			/\[Site\s+"https:\/\/lichess\.org\/study\/[a-zA-Z0-9]{8}\/([a-zA-Z0-9]{8})"\]/.exec(block);
 		if (!siteMatch) continue;
+		totalChapters += 1;
 		const meta = parseMetaFromPgn(block);
 		if (!meta) continue;
-		out.push({
+		syncChapters.push({
 			chapterId: siteMatch[1],
 			kind: meta.kind,
 			repId: meta.repId,
@@ -148,7 +166,7 @@ export async function listSyncChapters(token: string, studyId: string): Promise<
 			pushedAt: meta.pushedAt
 		});
 	}
-	return out;
+	return { syncChapters, totalChapters };
 }
 
 /**
@@ -177,6 +195,14 @@ export interface PushResult {
 	revision: number;
 	deviceId: string;
 	pushedAt: number;
+	/**
+	 * Total chapters in the study (sync + non-sync) right after this push,
+	 * read from the cleanup pass's existing `inspectStudy` call. Used by the
+	 * caller to surface a near-cap warning before Lichess's 64-chapter hard
+	 * limit fires. Undefined when the cleanup pass failed (the push itself
+	 * still succeeded — count just wasn't observed).
+	 */
+	totalChapters?: number;
 }
 
 /**
@@ -222,14 +248,18 @@ export async function pushBlob(
 	// Sweep older COBRA-SYNC chapters with the same kind/repId, except the
 	// one we just imported. If the user has somehow accumulated duplicates
 	// (a previous push that got interrupted between import and delete) we
-	// clean them all up here.
+	// clean them all up here. Same fetch also gives us the total chapter
+	// count so the caller can warn the user about the 64-chapter cap.
+	let totalChapters: number | undefined;
 	try {
-		const chapters = await listSyncChapters(token, studyId);
-		for (const c of chapters) {
+		const inspected = await inspectStudy(token, studyId);
+		totalChapters = inspected.totalChapters;
+		for (const c of inspected.syncChapters) {
 			if (c.chapterId === newChapterId) continue;
 			if (c.kind !== meta.kind) continue;
 			if (meta.kind === 'rep' && c.repId !== meta.repId) continue;
 			await deleteChapter(token, studyId, c.chapterId);
+			if (typeof totalChapters === 'number') totalChapters -= 1;
 		}
 	} catch {
 		/* best-effort cleanup; the new chapter is the canonical one */
@@ -239,7 +269,8 @@ export async function pushBlob(
 		chapterId: newChapterId,
 		revision: meta.revision,
 		deviceId: meta.deviceId,
-		pushedAt: meta.pushedAt
+		pushedAt: meta.pushedAt,
+		totalChapters
 	};
 }
 
