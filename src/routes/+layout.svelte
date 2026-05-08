@@ -11,6 +11,7 @@
 	import BaselineProgressBar from '$lib/dossier/BaselineProgressBar.svelte';
 	import SyncStatusPill from '$lib/sync/SyncStatusPill.svelte';
 	import SyncConflictModal from '$lib/sync/SyncConflictModal.svelte';
+	import UpdateBanner from '$lib/pwa/UpdateBanner.svelte';
 	import { sync } from '$lib/sync/syncStore.svelte';
 	import { getSettings, saveSettings } from '$lib/storage/settings';
 	import { scanAllAccounts, collectAccountsFromSettings } from '$lib/lichess/mistakeScan';
@@ -555,6 +556,8 @@
 <ConfirmDialog />
 
 <SyncConflictModal />
+
+<UpdateBanner />
 
 <Toaster />
 
