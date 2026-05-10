@@ -29,6 +29,8 @@
 	import { pathToFenKey, furthestNonBranchingFenKey } from '$lib/tree/traversal';
 	import { upsertCard, getCard } from '$lib/storage/cards';
 	import { upsertIdeaCard } from '$lib/storage/ideaCards';
+	import { getMiddlegameGuide } from '$lib/storage/middlegameGuides';
+	import { savedArrowsToShapes } from '$lib/middlegame/arrows';
 	import { markMistakeByPosition } from '$lib/storage/mistakes';
 	import { getEngine } from '$lib/stockfish/engine';
 	import { reviewCard, outcomeToRating, type DrillOutcome } from '$lib/fsrs/scheduler';
@@ -175,6 +177,16 @@
 	let ideaSegIdx = $state(-1);
 	let ideaIdx = $state(0);
 	let currentIdea = $state<IdeaCard | null>(null);
+
+	// Saved middle-game guide arrows for the current position. Loaded from
+	// IDB whenever the position or repertoire changes, gated on the
+	// `showMiddlegameGuides` flag in app settings. The flag defaults off so
+	// existing drill behaviour stays unchanged for users who haven't opted
+	// in. Painted as additional shapes via `boardShapes` (further filtered
+	// by phase + hintLevel to avoid colliding with the drill's own hints).
+	let mgGuideArrows = $state<DrawShape[]>([]);
+	let mgGuideFenKey: string | null = null;
+	let mgGuideRepId: string | null = null;
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Derived selectors
@@ -439,8 +451,55 @@
 		};
 	});
 
+	// Watch the displayed position and load any pinned middle-game guide
+	// from IDB. Cancels in-flight loads when the position changes again so
+	// fast-scrubbing doesn't paint a stale guide.
+	$effect(() => {
+		const fen = currentFen;
+		const rep = currentRep;
+		const enabled = settings.showMiddlegameGuides === true;
+		if (!enabled || !fen || !rep) {
+			if (mgGuideArrows.length > 0) mgGuideArrows = [];
+			mgGuideFenKey = null;
+			mgGuideRepId = null;
+			return;
+		}
+		let key: string;
+		try {
+			key = fenKeyFromFen(fen);
+		} catch {
+			return;
+		}
+		if (key === mgGuideFenKey && rep.id === mgGuideRepId) return;
+		mgGuideFenKey = key;
+		mgGuideRepId = rep.id;
+		let cancelled = false;
+		void getMiddlegameGuide(rep.id, key).then((g) => {
+			if (cancelled) return;
+			if (mgGuideFenKey !== key || mgGuideRepId !== rep.id) return;
+			mgGuideArrows = g ? savedArrowsToShapes(g.arrows) : [];
+		});
+		return () => {
+			cancelled = true;
+		};
+	});
+
 	const boardShapes = $derived.by<DrawShape[]>(() => {
 		const shapes: DrawShape[] = [];
+		// Saved guide arrows: paint them when the user is at a steady-state
+		// at this position (pending with no explicit hint, or just after a
+		// correct move). Skip during 'wrong' / 'refuted' so the red user-
+		// move arrow isn't competing with strategic blue/yellow hints, and
+		// skip when the drill itself is showing hint arrows so the green
+		// "play this" doesn't disappear under the strategic overlay.
+		const showGuide =
+			mgGuideArrows.length > 0 &&
+			settings.showMiddlegameGuides === true &&
+			phase !== 'wrong' &&
+			phase !== 'refuted' &&
+			!(phase === 'pending' && hintLevel > 0);
+		if (showGuide) shapes.push(...mgGuideArrows);
+
 		if (moveQuality && gradedSquare) {
 			shapes.push({
 				orig: gradedSquare,

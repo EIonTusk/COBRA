@@ -7,6 +7,7 @@ import type {
 	AppSettings,
 	StoredMistake,
 	EmpiricalGap,
+	SavedMiddlegameGuide,
 	SparGame
 } from '$lib/types';
 
@@ -297,13 +298,18 @@ export interface OpeningTrainerDB extends DBSchema {
 		key: string;
 		value: StoredPositionOpening;
 	};
+	middlegame_guides: {
+		key: [string, string];
+		value: SavedMiddlegameGuide;
+		indexes: { 'by-repertoire': string };
+	};
 }
 
 // IDB name kept as 'openingtrainer' (pre-COBRA-rename) so existing users'
 // repertoires and cards survive the rebrand. Renaming would create a
 // fresh empty DB and orphan their data.
 const DB_NAME = 'openingtrainer';
-const DB_VERSION = 17;
+const DB_VERSION = 18;
 const REQUIRED_STORES = [
 	'repertoires',
 	'nodes',
@@ -319,7 +325,8 @@ const REQUIRED_STORES = [
 	'spar_games',
 	'position_wdl',
 	'masters_baseline',
-	'position_openings'
+	'position_openings',
+	'middlegame_guides'
 ] as const;
 
 let dbPromise: Promise<IDBPDatabase<OpeningTrainerDB>> | null = null;
@@ -401,6 +408,12 @@ function ensureAllStores(db: IDBPDatabase<OpeningTrainerDB>) {
 	}
 	if (!has('position_openings')) {
 		db.createObjectStore('position_openings', { keyPath: 'fenKey' });
+	}
+	if (!has('middlegame_guides')) {
+		const mg = db.createObjectStore('middlegame_guides', {
+			keyPath: ['repertoireId', 'fenKey']
+		});
+		mg.createIndex('by-repertoire', 'repertoireId');
 	}
 }
 

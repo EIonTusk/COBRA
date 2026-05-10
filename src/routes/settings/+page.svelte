@@ -636,6 +636,30 @@
 					</div>
 				</label>
 
+				<label
+					class="mt-3 flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
+				>
+					<input
+						type="checkbox"
+						checked={settings.showMiddlegameGuides === true}
+						onchange={(e) =>
+							(settings!.showMiddlegameGuides = (e.currentTarget as HTMLInputElement).checked)}
+						class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
+					/>
+					<div class="min-w-0 flex-1">
+						<span class="font-serif text-sm text-[var(--color-parchment-100)]">
+							Show saved middle-game guide arrows in drill
+						</span>
+						<p
+							class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+						>
+							When you reach a position where you've pinned a middle-game guide in the editor, the
+							drill paints those arrows on the board. They auto-hide while a wrong move is being
+							refuted or while the drill is showing its own hint arrows so the two don't overlap.
+						</p>
+					</div>
+				</label>
+
 				<div
 					class="mt-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3"
 				>
