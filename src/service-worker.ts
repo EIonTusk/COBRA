@@ -24,12 +24,27 @@ precache.addToCacheList(self.__WB_MANIFEST ?? []);
 
 self.addEventListener('install', (event) => {
 	event.waitUntil(precache.install(event));
-	self.skipWaiting();
+	// No automatic skipWaiting: we want a freshly installed SW to sit in
+	// the waiting state so UpdateBanner.svelte can prompt the user and
+	// fire SKIP_WAITING on their command. The `controllerchange` listener
+	// in UpdateBanner reloads the page once we activate, which is what
+	// actually swaps the running JS bundle.
 });
 self.addEventListener('activate', (event) => {
 	event.waitUntil(precache.activate(event));
 	cleanupOutdatedCaches();
 	event.waitUntil(self.clients.claim());
+});
+
+// UpdateBanner sends `{ type: 'SKIP_WAITING' }` (via workbox-window's
+// `messageSkipWaiting()`) once the user accepts a pending update.
+// Calling skipWaiting moves the new SW from `waiting` to `activated` and
+// triggers `controllerchange` in the page, which reloads the tab.
+self.addEventListener('message', (event) => {
+	const data = event.data as { type?: string } | undefined;
+	if (data?.type === 'SKIP_WAITING') {
+		void self.skipWaiting();
+	}
 });
 
 /**
