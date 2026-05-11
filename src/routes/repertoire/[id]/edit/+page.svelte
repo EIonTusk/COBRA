@@ -8,6 +8,7 @@
 	import { createEmptyCard } from 'ts-fsrs';
 	import {
 		ArrowLeft,
+		BookOpen,
 		Bookmark,
 		Bot,
 		ChevronDown,
@@ -24,6 +25,7 @@
 		Save,
 		Star,
 		Target,
+		Trash2,
 		WifiOff,
 		X as XIcon
 	} from 'lucide-svelte';
@@ -65,6 +67,17 @@
 		type MissingMove
 	} from '$lib/tree/missing';
 	import { fetchExplorer } from '$lib/explorer/client';
+	import { generateMiddlegameGuide, type GenerateProgress } from '$lib/middlegame/generate';
+	import {
+		aggregateToArrows,
+		savedArrowsToShapes,
+		shapesToSavedArrows
+	} from '$lib/middlegame/arrows';
+	import {
+		deleteMiddlegameGuide,
+		getMiddlegameGuide,
+		upsertMiddlegameGuide
+	} from '$lib/storage/middlegameGuides';
 	import { fetchCloudEval, type CloudEval } from '$lib/lichess/cloudEval';
 	import {
 		challengeStockfishAi,
@@ -83,6 +96,7 @@
 		IdeaCard,
 		Repertoire,
 		RepertoireNode,
+		SavedMiddlegameGuide,
 		Edge
 	} from '$lib/types';
 	import { loadDossierReport } from '$lib/storage/dossierReport';
@@ -508,6 +522,10 @@
 
 	const boardShapes = $derived.by<DrawShape[]>(() => {
 		const shapes: DrawShape[] = [];
+		// Middle-game guide arrows are an explicit user action, so they paint
+		// regardless of the always-on hints toggle. Stack with the engine /
+		// explorer hints when both are showing.
+		if (mgActive) shapes.push(...mgArrows);
 		if (!boardHintsEnabled) return shapes;
 		if (engineByMultipv.size > 0) {
 			shapes.push(...engineHintShapes({ byMultipv: engineByMultipv }));
@@ -1773,6 +1791,203 @@
 		}
 	}
 
+	// Middle-game guide arrows. Two flows feed this state:
+	//   1. Generate-fresh — fetch top master games, walk them forward ~12
+	//      plies, aggregate into common continuations / pawn moves / piece
+	//      reroutings, paint as arrows.
+	//   2. Load-saved — if the user previously pinned a guide at this
+	//      position via the Save button, click loads instantly from IDB.
+	// In either case the result is the same `mgArrows` painted on the
+	// board. The drill renders the saved guide independently when its own
+	// flag is on.
+	const MG_PLIES = 12;
+	let mgBusy = $state(false);
+	let mgArrows = $state<DrawShape[]>([]);
+	let mgFenKey = $state<string | null>(null); // fenKey the arrows belong to
+	let mgGamesUsable = $state(0);
+	let mgOpeningName = $state<string | null>(null);
+	let mgError = $state<string | null>(null);
+	let mgProgress = $state<string | null>(null);
+	let mgErrorTimer: ReturnType<typeof setTimeout> | null = null;
+	// Tracks whether the *current* position has a guide pinned in IDB.
+	// Drives the button label ("Show saved" vs "Middle-game guide") and
+	// the conditional Save / Delete affordances under the action bar.
+	let mgSavedExists = $state(false);
+	let mgSavedCreatedAt = $state<number | null>(null);
+	let mgSaveBusy = $state(false);
+	// True when the arrows currently rendered came from IDB (load-saved
+	// flow). Drives whether the Save button is offered: there's no point
+	// re-saving an unmodified saved set.
+	let mgFromSaved = $state(false);
+
+	const mgActive = $derived(mgArrows.length > 0 && mgFenKey === currentFenKey);
+
+	// Auto-clear stale arrows when the user navigates to a different position:
+	// they applied to the position they were generated for, not this one.
+	$effect(() => {
+		if (mgFenKey && mgFenKey !== currentFenKey) {
+			mgArrows = [];
+			mgFenKey = null;
+			mgGamesUsable = 0;
+			mgFromSaved = false;
+		}
+	});
+
+	// Probe IDB on every position change so the button + save controls
+	// reflect what's pinned at the current fenKey. Don't auto-paint —
+	// loading is still gated on a deliberate click.
+	$effect(() => {
+		const repId = rep?.id;
+		const key = currentFenKey;
+		if (!repId || !key) {
+			mgSavedExists = false;
+			mgSavedCreatedAt = null;
+			return;
+		}
+		let cancelled = false;
+		void getMiddlegameGuide(repId, key).then((g) => {
+			if (cancelled) return;
+			mgSavedExists = !!g;
+			mgSavedCreatedAt = g?.createdAt ?? null;
+		});
+		return () => {
+			cancelled = true;
+		};
+	});
+
+	async function toggleMiddlegameGuide() {
+		if (mgBusy) return;
+		// Toggle off if currently showing for this position.
+		if (mgActive) {
+			mgArrows = [];
+			mgFenKey = null;
+			mgGamesUsable = 0;
+			mgFromSaved = false;
+			return;
+		}
+		if (!rep) return;
+		// Prefer the pinned guide if one exists — saved arrows are an
+		// explicit user choice that shouldn't be silently regenerated
+		// (and the save flow may have customised them down the line).
+		if (mgSavedExists) {
+			const saved = await getMiddlegameGuide(rep.id, currentFenKey);
+			if (saved) {
+				mgArrows = savedArrowsToShapes(saved.arrows);
+				mgFenKey = currentFenKey;
+				mgGamesUsable = saved.gamesUsable;
+				mgOpeningName = saved.openingName;
+				mgFromSaved = true;
+				return;
+			}
+		}
+		if (!settings) return;
+		const token = effectiveLichessToken(settings);
+		if (!token) {
+			mgError = 'No Lichess token configured. Paste one in Settings first.';
+			scheduleMgErrorClear();
+			return;
+		}
+		mgBusy = true;
+		mgError = null;
+		mgProgress = 'Fetching master games…';
+		const startedFenKey = currentFenKey;
+		try {
+			const result = await generateMiddlegameGuide({
+				fen: currentFen,
+				fenKey: currentFenKey,
+				token,
+				topGames: 15,
+				maxPlies: MG_PLIES,
+				onProgress: (p: GenerateProgress) => {
+					if (p.phase === 'explorer') mgProgress = 'Querying masters explorer…';
+					else if (p.phase === 'pgn') mgProgress = `Reading game ${p.current}/${p.total}…`;
+					else if (p.phase === 'aggregate') mgProgress = 'Aggregating patterns…';
+					else mgProgress = null;
+				}
+			});
+			// Drop the result if the user navigated away while we were fetching.
+			if (startedFenKey !== currentFenKey) return;
+			const arrows = aggregateToArrows(result.aggregate, { userColor: rep.color });
+			if (arrows.length === 0) {
+				mgError =
+					result.gamesUsable === 0
+						? 'No master games found from this position.'
+						: 'Patterns are too sparse to draw — try a more common position.';
+				scheduleMgErrorClear();
+				return;
+			}
+			mgArrows = arrows;
+			mgFenKey = currentFenKey;
+			mgGamesUsable = result.gamesUsable;
+			mgOpeningName = result.openingName;
+			mgFromSaved = false;
+		} catch (e) {
+			mgError = e instanceof Error ? e.message : 'Failed to generate guide.';
+			scheduleMgErrorClear();
+		} finally {
+			mgBusy = false;
+			mgProgress = null;
+		}
+	}
+
+	async function saveMiddlegameGuideToIDB() {
+		if (!rep || mgSaveBusy) return;
+		if (mgArrows.length === 0 || mgFenKey !== currentFenKey) return;
+		mgSaveBusy = true;
+		try {
+			const guide: SavedMiddlegameGuide = {
+				repertoireId: rep.id,
+				fenKey: currentFenKey,
+				arrows: shapesToSavedArrows(mgArrows),
+				gamesUsable: mgGamesUsable,
+				openingName: mgOpeningName,
+				createdAt: mgSavedCreatedAt ?? Date.now(),
+				updatedAt: Date.now()
+			};
+			await upsertMiddlegameGuide(guide);
+			mgSavedExists = true;
+			mgSavedCreatedAt = guide.createdAt;
+			mgFromSaved = true;
+		} catch (e) {
+			mgError = e instanceof Error ? e.message : 'Failed to save guide.';
+			scheduleMgErrorClear();
+		} finally {
+			mgSaveBusy = false;
+		}
+	}
+
+	async function deleteSavedMiddlegameGuide() {
+		if (!rep || mgSaveBusy || !mgSavedExists) return;
+		mgSaveBusy = true;
+		try {
+			await deleteMiddlegameGuide(rep.id, currentFenKey);
+			mgSavedExists = false;
+			mgSavedCreatedAt = null;
+			// If the rendered arrows came from this saved guide, also clear
+			// them from the board so the editor doesn't keep painting a
+			// guide that no longer exists.
+			if (mgFromSaved) {
+				mgArrows = [];
+				mgFenKey = null;
+				mgGamesUsable = 0;
+				mgFromSaved = false;
+			}
+		} catch (e) {
+			mgError = e instanceof Error ? e.message : 'Failed to delete guide.';
+			scheduleMgErrorClear();
+		} finally {
+			mgSaveBusy = false;
+		}
+	}
+
+	function scheduleMgErrorClear() {
+		if (mgErrorTimer) clearTimeout(mgErrorTimer);
+		mgErrorTimer = setTimeout(() => {
+			mgError = null;
+			mgErrorTimer = null;
+		}, 4000);
+	}
+
 	let lineCopied = $state(false);
 	let lineCopyTimer: ReturnType<typeof setTimeout> | null = null;
 	async function copyLine() {
@@ -2201,6 +2416,50 @@
 					class="hidden lg:inline-flex"
 					variant="secondary"
 					size="sm"
+					onclick={toggleMiddlegameGuide}
+					disabled={mgBusy || (!mgSavedExists && !tokenConfigured)}
+					title={mgActive
+						? 'Clear middle-game arrows'
+						: mgSavedExists
+							? 'Show the saved middle-game guide pinned at this position. The drill paints these too when "Show saved guides" is on.'
+							: tokenConfigured
+								? 'Aggregate ~12 plies of master games from this position and paint common continuations (green), pawn moves (yellow), and piece reroutings (blue) on the board.'
+								: 'Requires a Lichess connection — paste a token in Settings to enable.'}
+				>
+					<BookOpen class="size-3.5" />
+					<span>
+						{mgBusy
+							? (mgProgress ?? 'Building…')
+							: mgActive
+								? 'Clear guide'
+								: mgSavedExists
+									? 'Show saved guide'
+									: 'Middle-game guide'}
+					</span>
+					{#if mgActive && mgGamesUsable > 0}
+						<span class="ml-1 font-mono text-[10px] text-[var(--color-parchment-500)] tabular-nums">
+							·{mgGamesUsable}
+						</span>
+					{:else if !mgActive && mgSavedExists}
+						<Star class="ml-1 size-3 text-[var(--color-brass-300)]" fill="currentColor" />
+					{/if}
+				</Button>
+				{#if mgSavedExists}
+					<Button
+						class="hidden lg:inline-flex"
+						variant="ghost"
+						size="sm"
+						onclick={deleteSavedMiddlegameGuide}
+						disabled={mgSaveBusy}
+						title="Delete the saved guide at this position"
+					>
+						<Trash2 class="size-3.5" />
+					</Button>
+				{/if}
+				<Button
+					class="hidden lg:inline-flex"
+					variant="secondary"
+					size="sm"
 					onclick={togglePinAtCurrent}
 					disabled={!currentIsPinnedGate && !currentIsPinnable}
 					title={currentIsPinnedGate
@@ -2237,6 +2496,11 @@
 				{#if jumpStatus}
 					<span class="ml-1 font-serif text-[11px] text-[var(--color-parchment-400)] italic">
 						{jumpStatus}
+					</span>
+				{/if}
+				{#if mgError}
+					<span class="ml-1 font-serif text-[11px] text-[var(--color-oxblood-300)] italic">
+						{mgError}
 					</span>
 				{/if}
 			</div>
@@ -2341,12 +2605,30 @@
 				>
 					<ChevronLast class="size-4" />
 				</button>
-				<!-- Save pill. `ml-auto` anchors it to the right edge so
-					 the toolbar's left-aligned items don't shift when the
-					 pill transitions between enabled/disabled states.
-					 The Actions dropdown used to sit between the nav arrows
-					 and this pill; it moved up to the page header on narrow
-					 viewports, so the toolbar now carries just nav + save. -->
+				<!-- Right-anchored pill cluster. `ml-auto` is on whichever
+					 button is the leftmost of the cluster so the rest follow
+					 with normal flex gaps. When arrows are visible and either
+					 unsaved or modified-since-save, the Save-guide pill leads
+					 the cluster; otherwise Save line carries the ml-auto
+					 itself and sits alone on the right (its historical
+					 layout). -->
+				{#if mgActive && !mgFromSaved}
+					<button
+						type="button"
+						onclick={() => {
+							if (mgSaveBusy) return;
+							void saveMiddlegameGuideToIDB();
+						}}
+						title={mgSavedExists
+							? 'Update the saved guide at this position so the drill picks up these arrows.'
+							: 'Pin these arrows so the drill can paint them at this position when its setting is on.'}
+						disabled={mgSaveBusy}
+						class="ml-auto flex items-center gap-2 rounded-full border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-1 font-serif text-[13px] text-[var(--color-parchment-200)] transition-colors duration-200 hover:border-[var(--color-ink-600)] hover:bg-[var(--color-ink-800)] disabled:opacity-50"
+					>
+						<BookOpen class="size-3.5 text-[var(--color-brass-300)]" />
+						<span>{mgSaveBusy ? 'Saving…' : mgSavedExists ? 'Update guide' : 'Save guide'}</span>
+					</button>
+				{/if}
 				<button
 					type="button"
 					onclick={() => {
@@ -2355,7 +2637,10 @@
 					}}
 					title={justSaved ? 'Saved.' : saveNothingToDo ? 'No unsaved moves yet' : 'Save this line'}
 					disabled={justSaved || saveNothingToDo}
-					class="ml-auto flex items-center gap-2 rounded-full border px-3 py-1 font-serif text-[13px] transition-colors duration-200 disabled:opacity-50 {saveToneClass}"
+					class="flex items-center gap-2 rounded-full border px-3 py-1 font-serif text-[13px] transition-colors duration-200 disabled:opacity-50 {mgActive &&
+					!mgFromSaved
+						? ''
+						: 'ml-auto'} {saveToneClass}"
 				>
 					{#if justSaved}
 						<Check class="size-3.5" />

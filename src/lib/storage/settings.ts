@@ -24,6 +24,7 @@ export function defaultSettings(): AppSettings {
 		soundsEnabled: true,
 		soundsVolume: 1,
 		openAtStartingPosition: true,
+		showMiddlegameGuides: false,
 		sync: { enabled: false }
 	};
 }

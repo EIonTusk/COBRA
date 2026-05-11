@@ -156,6 +156,42 @@ export interface IdeaCard {
 	createdAt: number;
 }
 
+/**
+ * One saved "middle-game guide" — a position-keyed bundle of arrows the
+ * user pinned in the editor (Common continuations / pawn moves / piece
+ * reroutings derived from master games). When the drill flag
+ * `showMiddlegameGuides` is on, the drill paints these on the board
+ * whenever the user reaches the saved position. Arrows are stored in a
+ * lightweight serialisable form so the IDB row is independent of
+ * chessground's TypeScript types.
+ */
+export interface SavedGuideArrow {
+	/** Origin square, e.g. "e2". For circles this is the only square. */
+	orig: string;
+	/**
+	 * Destination square. When omitted, the shape is rendered as a circle on
+	 * `orig` instead of an arrow — used for weakness markers ("squares the
+	 * opponent commonly lands on" and the converse).
+	 */
+	dest?: string;
+	/** chessground brush name (green / yellow / paleBlue / paleRed / purple / …). */
+	brush: string;
+	/** Optional arrow thickness override. Ignored for circle shapes. */
+	lineWidth?: number;
+}
+
+export interface SavedMiddlegameGuide {
+	repertoireId: string;
+	fenKey: string;
+	arrows: SavedGuideArrow[];
+	/** How many master games the aggregate behind these arrows was based on. */
+	gamesUsable: number;
+	/** Lichess-named opening at this position when known, else null. */
+	openingName: string | null;
+	createdAt: number;
+	updatedAt: number;
+}
+
 export type DrillIntroSpeed = 'off' | 'fast' | 'normal' | 'slow' | 'slowest';
 
 export interface LichessOAuthToken {
@@ -300,6 +336,14 @@ export interface AppSettings {
 	 * users opt in from Settings → Sync. See `SyncSettings`.
 	 */
 	sync?: SyncSettings;
+	/**
+	 * When true, the drill paints saved middle-game guide arrows on the
+	 * board whenever a saved guide exists for the current position. Off
+	 * by default — the drill is normally a "play the move" workflow and
+	 * not every user wants the strategic overlay. Editor save/load is
+	 * unaffected by this flag (always available).
+	 */
+	showMiddlegameGuides?: boolean;
 }
 
 export interface StoredMistake {
