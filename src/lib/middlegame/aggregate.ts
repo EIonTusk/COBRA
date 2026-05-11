@@ -184,7 +184,7 @@ export function aggregateLines(
 	};
 }
 
-interface WalkedMove {
+export interface WalkedMove {
 	color: Color;
 	role: Role;
 	san: string;
@@ -194,17 +194,36 @@ interface WalkedMove {
 	castle?: 'short' | 'long';
 }
 
-interface JourneyEnd {
+export interface JourneyEnd {
 	color: Color;
 	role: Role;
 	from: string;
 	to: string | 'captured';
 }
 
-interface WalkedLine {
+export interface WalkedLine {
 	firstMove: { san: string; uci: string } | null;
 	moves: WalkedMove[];
 	journeys: JourneyEnd[];
+}
+
+/**
+ * Public wrapper around the internal `walkLine` so consumers outside
+ * the aggregator (notably the plan-adherence scorer) can walk a
+ * continuation from a FEN without setting up a chessops `Chess` themselves.
+ *
+ * Returns null if the line contains an illegal move (the same defensive
+ * behaviour `walkLine` already had — one bad UCI shouldn't poison the
+ * caller's batch).
+ */
+export function walkContinuation(
+	baseFen: string,
+	line: string[],
+	maxPlies = 12
+): WalkedLine | null {
+	const setup = parseFen(baseFen).unwrap();
+	const chess = Chess.fromSetup(setup).unwrap();
+	return walkLine(chess, line, maxPlies);
 }
 
 function walkLine(baseChess: Chess, line: string[], maxPlies: number): WalkedLine | null {
