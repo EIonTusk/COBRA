@@ -17,6 +17,11 @@
  * because Lichess strips non-STR PGN headers on export. The chapter name
  * survives because we pass it as the import-pgn `name` param.
  *
+ * Chapter IDs come from the `[ChapterURL]` header Lichess injects on
+ * export — NOT from `[Site]`, which round-trips back as whatever we
+ * imported (we send `https://cobra.chess/sync`, so that's what comes
+ * back, study-wide).
+ *
  * Conflict gate: before pushing, refetch the existing chapter via `pullBlob`
  * which resolves the revision from (1) the v2 in-comment payload, (2) the
  * Cobra* headers if Lichess preserved them, or (3) a bundle decode for
@@ -178,7 +183,9 @@ export async function inspectStudy(
 	let totalChapters = 0;
 	for (const block of blocks) {
 		const siteMatch =
-			/\[Site\s+"https:\/\/lichess\.org\/study\/[a-zA-Z0-9]{8}\/([a-zA-Z0-9]{8})"\]/.exec(block);
+			/\[ChapterURL\s+"https:\/\/lichess\.org\/study\/[a-zA-Z0-9]{8}\/([a-zA-Z0-9]{8})"\]/.exec(
+				block
+			);
 		if (!siteMatch) continue;
 		totalChapters += 1;
 		const eventName = parseEventFromPgn(block);
@@ -295,7 +302,9 @@ export async function pullAllBlobs(
 	const out: Array<ParsedBlob & { chapterId: string; chapterName: string }> = [];
 	for (const block of splitPgnBlocks(pgn)) {
 		const siteMatch =
-			/\[Site\s+"https:\/\/lichess\.org\/study\/[a-zA-Z0-9]{8}\/([a-zA-Z0-9]{8})"\]/.exec(block);
+			/\[ChapterURL\s+"https:\/\/lichess\.org\/study\/[a-zA-Z0-9]{8}\/([a-zA-Z0-9]{8})"\]/.exec(
+				block
+			);
 		if (!siteMatch) continue;
 		const chapterId = siteMatch[1];
 		const eventName = parseEventFromPgn(block);

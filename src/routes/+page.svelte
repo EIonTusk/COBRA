@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { SvelteMap } from 'svelte/reactivity';
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { base, resolve } from '$app/paths';
 	import { ArrowRight, Plus, AlertTriangle, RotateCcw, BookOpen, Play, Zap } from 'lucide-svelte';
 
@@ -10,6 +10,7 @@
 	import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 	import { nodesMap } from '$lib/storage/nodes';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
+	import { sync } from '$lib/sync/syncStore.svelte';
 	import { Button, Badge } from '$lib/ui';
 	import type { Repertoire, StoredMistake, AppSettings } from '$lib/types';
 	import type { RecommendedGame } from '$lib/walkthrough/recommend';
@@ -22,7 +23,7 @@
 	let recommend = $state<RecommendedGame | null>(null);
 	let recommendLoading = $state(false);
 
-	onMount(async () => {
+	async function loadDashboard(initial: boolean) {
 		reps = await listRepertoires();
 		let due = 0;
 		let cards = 0;
@@ -36,13 +37,32 @@
 		pending = await filterActiveMistakes(await listMistakes({ status: 'pending' }));
 		loaded = true;
 
-		// Kick off the walkthrough recommendation async — not required for the
-		// initial paint, and each probe hits the explorer so we don't want to
-		// block the dashboard on it.
-		if (reps.length > 0) {
+		// Side effects only on the initial mount, not on every re-pull —
+		// re-running the explorer-backed walkthrough probe or the games
+		// scan on each background sync would be wasteful and trigger
+		// rate-limits.
+		if (initial && reps.length > 0) {
 			void loadRecommendation();
 			void scanNewGamesSinceLastVisit();
 		}
+	}
+
+	onMount(() => {
+		void loadDashboard(true);
+	});
+
+	// Re-read IDB whenever a sync pull lands new rows. Without this, the
+	// home page shows the pre-pull snapshot until the user navigates away
+	// and back — exactly the "reps only show after a refresh" symptom.
+	$effect(() => {
+		const pulledAt = sync.lastPullAt;
+		if (pulledAt == null) return;
+		// Skip the firing during initial mount — `loaded` is still false
+		// then, and `onMount` is already handling the first load.
+		untrack(() => {
+			if (!loaded) return;
+			void loadDashboard(false);
+		});
 	});
 
 	/**
