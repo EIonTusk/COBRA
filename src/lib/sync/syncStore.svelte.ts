@@ -47,11 +47,11 @@ import { toast } from '$lib/ui';
 import {
 	findOrCreateSyncStudy,
 	listSyncChapters,
+	pullAllBlobs,
 	pullBlob,
 	pushBlob,
 	purgeSyncChapters,
-	SyncConflictError,
-	type SyncChapterRef
+	SyncConflictError
 } from './lichessSync';
 import { setDirtyHandler } from './dirtyMark';
 import type { AppSettings, SyncSettings } from '$lib/types';
@@ -299,13 +299,37 @@ class SyncStore {
 			try {
 				this.status = 'pulling';
 				const ctx = await this.#requireSyncContext();
-				const chapters = await listSyncChapters(ctx.token, ctx.studyId);
+				// One PGN fetch covers every chapter — we used to call
+				// `pullBlob` once per chapter, which re-fetched the whole
+				// study each time (N+1 HTTP calls). `pullAllBlobs` also
+				// resolves chapters whose meta got stripped by Lichess
+				// (recovering kind/repId via bundle decode), which the
+				// old `listSyncChapters` → `pullBlob` path silently
+				// dropped — that drop was the "pill says Synced but
+				// nothing applied" bug.
+				const blobs = await pullAllBlobs(ctx.token, ctx.studyId);
+				// Multiple chapters can share a `[Event]` name when the
+				// pre-fix cleanup left duplicates behind. Keep the one
+				// with the highest revision (or highest pushedAt as
+				// tiebreaker) so we don't apply stale data. Plain object
+				// — this isn't reactive, the values just feed the apply
+				// loop below.
+				const byName: Record<string, (typeof blobs)[number]> = {};
+				for (const b of blobs) {
+					const prev = byName[b.chapterName];
+					if (!prev) {
+						byName[b.chapterName] = b;
+						continue;
+					}
+					const prevKey = prev.revision * 1e15 + prev.pushedAt;
+					const curKey = b.revision * 1e15 + b.pushedAt;
+					if (curKey > prevKey) byName[b.chapterName] = b;
+				}
+
 				const settings = await getSettings();
 				let mergedSettings: AppSettings | null = null;
 				const aggregate = emptyMergeStats();
-				for (const c of chapters) {
-					const parsed = await pullBlob(ctx.token, ctx.studyId, c.kind, c.repId);
-					if (!parsed) continue;
+				for (const parsed of Object.values(byName)) {
 					const decoded = await decodeBundle(parsed.blob);
 					if (decoded.kind === 'rep') {
 						if (decoded.version === 2) {
@@ -327,7 +351,10 @@ class SyncStore {
 							mergedSettings = r.mergedSettings;
 						}
 					}
-					this.#rememberRevision(c, parsed.revision);
+					this.#rememberRevisionByKey(
+						parsed.kind === 'global' ? 'global' : (`rep:${parsed.repId as string}` as DirtyKey),
+						parsed.revision
+					);
 				}
 				announceMerge(aggregate);
 				const now = Date.now();
@@ -518,11 +545,6 @@ class SyncStore {
 		this.#deviceId =
 			this.#deviceId ?? settings.sync?.deviceId ?? settings.sync?.deviceId ?? crypto.randomUUID();
 		return { token, studyId, settings };
-	}
-
-	#rememberRevision(c: SyncChapterRef, revision: number): void {
-		const key: DirtyKey = c.kind === 'global' ? 'global' : (`rep:${c.repId as string}` as DirtyKey);
-		this.#rememberRevisionByKey(key, revision);
 	}
 
 	#rememberRevisionByKey(key: DirtyKey, revision: number): void {

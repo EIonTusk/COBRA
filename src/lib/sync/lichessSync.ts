@@ -13,10 +13,18 @@
  * intact rather than a deleted-but-not-replaced gap. Brief duplicate is
  * harmless — pull picks the higher revision.
  *
- * Conflict gate: before pushing, refetch the existing chapter and read its
- * CobraRevision header. If remote's revision is higher than the caller's
- * `expectedPriorRevision`, throw a `SyncConflictError` instead of pushing.
- * The store turns that into a user-facing prompt.
+ * Cleanup matches old chapters by `[Event]` name (not by parsed Cobra* meta)
+ * because Lichess strips non-STR PGN headers on export. The chapter name
+ * survives because we pass it as the import-pgn `name` param.
+ *
+ * Conflict gate: before pushing, refetch the existing chapter via `pullBlob`
+ * which resolves the revision from (1) the v2 in-comment payload, (2) the
+ * Cobra* headers if Lichess preserved them, or (3) a bundle decode for
+ * legacy header-stripped chapters (revision=0 in that case, so the push
+ * goes through and the legacy chapter is replaced). If remote's revision
+ * is higher than the caller's `expectedPriorRevision`, throw a
+ * `SyncConflictError` instead of pushing — the store turns that into a
+ * user-facing prompt.
  */
 
 import {
@@ -28,16 +36,20 @@ import {
 	listMyStudies
 } from '$lib/lichess/studies';
 import {
+	SYNC_EVENT_PREFIX,
 	chapterNameForGlobal,
 	chapterNameForRep,
+	extractRawBlobString,
 	isSyncChapterName,
 	parseBlobFromPgn,
+	parseEventFromPgn,
 	parseMetaFromPgn,
 	wrapBlobAsPgn,
 	type BlobMeta,
 	type ParsedBlob,
 	type SyncKind
 } from './pgnWrap';
+import { decodeBundle, type AnyBundle } from './bundle';
 
 const SYNC_STUDY_NAME = 'COBRA Sync';
 
@@ -71,10 +83,24 @@ export class SyncConflictError extends Error {
 
 export interface SyncChapterRef {
 	chapterId: string;
+	/**
+	 * The chapter's `[Event "..."]` header — the only metadata Lichess
+	 * reliably preserves across the import/export round-trip. Used as
+	 * the cleanup key when a push replaces a chapter.
+	 */
+	name: string;
 	kind: SyncKind;
+	/**
+	 * Full rep UUID. May be undefined for legacy chapters whose meta lived
+	 * only in the now-stripped `[CobraRepId]` header — those still match
+	 * by name (the chapter's prefix carries the first 8 chars of the UUID).
+	 */
 	repId?: string;
+	/** Defaults to 0 when meta isn't recoverable (legacy header-stripped chapter). */
 	revision: number;
+	/** Defaults to '' when meta isn't recoverable. */
 	deviceId: string;
+	/** Defaults to 0 when meta isn't recoverable. */
 	pushedAt: number;
 }
 
@@ -155,23 +181,49 @@ export async function inspectStudy(
 			/\[Site\s+"https:\/\/lichess\.org\/study\/[a-zA-Z0-9]{8}\/([a-zA-Z0-9]{8})"\]/.exec(block);
 		if (!siteMatch) continue;
 		totalChapters += 1;
+		const eventName = parseEventFromPgn(block);
+		if (!eventName || !isSyncChapterName(eventName)) continue;
+
+		// Identify kind from the chapter name — Lichess preserves [Event]
+		// because we passed it as the import-pgn `name` param. Metadata
+		// in custom Cobra* headers may have been stripped on export, so
+		// `parseMetaFromPgn` is best-effort; the chapter is still
+		// classifiable as a sync chapter by its name alone.
+		const kind: SyncKind | null = nameToKind(eventName);
+		if (!kind) continue;
 		const meta = parseMetaFromPgn(block);
-		if (!meta) continue;
 		syncChapters.push({
 			chapterId: siteMatch[1],
-			kind: meta.kind,
-			repId: meta.repId,
-			revision: meta.revision,
-			deviceId: meta.deviceId,
-			pushedAt: meta.pushedAt
+			name: eventName,
+			kind,
+			repId: meta?.repId,
+			revision: meta?.revision ?? 0,
+			deviceId: meta?.deviceId ?? '',
+			pushedAt: meta?.pushedAt ?? 0
 		});
 	}
 	return { syncChapters, totalChapters };
 }
 
+/** Map a sync chapter's `[Event]` name back to its kind discriminator. */
+function nameToKind(name: string): SyncKind | null {
+	if (name === `${SYNC_EVENT_PREFIX}:global`) return 'global';
+	if (name.startsWith(`${SYNC_EVENT_PREFIX}:rep:`)) return 'rep';
+	return null;
+}
+
 /**
  * Pull the parsed blob for a single chapter (rep or global). Returns null
- * if the chapter doesn't exist.
+ * if no matching chapter exists.
+ *
+ * Three resolution paths, in order of preference:
+ *   1. Full meta from v2 in-comment payload (`cobra-sync-v2:<meta>.<blob>`).
+ *   2. Meta from Cobra* PGN headers (when Lichess preserved them).
+ *   3. Legacy fallback: just the raw blob string, with kind/repId recovered
+ *      by decoding the bundle. revision/deviceId/pushedAt become 0/''/0 so
+ *      callers know meta wasn't recoverable — conflict detection treats
+ *      this as "no known prior revision" and the push goes through, which
+ *      is the right behaviour for legacy chapters about to be replaced.
  */
 export async function pullBlob(
 	token: string,
@@ -180,14 +232,103 @@ export async function pullBlob(
 	repId: string | undefined
 ): Promise<ParsedBlob | null> {
 	const pgn = await fetchStudyPgn(token, studyId);
+	let legacyCandidate: { blob: string; bundle: AnyBundle } | null = null;
 	for (const block of splitPgnBlocks(pgn)) {
 		const parsed = parseBlobFromPgn(block);
-		if (!parsed) continue;
-		if (parsed.kind !== kind) continue;
-		if (kind === 'rep' && parsed.repId !== repId) continue;
-		return parsed;
+		if (parsed) {
+			if (parsed.kind !== kind) continue;
+			if (kind === 'rep' && parsed.repId !== repId) continue;
+			return parsed;
+		}
+		// parseBlobFromPgn failed — could be a non-sync chapter, or a sync
+		// chapter whose meta got stripped by Lichess on export. Check the
+		// chapter name first to filter out the former, then decode the
+		// bundle to recover kind/repId.
+		const eventName = parseEventFromPgn(block);
+		if (!eventName || !isSyncChapterName(eventName)) continue;
+		const blobStr = extractRawBlobString(block);
+		if (!blobStr) continue;
+		let bundle: AnyBundle;
+		try {
+			bundle = await decodeBundle(blobStr);
+		} catch {
+			continue;
+		}
+		if (bundle.kind !== kind) continue;
+		if (kind === 'rep' && (bundle as { repertoireId?: string }).repertoireId !== repId) continue;
+		// Prefer an exact match, but keep the first legacy candidate as a
+		// backstop — the loop continues so a later block with full meta can
+		// still win.
+		if (!legacyCandidate) legacyCandidate = { blob: blobStr, bundle };
+	}
+	if (legacyCandidate) {
+		const { blob, bundle } = legacyCandidate;
+		const recoveredRepId =
+			bundle.kind === 'rep' ? (bundle as { repertoireId?: string }).repertoireId : undefined;
+		return {
+			kind: bundle.kind,
+			repId: recoveredRepId,
+			revision: 0,
+			deviceId: '',
+			pushedAt: 0,
+			blob
+		};
 	}
 	return null;
+}
+
+/**
+ * One-shot pull of every sync chapter in the study. Walks the study PGN once
+ * (instead of N+1 fetches in `pullAll` × `pullBlob`) and yields a parsed blob
+ * for each `COBRA-SYNC:*` chapter — falling back to bundle-decode when the
+ * v2/header meta has been stripped.
+ *
+ * Returns each parsed blob plus the originating chapter ID, so the caller
+ * can deduplicate by `[Event]` name (highest revision wins) without a
+ * second fetch.
+ */
+export async function pullAllBlobs(
+	token: string,
+	studyId: string
+): Promise<Array<ParsedBlob & { chapterId: string; chapterName: string }>> {
+	const pgn = await fetchStudyPgn(token, studyId);
+	const out: Array<ParsedBlob & { chapterId: string; chapterName: string }> = [];
+	for (const block of splitPgnBlocks(pgn)) {
+		const siteMatch =
+			/\[Site\s+"https:\/\/lichess\.org\/study\/[a-zA-Z0-9]{8}\/([a-zA-Z0-9]{8})"\]/.exec(block);
+		if (!siteMatch) continue;
+		const chapterId = siteMatch[1];
+		const eventName = parseEventFromPgn(block);
+		if (!eventName || !isSyncChapterName(eventName)) continue;
+
+		const parsed = parseBlobFromPgn(block);
+		if (parsed) {
+			out.push({ ...parsed, chapterId, chapterName: eventName });
+			continue;
+		}
+		// Header-stripped legacy chapter. Recover via bundle decode.
+		const blobStr = extractRawBlobString(block);
+		if (!blobStr) continue;
+		let bundle: AnyBundle;
+		try {
+			bundle = await decodeBundle(blobStr);
+		} catch {
+			continue;
+		}
+		const kind: SyncKind = bundle.kind;
+		const repId = kind === 'rep' ? (bundle as { repertoireId?: string }).repertoireId : undefined;
+		out.push({
+			kind,
+			repId,
+			revision: 0,
+			deviceId: '',
+			pushedAt: 0,
+			blob: blobStr,
+			chapterId,
+			chapterName: eventName
+		});
+	}
+	return out;
 }
 
 export interface PushResult {
@@ -261,19 +402,21 @@ export async function pushBlob(
 	}
 	const newChapterId = created[0].id;
 
-	// Sweep older COBRA-SYNC chapters with the same kind/repId, except the
-	// one we just imported. If the user has somehow accumulated duplicates
-	// (a previous push that got interrupted between import and delete) we
-	// clean them all up here. Same fetch also gives us the total chapter
-	// count so the caller can warn the user about the 64-chapter cap.
+	// Sweep older COBRA-SYNC chapters that share the chapter NAME (Event
+	// header) with the one we just imported. We match by name rather than
+	// by parsed kind/repId because Lichess strips non-STR PGN headers on
+	// export — pre-v2 chapters lose their CobraKind/CobraRepId fields and
+	// can't be classified that way, but their `[Event]` survives because
+	// it came from the import-pgn `name` param. Matching by name also
+	// cleans up duplicates that piled up under the old (header-driven)
+	// cleanup before this fix.
 	let totalChapters: number | undefined;
 	try {
 		const inspected = await inspectStudy(token, studyId);
 		totalChapters = inspected.totalChapters;
 		for (const c of inspected.syncChapters) {
 			if (c.chapterId === newChapterId) continue;
-			if (c.kind !== meta.kind) continue;
-			if (meta.kind === 'rep' && c.repId !== meta.repId) continue;
+			if (c.name !== chapterName) continue;
 			await deleteChapter(token, studyId, c.chapterId);
 			if (typeof totalChapters === 'number') totalChapters -= 1;
 		}
