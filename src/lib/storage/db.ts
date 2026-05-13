@@ -4,6 +4,7 @@ import type {
 	RepertoireNode,
 	Card,
 	IdeaCard,
+	PlanCard,
 	AppSettings,
 	StoredMistake,
 	EmpiricalGap,
@@ -303,13 +304,22 @@ export interface OpeningTrainerDB extends DBSchema {
 		value: SavedMiddlegameGuide;
 		indexes: { 'by-repertoire': string };
 	};
+	plan_cards: {
+		key: [string, string];
+		value: PlanCard;
+		indexes: {
+			'by-repertoire': string;
+			'by-due': number;
+			'by-repertoire-due': [string, number];
+		};
+	};
 }
 
 // IDB name kept as 'openingtrainer' (pre-COBRA-rename) so existing users'
 // repertoires and cards survive the rebrand. Renaming would create a
 // fresh empty DB and orphan their data.
 const DB_NAME = 'openingtrainer';
-const DB_VERSION = 18;
+const DB_VERSION = 19;
 const REQUIRED_STORES = [
 	'repertoires',
 	'nodes',
@@ -326,7 +336,8 @@ const REQUIRED_STORES = [
 	'position_wdl',
 	'masters_baseline',
 	'position_openings',
-	'middlegame_guides'
+	'middlegame_guides',
+	'plan_cards'
 ] as const;
 
 let dbPromise: Promise<IDBPDatabase<OpeningTrainerDB>> | null = null;
@@ -414,6 +425,12 @@ function ensureAllStores(db: IDBPDatabase<OpeningTrainerDB>) {
 			keyPath: ['repertoireId', 'fenKey']
 		});
 		mg.createIndex('by-repertoire', 'repertoireId');
+	}
+	if (!has('plan_cards')) {
+		const pc = db.createObjectStore('plan_cards', { keyPath: ['repertoireId', 'fenKey'] });
+		pc.createIndex('by-repertoire', 'repertoireId');
+		pc.createIndex('by-due', 'dueAt');
+		pc.createIndex('by-repertoire-due', ['repertoireId', 'dueAt']);
 	}
 }
 

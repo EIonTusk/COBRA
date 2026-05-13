@@ -15,6 +15,7 @@
 		Download,
 		ExternalLink,
 		LineChart,
+		Lightbulb,
 		Link as LinkIcon,
 		RotateCcw,
 		Share2,
@@ -43,6 +44,7 @@
 		resetAllFsrs
 	} from '$lib/storage/cards';
 	import { countDueIdeaCards } from '$lib/storage/ideaCards';
+	import { countDuePlanCards, countPlanCards } from '$lib/storage/planCards';
 	import { nodesMap } from '$lib/storage/nodes';
 	import { buildShareBundle, encodeShare } from '$lib/storage/share';
 	import { computeCoverage, COVERAGE_GOALS } from '$lib/tree/coverage';
@@ -79,6 +81,12 @@
 	// Review-rail tile data. Populated alongside the main mount effect.
 	let masteredPct = $state<number | null>(null);
 	let hasStyleScan = $state(false);
+	// Plan-drill rail data. `planTotal` = all plan cards in this rep,
+	// `planDue` = those scheduled for now or earlier. Used to gate the
+	// tile (only render when at least one plan card exists) and to label
+	// it (X due / Y total).
+	let planTotal = $state(0);
+	let planDue = $state(0);
 
 	// Analysis-gate state for the starting-position panel. `repNodes` is
 	// the full node map — only used to (a) resolve the auto-detected
@@ -97,6 +105,8 @@
 			if (fetched) {
 				total = await countCards(id);
 				due = (await countDue(id)) + (await countDueIdeaCards(id));
+				planTotal = await countPlanCards(id);
+				planDue = planTotal > 0 ? await countDuePlanCards(id) : 0;
 				mistakes = await countMistakeCards(id);
 				const nodes = await nodesMap(id);
 				nodeCount = nodes.size;
@@ -1072,6 +1082,47 @@
 				>
 			</a>
 		</div>
+
+		<!--
+			Plan-drill tile. Only rendered when the rep has at least one
+			plan card; pinning a middle-game guide auto-creates one, so
+			the existence of a tile is a clean "you have plan content to
+			drill" signal. Headline = due / total to make the call to
+			action immediate.
+		-->
+		{#if planTotal > 0}
+			<div class="mt-3" style:--i="5">
+				<a
+					href={resolve(`/repertoire/${rep.id}/plan-drill`)}
+					class="ink-panel group flex items-center justify-between gap-4 px-4 py-3 transition-colors hover:bg-[var(--color-ink-850)]"
+				>
+					<div class="flex min-w-0 items-center gap-3">
+						<span
+							class="flex size-9 shrink-0 items-center justify-center rounded-full bg-[var(--color-copper-500)]/20 text-[var(--color-copper-300)]"
+						>
+							<Lightbulb class="size-4" strokeWidth={1.75} />
+						</span>
+						<div class="min-w-0">
+							<div class="eyebrow">Plan drill</div>
+							<div class="mt-1 flex items-baseline gap-2">
+								<span
+									class="font-serif text-2xl leading-none text-[var(--color-parchment-50)] tabular-nums"
+								>
+									{planDue}
+								</span>
+								<span class="font-mono text-[11px] text-[var(--color-parchment-500)]">
+									due · {planTotal} pinned
+								</span>
+							</div>
+						</div>
+					</div>
+					<span
+						class="eyebrow opacity-60 transition-opacity group-hover:text-[var(--color-parchment-200)] group-hover:opacity-100"
+						>↗</span
+					>
+				</a>
+			</div>
+		{/if}
 
 		{#if shareStatus}
 			<p

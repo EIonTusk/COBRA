@@ -78,6 +78,13 @@
 		getMiddlegameGuide,
 		upsertMiddlegameGuide
 	} from '$lib/storage/middlegameGuides';
+	import {
+		deletePlanCard,
+		freshPlanCard,
+		getPlanCard,
+		upsertPlanCard
+	} from '$lib/storage/planCards';
+	import { generatePlanCardContent } from '$lib/plan/generate';
 	import { fetchCloudEval, type CloudEval } from '$lib/lichess/cloudEval';
 	import {
 		challengeStockfishAi,
@@ -96,7 +103,9 @@
 		IdeaCard,
 		Repertoire,
 		RepertoireNode,
+		SavedAttackSquare,
 		SavedMiddlegameGuide,
+		SerializedMiddlegameAggregate,
 		Edge
 	} from '$lib/types';
 	import { loadDossierReport } from '$lib/storage/dossierReport';
@@ -1805,7 +1814,18 @@
 	let mgArrows = $state<DrawShape[]>([]);
 	let mgFenKey = $state<string | null>(null); // fenKey the arrows belong to
 	let mgGamesUsable = $state(0);
+	let mgGamesQueried = $state(0);
 	let mgOpeningName = $state<string | null>(null);
+	// Raw heatmap inputs from the most recent generate. Captured here only
+	// for the save-flow → IDB hand-off; the editor itself doesn't render
+	// the heatmap. The subpage at `/heatmap` reads these from IDB.
+	let mgAttackSquares = $state<SavedAttackSquare[]>([]);
+	let mgTotalLines = $state(0);
+	// Full serialised aggregate captured from the last generate or
+	// reloaded from a saved guide. Persisted on save so the plan-card
+	// generator (and any future masters-derived feature) can pull
+	// structured data without re-querying Lichess.
+	let mgAggregate = $state<SerializedMiddlegameAggregate | null>(null);
 	let mgError = $state<string | null>(null);
 	let mgProgress = $state<string | null>(null);
 	let mgErrorTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1814,6 +1834,11 @@
 	// the conditional Save / Delete affordances under the action bar.
 	let mgSavedExists = $state(false);
 	let mgSavedCreatedAt = $state<number | null>(null);
+	// Cached ratio from the saved guide so the transposition-health tag can
+	// render even when the arrows aren't actively painted. Mirrors the
+	// `gamesUsable / gamesQueried` returned by `generateMiddlegameGuide`.
+	let mgSavedGamesUsable = $state(0);
+	let mgSavedGamesQueried = $state(0);
 	let mgSaveBusy = $state(false);
 	// True when the arrows currently rendered came from IDB (load-saved
 	// flow). Drives whether the Save button is offered: there's no point
@@ -1822,6 +1847,24 @@
 
 	const mgActive = $derived(mgArrows.length > 0 && mgFenKey === currentFenKey);
 
+	// Transposition health: how often the top-N master games at this
+	// position actually reach it via the same move order the repertoire
+	// uses. Low ratios mean most masters transpose elsewhere, so the
+	// pinned patterns are drawn from a thinner sample than the headline
+	// count suggests. Rendered as a small tag next to the saved-guide
+	// indicator. Always reads from the live or saved guide that's
+	// current — never from a stale state of a different position.
+	const mgHealth = $derived.by(() => {
+		const usable = mgActive ? mgGamesUsable : mgSavedExists ? mgSavedGamesUsable : 0;
+		const queried = mgActive ? mgGamesQueried : mgSavedExists ? mgSavedGamesQueried : 0;
+		if (queried <= 0) return null;
+		const ratio = usable / queried;
+		let tier: 'high' | 'mid' | 'low' = 'high';
+		if (ratio < 0.5) tier = 'low';
+		else if (ratio < 0.8) tier = 'mid';
+		return { usable, queried, ratio, tier };
+	});
+
 	// Auto-clear stale arrows when the user navigates to a different position:
 	// they applied to the position they were generated for, not this one.
 	$effect(() => {
@@ -1829,6 +1872,10 @@
 			mgArrows = [];
 			mgFenKey = null;
 			mgGamesUsable = 0;
+			mgGamesQueried = 0;
+			mgAttackSquares = [];
+			mgTotalLines = 0;
+			mgAggregate = null;
 			mgFromSaved = false;
 		}
 	});
@@ -1842,6 +1889,8 @@
 		if (!repId || !key) {
 			mgSavedExists = false;
 			mgSavedCreatedAt = null;
+			mgSavedGamesUsable = 0;
+			mgSavedGamesQueried = 0;
 			return;
 		}
 		let cancelled = false;
@@ -1849,6 +1898,8 @@
 			if (cancelled) return;
 			mgSavedExists = !!g;
 			mgSavedCreatedAt = g?.createdAt ?? null;
+			mgSavedGamesUsable = g?.gamesUsable ?? 0;
+			mgSavedGamesQueried = g?.gamesQueried ?? 0;
 		});
 		return () => {
 			cancelled = true;
@@ -1862,6 +1913,10 @@
 			mgArrows = [];
 			mgFenKey = null;
 			mgGamesUsable = 0;
+			mgGamesQueried = 0;
+			mgAttackSquares = [];
+			mgTotalLines = 0;
+			mgAggregate = null;
 			mgFromSaved = false;
 			return;
 		}
@@ -1874,8 +1929,12 @@
 			if (saved) {
 				mgArrows = savedArrowsToShapes(saved.arrows);
 				mgFenKey = currentFenKey;
-				mgGamesUsable = saved.gamesUsable;
-				mgOpeningName = saved.openingName;
+				mgGamesUsable = saved.gamesUsable ?? 0;
+				mgGamesQueried = saved.gamesQueried ?? 0;
+				mgOpeningName = saved.openingName ?? null;
+				mgAttackSquares = saved.attackSquares ?? [];
+				mgTotalLines = saved.totalLines ?? 0;
+				mgAggregate = saved.aggregate ?? null;
 				mgFromSaved = true;
 				return;
 			}
@@ -1919,7 +1978,57 @@
 			mgArrows = arrows;
 			mgFenKey = currentFenKey;
 			mgGamesUsable = result.gamesUsable;
+			mgGamesQueried = result.gamesQueried;
 			mgOpeningName = result.openingName;
+			mgAttackSquares = result.aggregate.attackSquares.map((a) => ({
+				square: a.square,
+				attacker: a.attacker,
+				count: a.count,
+				captureCount: a.captureCount
+			}));
+			mgTotalLines = result.aggregate.totalLines;
+			// The runtime aggregate is plain JSON-safe data; capture it
+			// verbatim for save-time persistence + plan-card generation.
+			mgAggregate = {
+				totalLines: result.aggregate.totalLines,
+				pliesWindow: result.aggregate.pliesWindow,
+				topNextMoves: result.aggregate.topNextMoves.map((m) => ({
+					san: m.san,
+					uci: m.uci,
+					count: m.count
+				})),
+				pawnMoves: result.aggregate.pawnMoves.map((p) => ({
+					color: p.color,
+					san: p.san,
+					from: p.from,
+					to: p.to,
+					isCapture: p.isCapture,
+					count: p.count
+				})),
+				pieceJourneys: result.aggregate.pieceJourneys.map((j) => ({
+					color: j.color,
+					role: j.role,
+					from: j.from,
+					to: j.to,
+					count: j.count
+				})),
+				castling: {
+					white: {
+						short: result.aggregate.castling.white.short,
+						long: result.aggregate.castling.white.long
+					},
+					black: {
+						short: result.aggregate.castling.black.short,
+						long: result.aggregate.castling.black.long
+					}
+				},
+				attackSquares: result.aggregate.attackSquares.map((a) => ({
+					square: a.square,
+					attacker: a.attacker,
+					count: a.count,
+					captureCount: a.captureCount
+				}))
+			};
 			mgFromSaved = false;
 		} catch (e) {
 			mgError = e instanceof Error ? e.message : 'Failed to generate guide.';
@@ -1939,15 +2048,58 @@
 				repertoireId: rep.id,
 				fenKey: currentFenKey,
 				arrows: shapesToSavedArrows(mgArrows),
+				source: 'guide',
 				gamesUsable: mgGamesUsable,
+				gamesQueried: mgGamesQueried || undefined,
 				openingName: mgOpeningName,
+				attackSquares: mgAttackSquares.length > 0 ? mgAttackSquares : undefined,
+				totalLines: mgTotalLines || undefined,
+				aggregate: mgAggregate ?? undefined,
 				createdAt: mgSavedCreatedAt ?? Date.now(),
 				updatedAt: Date.now()
 			};
 			await upsertMiddlegameGuide(guide);
 			mgSavedExists = true;
 			mgSavedCreatedAt = guide.createdAt;
+			mgSavedGamesUsable = guide.gamesUsable ?? 0;
+			mgSavedGamesQueried = guide.gamesQueried ?? 0;
 			mgFromSaved = true;
+			// Auto-create or refresh the position's plan card. Content is
+			// regenerated from the current aggregate so the answer reflects
+			// the latest guide; FSRS scheduling is preserved from any
+			// existing card at this position.
+			if (mgAggregate && rep) {
+				try {
+					const content = generatePlanCardContent({
+						aggregate: mgAggregate,
+						planForColor: rep.color,
+						openingName: mgOpeningName
+					});
+					const existing = await getPlanCard(rep.id, currentFenKey);
+					const fresh = freshPlanCard(
+						rep.id,
+						currentFenKey,
+						rep.color,
+						content.prompt,
+						content.answer,
+						mgOpeningName ?? null
+					);
+					const merged = existing
+						? {
+								...existing,
+								prompt: fresh.prompt,
+								answer: fresh.answer,
+								planForColor: rep.color,
+								openingName: mgOpeningName ?? null
+							}
+						: fresh;
+					await upsertPlanCard(merged);
+				} catch {
+					/* plan-card creation is best-effort; guide save is the
+					   primary action and shouldn't fail if the auxiliary
+					   card flow hiccups. */
+				}
+			}
 		} catch (e) {
 			mgError = e instanceof Error ? e.message : 'Failed to save guide.';
 			scheduleMgErrorClear();
@@ -1961,8 +2113,18 @@
 		mgSaveBusy = true;
 		try {
 			await deleteMiddlegameGuide(rep.id, currentFenKey);
+			// The plan card was auto-created from this guide; remove it too
+			// so the user doesn't end up drilling a plan answer they
+			// explicitly threw away.
+			try {
+				await deletePlanCard(rep.id, currentFenKey);
+			} catch {
+				/* plan-card cleanup is best-effort. */
+			}
 			mgSavedExists = false;
 			mgSavedCreatedAt = null;
+			mgSavedGamesUsable = 0;
+			mgSavedGamesQueried = 0;
 			// If the rendered arrows came from this saved guide, also clear
 			// them from the board so the editor doesn't keep painting a
 			// guide that no longer exists.
@@ -1970,6 +2132,10 @@
 				mgArrows = [];
 				mgFenKey = null;
 				mgGamesUsable = 0;
+				mgGamesQueried = 0;
+				mgAttackSquares = [];
+				mgTotalLines = 0;
+				mgAggregate = null;
 				mgFromSaved = false;
 			}
 		} catch (e) {
@@ -2419,9 +2585,13 @@
 					onclick={toggleMiddlegameGuide}
 					disabled={mgBusy || (!mgSavedExists && !tokenConfigured)}
 					title={mgActive
-						? 'Clear middle-game arrows'
+						? mgHealth
+							? `Clear middle-game arrows · ${mgHealth.usable}/${mgHealth.queried} top masters reach this position via your move order`
+							: 'Clear middle-game arrows'
 						: mgSavedExists
-							? 'Show the saved middle-game guide pinned at this position. The drill paints these too when "Show saved guides" is on.'
+							? mgHealth
+								? `Show the saved middle-game guide pinned at this position. ${mgHealth.usable}/${mgHealth.queried} top masters reach this position via your move order; the rest transpose elsewhere.`
+								: 'Show the saved middle-game guide pinned at this position. The drill paints these too when "Show saved guides" is on.'
 							: tokenConfigured
 								? 'Aggregate ~12 plies of master games from this position and paint common continuations (green), pawn moves (yellow), and piece reroutings (blue) on the board.'
 								: 'Requires a Lichess connection — paste a token in Settings to enable.'}
@@ -2436,7 +2606,17 @@
 									? 'Show saved guide'
 									: 'Middle-game guide'}
 					</span>
-					{#if mgActive && mgGamesUsable > 0}
+					{#if mgHealth && (mgActive || mgSavedExists)}
+						<span
+							class="ml-1 font-mono text-[10px] tabular-nums {mgHealth.tier === 'low'
+								? 'text-[var(--color-oxblood-300)]'
+								: mgHealth.tier === 'mid'
+									? 'text-[var(--color-brass-300)]'
+									: 'text-[var(--color-parchment-500)]'}"
+						>
+							·{mgHealth.usable}/{mgHealth.queried}
+						</span>
+					{:else if mgActive && mgGamesUsable > 0}
 						<span class="ml-1 font-mono text-[10px] text-[var(--color-parchment-500)] tabular-nums">
 							·{mgGamesUsable}
 						</span>
@@ -2444,7 +2624,34 @@
 						<Star class="ml-1 size-3 text-[var(--color-brass-300)]" fill="currentColor" />
 					{/if}
 				</Button>
+				{#if mgActive && !mgFromSaved}
+					<Button
+						class="hidden lg:inline-flex"
+						variant="secondary"
+						size="sm"
+						onclick={() => {
+							if (mgSaveBusy) return;
+							void saveMiddlegameGuideToIDB();
+						}}
+						disabled={mgSaveBusy}
+						title={mgSavedExists
+							? 'Update the saved guide at this position so the drill picks up these arrows.'
+							: 'Pin these arrows so the drill can paint them at this position when its setting is on.'}
+					>
+						<BookOpen class="size-3.5 text-[var(--color-brass-300)]" />
+						<span>{mgSaveBusy ? 'Saving…' : mgSavedExists ? 'Update guide' : 'Save guide'}</span>
+					</Button>
+				{/if}
 				{#if mgSavedExists}
+					<Button
+						class="hidden lg:inline-flex"
+						variant="ghost"
+						size="sm"
+						href={rep ? resolve(`/repertoire/${rep.id}/heatmap`) : undefined}
+						title="Open the per-position attack-square heatmap for this repertoire"
+					>
+						<Flame class="size-3.5" />
+					</Button>
 					<Button
 						class="hidden lg:inline-flex"
 						variant="ghost"
@@ -2743,10 +2950,31 @@
 							<ChevronLast class="size-4" />
 						</button>
 						<div class="eyebrow ml-2">Line</div>
-						<!-- Desktop save pill: sits at the right of the Line
-								 header so the primary commit action lives next
-								 to the line it's saving, in line with the move
-								 arrows. Mobile uses the board-toolbar pill. -->
+						<!-- Desktop save pills: sit at the right of the Line
+								 header so the primary commit actions live next
+								 to the line they're saving, in line with the
+								 move arrows. Mobile uses the board-toolbar
+								 pills. When the guide pill is present it leads
+								 the cluster (carries `ml-auto`); otherwise
+								 Save line carries `ml-auto` itself. -->
+						{#if mgActive && !mgFromSaved}
+							<button
+								type="button"
+								onclick={() => {
+									if (mgSaveBusy) return;
+									void saveMiddlegameGuideToIDB();
+								}}
+								title={mgSavedExists
+									? 'Update the saved guide at this position so the drill picks up these arrows.'
+									: 'Pin these arrows so the drill can paint them at this position when its setting is on.'}
+								disabled={mgSaveBusy}
+								class="ml-auto hidden items-center gap-2 rounded-full border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-1 font-serif text-[13px] text-[var(--color-parchment-200)] transition-colors duration-200 hover:border-[var(--color-ink-600)] hover:bg-[var(--color-ink-800)] disabled:opacity-50 lg:flex"
+							>
+								<BookOpen class="size-3.5 text-[var(--color-brass-300)]" />
+								<span>{mgSaveBusy ? 'Saving…' : mgSavedExists ? 'Update guide' : 'Save guide'}</span
+								>
+							</button>
+						{/if}
 						<button
 							type="button"
 							onclick={() => {
@@ -2759,7 +2987,10 @@
 									? 'No unsaved moves yet'
 									: 'Save this line'}
 							disabled={justSaved || saveNothingToDo}
-							class="ml-auto hidden items-center gap-2 rounded-full border px-3 py-1 font-serif text-[13px] transition-colors duration-200 disabled:opacity-50 lg:flex {saveToneClass}"
+							class="hidden items-center gap-2 rounded-full border px-3 py-1 font-serif text-[13px] transition-colors duration-200 disabled:opacity-50 lg:flex {mgActive &&
+							!mgFromSaved
+								? ''
+								: 'ml-auto'} {saveToneClass}"
 						>
 							{#if justSaved}
 								<Check class="size-3.5" />
