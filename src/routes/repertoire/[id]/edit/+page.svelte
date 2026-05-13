@@ -2624,6 +2624,24 @@
 						<Star class="ml-1 size-3 text-[var(--color-brass-300)]" fill="currentColor" />
 					{/if}
 				</Button>
+				{#if mgActive && !mgFromSaved}
+					<Button
+						class="hidden lg:inline-flex"
+						variant="secondary"
+						size="sm"
+						onclick={() => {
+							if (mgSaveBusy) return;
+							void saveMiddlegameGuideToIDB();
+						}}
+						disabled={mgSaveBusy}
+						title={mgSavedExists
+							? 'Update the saved guide at this position so the drill picks up these arrows.'
+							: 'Pin these arrows so the drill can paint them at this position when its setting is on.'}
+					>
+						<BookOpen class="size-3.5 text-[var(--color-brass-300)]" />
+						<span>{mgSaveBusy ? 'Saving…' : mgSavedExists ? 'Update guide' : 'Save guide'}</span>
+					</Button>
+				{/if}
 				{#if mgSavedExists}
 					<Button
 						class="hidden lg:inline-flex"
@@ -2932,10 +2950,31 @@
 							<ChevronLast class="size-4" />
 						</button>
 						<div class="eyebrow ml-2">Line</div>
-						<!-- Desktop save pill: sits at the right of the Line
-								 header so the primary commit action lives next
-								 to the line it's saving, in line with the move
-								 arrows. Mobile uses the board-toolbar pill. -->
+						<!-- Desktop save pills: sit at the right of the Line
+								 header so the primary commit actions live next
+								 to the line they're saving, in line with the
+								 move arrows. Mobile uses the board-toolbar
+								 pills. When the guide pill is present it leads
+								 the cluster (carries `ml-auto`); otherwise
+								 Save line carries `ml-auto` itself. -->
+						{#if mgActive && !mgFromSaved}
+							<button
+								type="button"
+								onclick={() => {
+									if (mgSaveBusy) return;
+									void saveMiddlegameGuideToIDB();
+								}}
+								title={mgSavedExists
+									? 'Update the saved guide at this position so the drill picks up these arrows.'
+									: 'Pin these arrows so the drill can paint them at this position when its setting is on.'}
+								disabled={mgSaveBusy}
+								class="ml-auto hidden items-center gap-2 rounded-full border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-1 font-serif text-[13px] text-[var(--color-parchment-200)] transition-colors duration-200 hover:border-[var(--color-ink-600)] hover:bg-[var(--color-ink-800)] disabled:opacity-50 lg:flex"
+							>
+								<BookOpen class="size-3.5 text-[var(--color-brass-300)]" />
+								<span>{mgSaveBusy ? 'Saving…' : mgSavedExists ? 'Update guide' : 'Save guide'}</span
+								>
+							</button>
+						{/if}
 						<button
 							type="button"
 							onclick={() => {
@@ -2948,7 +2987,10 @@
 									? 'No unsaved moves yet'
 									: 'Save this line'}
 							disabled={justSaved || saveNothingToDo}
-							class="ml-auto hidden items-center gap-2 rounded-full border px-3 py-1 font-serif text-[13px] transition-colors duration-200 disabled:opacity-50 lg:flex {saveToneClass}"
+							class="hidden items-center gap-2 rounded-full border px-3 py-1 font-serif text-[13px] transition-colors duration-200 disabled:opacity-50 lg:flex {mgActive &&
+							!mgFromSaved
+								? ''
+								: 'ml-auto'} {saveToneClass}"
 						>
 							{#if justSaved}
 								<Check class="size-3.5" />
