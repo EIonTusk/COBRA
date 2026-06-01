@@ -85,6 +85,14 @@
 	let idx = $state(0);
 	let phase = $state<DrillPhase>('loading');
 	let chainedEntry = $state<DrillEntry | null>(null);
+	// Bumped to force the card-lifecycle effect to re-run `startCard` for the
+	// *current* entry even when its identity is unchanged. Advance paths that
+	// re-anchor `idx` to the same entry (Train-pass restart, failed-walk drain,
+	// walk/segment re-entry) must bump this rather than setting `phase = 'pending'`
+	// directly: otherwise the effect never fires, `startCard` never resets the
+	// board to the question position, and the drill is stranded on the post-move
+	// (opponent-to-move) position with `phase` 'pending' — the issue-#60 freeze.
+	let presentGen = $state(0);
 
 	// Walks flattened across the merged queue. flatWalkSeg[i] tells us which
 	// segment owns walk i — needed so cross-cutting state can disambiguate.
@@ -418,6 +426,9 @@
 	// animate the lead-in.
 	// ─────────────────────────────────────────────────────────────────────────
 	$effect(() => {
+		// Tracked so a `presentGen` bump re-presents the current card even when
+		// its identity hasn't changed (see `presentGen`).
+		void presentGen;
 		const entry = currentEntry;
 		if (!entry || !currentSegment) return;
 		const token = { cancelled: false };
@@ -1314,7 +1325,9 @@
 				failedKeysByWalk.delete(currentWalk);
 				chainedEntry = null;
 				idx = flatWalkStarts[currentWalk];
-				phase = 'pending';
+				// Re-anchors to the walk start, which may be the same entry the
+				// user just answered — bump presentGen so startCard re-runs.
+				presentGen++;
 			}, DONE_HOLD_MS);
 			return;
 		}
@@ -1356,7 +1369,7 @@
 			if (restart < walkEnd) {
 				chainedEntry = null;
 				idx = restart;
-				phase = 'pending';
+				presentGen++;
 				return;
 			}
 			target += 1;
@@ -1417,7 +1430,7 @@
 				sessionPlannedTotal += plannedFails;
 				chainedEntry = null;
 				idx = firstFailed;
-				phase = 'pending';
+				presentGen++;
 				return;
 			}
 			// Failed drain done — move to ideas stage.
@@ -1483,7 +1496,7 @@
 			const added = await extendSegmentWithLeaves(segIdx);
 			if (added > 0) {
 				chainedEntry = null;
-				phase = 'pending';
+				presentGen++;
 				return true;
 			}
 		}
@@ -1503,7 +1516,7 @@
 				if (!drilledKeys.has(ck(s, entries[i].card.fenKey))) {
 					chainedEntry = null;
 					idx = i;
-					phase = 'pending';
+					presentGen++;
 					return true;
 				}
 			}

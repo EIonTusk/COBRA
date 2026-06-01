@@ -40,6 +40,11 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    # Browsers + system deps are pre-installed in the image, so we never run
+    # `playwright install` in CI. Its browser download stalls indefinitely after
+    # reaching 100% on this runner's network path, hanging the job. Keep the tag
+    # in sync with the @playwright/test version in package.json.
+    container: mcr.microsoft.com/playwright:v1.59.1-noble
     steps:
       - uses: actions/checkout@v5
 
@@ -49,19 +54,12 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
         run: npm ci --no-audit --no-fund
 
       - name: Prep Stockfish assets
         run: npm run prep:stockfish
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
 
       - name: Run E2E tests
         run: npm run test:e2e
