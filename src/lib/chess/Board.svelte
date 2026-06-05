@@ -6,6 +6,11 @@
 	import type { DrawShape } from '@lichess-org/chessground/draw';
 	import type { Key, Color as CgColor, Dests, MoveMetadata } from '@lichess-org/chessground/types';
 	import { playMove, playCapture } from '$lib/ui/sounds';
+	import { base } from '$app/paths';
+	import { appearance } from '$lib/board/appearance.svelte';
+	import { isPromotionMove } from '$lib/chess/position';
+
+	type PromotionRole = 'q' | 'r' | 'b' | 'n';
 
 	interface Props {
 		fen: string;
@@ -19,7 +24,15 @@
 		coordinates?: boolean;
 		/** Overlay shapes (arrows / circles) rendered on top of the board. */
 		shapes?: DrawShape[];
-		onmove?: (orig: Key, dest: Key, metadata: MoveMetadata) => void;
+		/**
+		 * Fired after a legal user move. For pawn moves that reach the last
+		 * rank the board first shows an in-place promotion picker (queen /
+		 * knight / rook / bishop); `onmove` only fires once the user has
+		 * chosen, and `promotion` carries that choice. For every other move
+		 * `promotion` is undefined. Consumers must pass it straight through to
+		 * `edgeFromUci` rather than assuming a queen.
+		 */
+		onmove?: (orig: Key, dest: Key, metadata: MoveMetadata, promotion?: PromotionRole) => void;
 		/**
 		 * One-shot toggle the parent can flip on (via `bind:`) to suppress the
 		 * sound on the next fen change — used when the runner snaps the board
@@ -48,6 +61,26 @@
 
 	let el: HTMLDivElement;
 	let api: Api | undefined = $state();
+
+	// While a pawn sits on the last rank awaiting a promotion choice, the
+	// move is held here instead of being reported to the parent. chessground
+	// has already animated the pawn onto the promotion square; picking a
+	// piece reports the move (with the chosen role), cancelling snaps the
+	// board back to `fen`.
+	let pendingPromotion = $state<{
+		orig: Key;
+		dest: Key;
+		metadata: MoveMetadata;
+		color: CgColor;
+	} | null>(null);
+
+	// Lichess ordering, edge-inward: queen nearest the promotion rank.
+	const PROMOTION_CHOICES: { role: PromotionRole; piece: string }[] = [
+		{ role: 'q', piece: 'Q' },
+		{ role: 'n', piece: 'N' },
+		{ role: 'r', piece: 'R' },
+		{ role: 'b', piece: 'B' }
+	];
 
 	// Track the fen we've already sounded for so we can detect programmatic
 	// moves (opponent replies, refutation PV playback) that don't go through
@@ -81,6 +114,13 @@
 				showDests: true,
 				events: {
 					after: (o, d, m) => {
+						// A pawn landing on the last rank: hold the move and let
+						// the user pick the promotion piece. No sound and no
+						// onmove until they choose (or cancel).
+						if (isPromotionMove(fen, o, d)) {
+							pendingPromotion = { orig: o, dest: d, metadata: m, color: turnColor ?? 'white' };
+							return;
+						}
 						if (m.captured) playCapture();
 						else playMove();
 						// Parent will round-trip the resulting fen back in; don't
@@ -179,6 +219,82 @@
 		if (!api) return;
 		api.setAutoShapes(shapes ?? []);
 	});
+
+	function choosePromotion(role: PromotionRole) {
+		const p = pendingPromotion;
+		if (!p) return;
+		pendingPromotion = null;
+		if (p.metadata.captured) playCapture();
+		else playMove();
+		// Parent round-trips the resulting fen; don't double-sound.
+		skipNextFenSound = true;
+		onmove?.(p.orig, p.dest, p.metadata, role);
+	}
+
+	function cancelPromotion() {
+		if (!pendingPromotion) return;
+		pendingPromotion = null;
+		// chessground already slid the pawn onto the last rank; restore the
+		// pre-move position since the parent's fen never changed.
+		api?.set(buildConfig());
+	}
+
+	// Geometry for the in-place picker. Column = the destination file; the
+	// four choices stack from the promotion edge toward the board centre, so
+	// at the top edge they grow downward and at the bottom edge upward (the
+	// choice list is reversed in that case so the queen stays edge-most).
+	const promoGeometry = $derived.by(() => {
+		const p = pendingPromotion;
+		if (!p) return null;
+		const file = p.dest.charCodeAt(0) - 97; // a=0 … h=7
+		const rank = p.dest.charCodeAt(1) - 49; // '1'=0 … '8'=7
+		const col = orientation === 'white' ? file : 7 - file;
+		const fromTop = orientation === 'white' ? rank === 7 : rank === 0;
+		const choices = fromTop ? PROMOTION_CHOICES : [...PROMOTION_CHOICES].reverse();
+		const colorPrefix = p.color === 'white' ? 'w' : 'b';
+		return { col, fromTop, choices, colorPrefix };
+	});
 </script>
 
-<div bind:this={el} class="cg-wrap"></div>
+<!--
+	The board lives in its own element that chessground fully owns and
+	re-renders; the promotion picker must NOT be a child of it or
+	chessground's DOM updates clobber/cover it. It's rendered as a sibling
+	inside this relative wrapper instead and positioned over the board.
+-->
+<div class="relative">
+	<div bind:this={el} class="cg-wrap"></div>
+	{#if promoGeometry}
+		{@const g = promoGeometry}
+		<!-- Backdrop: dims the board and cancels the promotion on tap. -->
+		<button
+			type="button"
+			aria-label="Cancel promotion"
+			class="absolute inset-0 z-10 cursor-default bg-black/45"
+			onclick={cancelPromotion}
+		></button>
+		<!-- Picker column over the destination file. -->
+		<div
+			class="absolute z-20 flex flex-col"
+			style:left="{g.col * 12.5}%"
+			style:top={g.fromTop ? '0' : '50%'}
+			style:width="12.5%"
+		>
+			{#each g.choices as choice (choice.role)}
+				<button
+					type="button"
+					aria-label="Promote to {choice.role}"
+					class="relative aspect-square w-full cursor-pointer bg-[var(--color-parchment-100)] shadow-[var(--shadow-md)] transition-colors hover:bg-[var(--color-brass-200)]"
+					onclick={() => choosePromotion(choice.role)}
+				>
+					<img
+						src="{base}/piece-sets/{appearance.pieces}/{g.colorPrefix}{choice.piece}.svg"
+						alt=""
+						class="pointer-events-none absolute inset-0 size-full"
+						draggable="false"
+					/>
+				</button>
+			{/each}
+		</div>
+	{/if}
+</div>

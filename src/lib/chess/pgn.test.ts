@@ -28,6 +28,16 @@ describe('parseRepertoirePgn', () => {
 		const [line] = parseRepertoirePgn(pgn);
 		expect(line.edges[0].comment).toBe('first second');
 	});
+
+	it('preserves under-promotion in the imported edge', () => {
+		// White queens a pawn on b8 as a knight; the parsed edge must keep
+		// both the SAN and the promotion suffix on the UCI.
+		const pgn = `1. e4 d5 2. exd5 c6 3. dxc6 e5 4. cxb7 Nd7 5. bxa8=N *`;
+		const [line] = parseRepertoirePgn(pgn);
+		const promo = line.edges.at(-1)!;
+		expect(promo.edge.san).toBe('bxa8=N');
+		expect(promo.edge.uci).toBe('b7a8n');
+	});
 });
 
 describe('exportRepertoirePgn round-trip', () => {

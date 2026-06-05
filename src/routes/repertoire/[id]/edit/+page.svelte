@@ -51,7 +51,6 @@
 		edgeFromSan,
 		fenAfterMove,
 		legalDests,
-		isPromotionMove,
 		sanAtFen
 	} from '$lib/chess/position';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
@@ -1003,10 +1002,14 @@
 		void refreshMissingCache();
 	}
 
-	function handleMove(orig: Key, dest: Key, _metadata: MoveMetadata) {
+	function handleMove(
+		orig: Key,
+		dest: Key,
+		_metadata: MoveMetadata,
+		promotion?: 'q' | 'r' | 'b' | 'n'
+	) {
 		if (!rep) return;
-		const promo = isPromotionMove(currentFen, orig, dest) ? 'q' : undefined;
-		const edge = edgeFromUci(currentFen, orig, dest, promo);
+		const edge = edgeFromUci(currentFen, orig, dest, promotion);
 		if (!edge) return;
 		void commitMove(edge);
 	}
@@ -1083,20 +1086,18 @@
 		cancelJumpAnim();
 		const dropped = history[history.length - 1];
 		const parentKey = history.length === 1 ? rep!.rootFenKey : history[history.length - 2].fenKey;
+		const parentFen = history.length === 1 ? rep!.rootFen : history[history.length - 2].fen;
 		// Reconstruct the Edge that took us into the dropped step. Prefer the
 		// canonical persisted Edge (carries promotion + UCI exactly); fall
-		// back to the lastMove tuple for pending steps that aren't yet in
-		// `nodes`. Pending edges don't carry promotion info on the history
-		// step, but board history only ever produces queen-promotions today,
-		// so the synthesized UCI matches what `commitMove` would produce.
+		// back to re-deriving it from the parent fen + stored SAN for pending
+		// steps that aren't yet in `nodes`. Deriving from the SAN (rather than
+		// the bare lastMove squares) preserves the promotion piece, so an
+		// unsaved under-promotion retraces forward with the same UCI
+		// `commitMove` originally produced instead of defaulting to a queen.
 		let edge: Edge | null =
 			nodes.get(parentKey)?.children.find((c) => c.toFenKey === dropped.fenKey) ?? null;
-		if (!edge && dropped.lastMove && dropped.san) {
-			edge = {
-				san: dropped.san,
-				uci: `${dropped.lastMove[0]}${dropped.lastMove[1]}`,
-				toFenKey: dropped.fenKey
-			};
+		if (!edge && dropped.san) {
+			edge = edgeFromSan(parentFen, dropped.san);
 		}
 		untrackDroppedSteps(history.length - 1);
 		history = history.slice(0, -1);
