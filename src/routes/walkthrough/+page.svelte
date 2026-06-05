@@ -120,7 +120,7 @@
 	import { listRepertoires } from '$lib/storage/repertoires';
 	import { nodesMap } from '$lib/storage/nodes';
 	import { colorToMove, STARTPOS_FEN } from '$lib/chess/fen';
-	import { edgeFromUci, fenAfterMove, isPromotionMove, legalDests } from '$lib/chess/position';
+	import { edgeFromUci, fenAfterMove, legalDests } from '$lib/chess/position';
 	import { findBranchPoint, fenForKeyInRep } from '$lib/walkthrough/repBranches';
 	import { describeGameEnd } from '$lib/walkthrough/endState';
 	import type { RecommendedGame } from '$lib/walkthrough/recommend';
@@ -540,11 +540,15 @@
 	 * trigger a refutation flow and revert, lesser errors just get a glyph
 	 * and revert so the user can try again with the actual match move.
 	 */
-	function handleBoardMove(orig: Key, dest: Key, _m: MoveMetadata) {
+	function handleBoardMove(
+		orig: Key,
+		dest: Key,
+		_m: MoveMetadata,
+		promotion?: 'q' | 'r' | 'b' | 'n'
+	) {
 		if (!userToMove || walkPhase !== 'idle') return;
 		const nextPly = plies[ply];
-		const promo = isPromotionMove(currentFen, orig, dest) ? 'q' : undefined;
-		const edge = edgeFromUci(currentFen, orig, dest, promo);
+		const edge = edgeFromUci(currentFen, orig, dest, promotion);
 		if (!edge) return;
 		gradedSquare = dest;
 		if (edge.san === nextPly.san) {

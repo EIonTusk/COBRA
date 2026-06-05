@@ -15,7 +15,7 @@
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
 	import { createRepertoire } from '$lib/storage/repertoires';
 	import { colorToMove, STARTPOS_FEN } from '$lib/chess/fen';
-	import { edgeFromUci, fenAfterMove, isPromotionMove, legalDests } from '$lib/chess/position';
+	import { edgeFromUci, fenAfterMove, legalDests } from '$lib/chess/position';
 	import { Button, Input, Label, SourceUsernameInput, type Source, cn } from '$lib/ui';
 	import type { AppSettings, Color } from '$lib/types';
 	import { loadDossierReport } from '$lib/storage/dossierReport';
@@ -167,9 +167,13 @@
 		}
 	}
 
-	function handleBuilderMove(orig: Key, dest: Key, _m: MoveMetadata) {
-		const promo = isPromotionMove(builderFen, orig, dest) ? 'q' : undefined;
-		const edge = edgeFromUci(builderFen, orig, dest, promo);
+	function handleBuilderMove(
+		orig: Key,
+		dest: Key,
+		_m: MoveMetadata,
+		promotion?: 'q' | 'r' | 'b' | 'n'
+	) {
+		const edge = edgeFromUci(builderFen, orig, dest, promotion);
 		if (!edge) return;
 		builderFen = fenAfterMove(builderFen, edge);
 		builderSans = [...builderSans, edge.san];

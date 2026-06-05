@@ -18,13 +18,7 @@
 	import type { DrawShape } from '@lichess-org/chessground/draw';
 
 	import Board from '$lib/chess/Board.svelte';
-	import {
-		edgeFromUci,
-		edgeFromSan,
-		fenAfterMove,
-		legalDests,
-		isPromotionMove
-	} from '$lib/chess/position';
+	import { edgeFromUci, edgeFromSan, fenAfterMove, legalDests } from '$lib/chess/position';
 	import { colorToMove, fenKeyFromFen } from '$lib/chess/fen';
 	import { pathToFenKey, furthestNonBranchingFenKey } from '$lib/tree/traversal';
 	import { upsertCard, getCard } from '$lib/storage/cards';
@@ -676,10 +670,9 @@
 	// ─────────────────────────────────────────────────────────────────────────
 	// Move handling
 	// ─────────────────────────────────────────────────────────────────────────
-	function handleMove(orig: Key, dest: Key, _m: MoveMetadata) {
+	function handleMove(orig: Key, dest: Key, _m: MoveMetadata, promotion?: 'q' | 'r' | 'b' | 'n') {
 		if (!currentEntry || !currentSegment || phase !== 'pending') return;
-		const promo = isPromotionMove(currentFen, orig, dest) ? 'q' : undefined;
-		const edge = edgeFromUci(currentFen, orig, dest, promo);
+		const edge = edgeFromUci(currentFen, orig, dest, promotion);
 		if (!edge) return;
 		currentFen = fenAfterMove(currentFen, edge);
 		userLastMove = [orig, dest];
