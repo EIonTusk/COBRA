@@ -8,6 +8,8 @@
   </a>
 </p>
 
+**Try it out: <https://eiontusk.github.io/COBRA/>**
+
 > ⚠️ **Heads-up — this was vibe-coded.** Every line in this repo was written
 > in an extended conversation with Claude. No human reviewed each commit for
 > correctness line-by-line. Treat it as a hobby-grade tool that happens to
