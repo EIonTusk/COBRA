@@ -67,6 +67,31 @@ export function countDescendantEdges(nodes: Map<string, RepertoireNode>, startKe
 }
 
 /**
+ * Set of fenKeys reachable by descending children from `rootKey` through
+ * the FEN-keyed graph, including `rootKey` itself. Cycle-safe. Used to
+ * decide which nodes/cards are orphaned after an edge is cut: anything
+ * outside this set can no longer be reached from the root and should be
+ * pruned. Because the graph deduplicates transpositions, a position that
+ * still transposes into a live line stays in the set even after one of
+ * its incoming edges is removed.
+ */
+export function reachableFenKeys(nodes: Map<string, RepertoireNode>, rootKey: string): Set<string> {
+	const reachable = new Set<string>([rootKey]);
+	const queue: string[] = [rootKey];
+	while (queue.length > 0) {
+		const key = queue.shift()!;
+		const node = nodes.get(key);
+		if (!node) continue;
+		for (const edge of node.children) {
+			if (reachable.has(edge.toFenKey)) continue;
+			reachable.add(edge.toFenKey);
+			queue.push(edge.toFenKey);
+		}
+	}
+	return reachable;
+}
+
+/**
  * Auto-detected starting position for game analysis: walk the trunk
  * down from the root while each node has exactly one child, stopping
  * at the first node that branches (2+ children) or dead-ends (leaf).
