@@ -37,7 +37,7 @@
 	import { listGapsForRepertoire } from '$lib/storage/empiricalGaps';
 	import { listPositionWdlAtFenKey, type PositionWdlRow } from '$lib/storage/positionWdl';
 	import { getRepertoire, touchRepertoire, setStartingPosition } from '$lib/storage/repertoires';
-	import { nodesMap, addEdge, removeEdge, setNodeComment } from '$lib/storage/nodes';
+	import { nodesMap, addEdge, removeEdgeAndPrune, setNodeComment } from '$lib/storage/nodes';
 	import {
 		deleteIdeaCard,
 		freshIdeaCard,
@@ -1026,7 +1026,12 @@
 		pendingEdges = pendingEdges.filter((p) => !(p.fromKey === currentFenKey && p.edge.uci === uci));
 		const child = (currentNode?.children ?? []).find((c) => c.uci === uci);
 		if (child) {
-			await removeEdge(rep.id, currentFenKey, child.toFenKey);
+			// Cut the edge AND sweep any positions it orphaned — descendant
+			// nodes, their FSRS move cards, and idea cards that are no longer
+			// reachable from the root. Without the sweep the drill queue keeps
+			// serving the deleted variation (it reads cards by index, not by
+			// walking the tree). Reachability-based so transpositions survive.
+			await removeEdgeAndPrune(rep.id, rep.rootFenKey, currentFenKey, child.toFenKey);
 			// If that was the last child at this position and we had a
 			// drill card here, remove the card too (it would point at a
 			// move that no longer exists). We leave cards at still-populated

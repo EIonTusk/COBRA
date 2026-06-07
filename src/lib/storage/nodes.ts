@@ -1,6 +1,7 @@
 import { getDB } from './db';
 import type { RepertoireNode, Edge } from '$lib/types';
 import { markRepDirty } from '$lib/sync/dirtyMark';
+import { reachableFenKeys } from '$lib/tree/traversal';
 
 /**
  * Bulk-replace every node of `repertoireId` with the supplied parsed edges.
@@ -152,6 +153,66 @@ export async function removeEdge(
 	node.children = node.children.filter((e) => e.toFenKey !== toFenKey);
 	node.updatedAt = Date.now();
 	await db.put('nodes', node);
+	markRepDirty(repertoireId);
+}
+
+/**
+ * Remove the `fromFenKey → toFenKey` edge, then prune everything that
+ * edge was holding onto. After cutting the edge we recompute the set of
+ * positions still reachable from `rootFenKey` and delete any node, FSRS
+ * move card, and idea card whose fenKey fell out of that set.
+ *
+ * Why reachability rather than "delete the subtree": positions are a
+ * FEN-keyed graph, so a position below the cut edge may still transpose
+ * into a live line via another path — those must be kept. Only genuinely
+ * orphaned positions are dropped. Without this sweep, deleting a move in
+ * the editor leaves orphaned cards behind that the drill queue keeps
+ * serving (it reads cards by index, not by walking the tree).
+ *
+ * All deletes run in one transaction so the tree and the drill card pool
+ * can't desynchronise. Mirrors the orphan sweep in `replaceRepertoireTree`.
+ */
+export async function removeEdgeAndPrune(
+	repertoireId: string,
+	rootFenKey: string,
+	fromFenKey: string,
+	toFenKey: string
+): Promise<void> {
+	const db = await getDB();
+	const tx = db.transaction(['nodes', 'cards', 'idea_cards'], 'readwrite');
+	const nodes = tx.objectStore('nodes');
+	const cards = tx.objectStore('cards');
+	const ideas = tx.objectStore('idea_cards');
+
+	const parent = await nodes.get([repertoireId, fromFenKey]);
+	if (!parent) {
+		await tx.done;
+		return;
+	}
+	parent.children = parent.children.filter((e) => e.toFenKey !== toFenKey);
+	parent.updatedAt = Date.now();
+	await nodes.put(parent);
+
+	// Recompute reachability from the root over the post-cut graph.
+	const all = await nodes.index('by-repertoire').getAll(repertoireId);
+	const map = new Map<string, RepertoireNode>(all.map((n) => [n.fenKey, n]));
+	const live = reachableFenKeys(map, rootFenKey);
+
+	for (const n of all) {
+		if (!live.has(n.fenKey)) await nodes.delete([repertoireId, n.fenKey]);
+	}
+	const cardKeys = await cards.index('by-repertoire').getAllKeys(repertoireId);
+	for (const key of cardKeys) {
+		const [, fenKey] = key as [string, string];
+		if (!live.has(fenKey)) await cards.delete(key);
+	}
+	const ideaKeys = await ideas.index('by-repertoire').getAllKeys(repertoireId);
+	for (const key of ideaKeys) {
+		const [, fenKey] = key as [string, string];
+		if (!live.has(fenKey)) await ideas.delete(key);
+	}
+
+	await tx.done;
 	markRepDirty(repertoireId);
 }
 

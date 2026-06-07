@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Edge, RepertoireNode } from '$lib/types';
-import { pathToFenKey, furthestNonBranchingFenKey, countDescendantEdges } from './traversal';
+import {
+	pathToFenKey,
+	furthestNonBranchingFenKey,
+	countDescendantEdges,
+	reachableFenKeys
+} from './traversal';
 
 function node(fenKey: string, children: Edge[]): RepertoireNode {
 	return { repertoireId: 'r', fenKey, children };
@@ -159,5 +164,52 @@ describe('countDescendantEdges', () => {
 		const m = new Map<string, RepertoireNode>();
 		m.set('a', node('a', []));
 		expect(countDescendantEdges(m, 'missing')).toBe(0);
+	});
+});
+
+describe('reachableFenKeys', () => {
+	it('includes the root even with no children', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', []));
+		expect([...reachableFenKeys(m, 'r')]).toEqual(['r']);
+	});
+
+	it('collects every descendant of a branching tree', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a'), edge('d4', 'b')]));
+		m.set('a', node('a', [edge('e5', 'c')]));
+		m.set('b', node('b', []));
+		m.set('c', node('c', []));
+		expect([...reachableFenKeys(m, 'r')].sort()).toEqual(['a', 'b', 'c', 'r']);
+	});
+
+	it('excludes a position once its only incoming edge is cut', () => {
+		// r→a→orphan, then cut a→orphan: orphan is no longer reachable.
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a')]));
+		m.set('a', node('a', [])); // edge to 'orphan' removed
+		m.set('orphan', node('orphan', []));
+		const live = reachableFenKeys(m, 'r');
+		expect(live.has('orphan')).toBe(false);
+		expect(live.has('a')).toBe(true);
+	});
+
+	it('keeps a position that still transposes in via another edge', () => {
+		// Cut r→a, but b→shared still reaches 'shared'.
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('d4', 'b')])); // edge to 'a' removed
+		m.set('a', node('a', [edge('x', 'shared')]));
+		m.set('b', node('b', [edge('y', 'shared')]));
+		m.set('shared', node('shared', []));
+		const live = reachableFenKeys(m, 'r');
+		expect(live.has('shared')).toBe(true);
+		expect(live.has('a')).toBe(false);
+	});
+
+	it('does not hang on a cycle', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('m1', 'a')]));
+		m.set('a', node('a', [edge('back', 'r')]));
+		expect([...reachableFenKeys(m, 'r')].sort()).toEqual(['a', 'r']);
 	});
 });
