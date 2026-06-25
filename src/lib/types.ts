@@ -470,6 +470,19 @@ export interface AppSettings {
 	 */
 	sync?: SyncSettings;
 	/**
+	 * Deletion tombstones for repertoires removed on this (or any synced)
+	 * device. Sync is otherwise additive ("adds win against deletes"), so
+	 * without an explicit record a repertoire deleted on one device would be
+	 * resurrected from another device's still-present sync chapter on the
+	 * next pull. Each entry carries the deleted rep's id and the wall-clock
+	 * ms-since-epoch of the deletion; the pull path removes a local rep whose
+	 * tombstone is newer than the rep's own `updatedAt`, and skips applying
+	 * any sync chapter the tombstone supersedes. Union-merged across devices
+	 * (keep the latest `deletedAt` per id) and pruned by TTL — see
+	 * `mergeSettings` / `pruneRepTombstones`.
+	 */
+	repTombstones?: RepTombstone[];
+	/**
 	 * When true, the drill paints saved middle-game guide arrows on the
 	 * board whenever a saved guide exists for the current position. Off
 	 * by default — the drill is normally a "play the move" workflow and
@@ -477,6 +490,14 @@ export interface AppSettings {
 	 * unaffected by this flag (always available).
 	 */
 	showMiddlegameGuides?: boolean;
+}
+
+/** A record that a repertoire was deleted, propagated through sync so the
+ *  deletion reaches every device. See `AppSettings.repTombstones`. */
+export interface RepTombstone {
+	repId: string;
+	/** Wall-clock ms-since-epoch of the deletion. */
+	deletedAt: number;
 }
 
 export interface StoredMistake {

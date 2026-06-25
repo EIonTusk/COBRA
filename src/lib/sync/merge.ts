@@ -357,6 +357,7 @@ export function mergeMastersBaseline(
 // --- Settings (whole-object with collection-aware sub-fields) --------------
 
 import type { AppSettings } from '$lib/types';
+import { pruneRepTombstones } from '$lib/storage/settings';
 
 /**
  * Whole-object LWW — but two collection fields get set-union semantics
@@ -388,6 +389,15 @@ export function mergeSettings(local: AppSettings, remote: Partial<AppSettings>):
 	}
 	const viewed = [...seen.values()].sort((a, b) => b.viewedAt - a.viewedAt).slice(0, 200);
 	merged.viewedWalkthroughGames = viewed.length > 0 ? viewed : undefined;
+
+	// repTombstones: union by repId (latest deletedAt wins), pruned by TTL.
+	// A deletion recorded on either device must survive the merge, else a
+	// rep deleted on device A would never propagate to device B.
+	const tombstones = pruneRepTombstones(
+		[...(local.repTombstones ?? []), ...(remote.repTombstones ?? [])],
+		Date.now()
+	);
+	merged.repTombstones = tombstones.length > 0 ? tombstones : undefined;
 
 	return merged;
 }

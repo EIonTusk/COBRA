@@ -2,6 +2,7 @@ import { ensureStore, getDB } from './db';
 import type { Repertoire, Color, RepertoireNode, LichessStudyLink } from '$lib/types';
 import { STARTPOS_FEN, fenKeyFromFen } from '$lib/chess/fen';
 import { markRepDirty } from '$lib/sync/dirtyMark';
+import { recordRepTombstone } from './settings';
 
 export async function listRepertoires(): Promise<Repertoire[]> {
 	const db = await getDB();
@@ -136,7 +137,13 @@ const PER_REP_STORES = [
 	'position_wdl'
 ] as const;
 
-export async function deleteRepertoire(id: string): Promise<void> {
+/**
+ * Delete a repertoire's row and every per-rep row, with no sync side effects.
+ * The local-only primitive shared by the user-facing `deleteRepertoire` and
+ * the sync pull path (which applies a remote deletion and must NOT re-mark
+ * the rep dirty or re-record a tombstone it's only echoing).
+ */
+export async function purgeRepertoireLocal(id: string): Promise<void> {
 	// Touch `plan_cards` via `ensureStore` first: it's the newest store
 	// in the per-rep set, so requesting it forces the v19 upgrade on
 	// stale-tab handles before we open a multi-store transaction. Without
@@ -150,5 +157,13 @@ export async function deleteRepertoire(id: string): Promise<void> {
 		for (const key of keys) await tx.objectStore(store).delete(key);
 	}
 	await tx.done;
+}
+
+export async function deleteRepertoire(id: string): Promise<void> {
+	await purgeRepertoireLocal(id);
+	// Record a tombstone *before* marking dirty so the global push carries
+	// the deletion to other devices, and mark the rep dirty so the rep's
+	// own sync chapter gets torn down on Lichess (see syncStore.#pushRep).
+	await recordRepTombstone(id, Date.now());
 	markRepDirty(id);
 }

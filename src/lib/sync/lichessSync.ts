@@ -443,6 +443,33 @@ export async function pushBlob(
 }
 
 /**
+ * Delete the sync chapter(s) for a single repertoire. Called when a rep is
+ * deleted locally so its blob stops resurrecting on other devices' pulls and
+ * stops accumulating as a duplicate. Matches by `[Event]` name — the only
+ * metadata Lichess reliably preserves — so it also sweeps any stale duplicate
+ * chapters that share the rep's name. Returns the count removed.
+ */
+export async function deleteRepChapters(
+	token: string,
+	studyId: string,
+	repId: string
+): Promise<number> {
+	const target = chapterNameForRep(repId);
+	const chapters = await listSyncChapters(token, studyId);
+	let removed = 0;
+	for (const c of chapters) {
+		if (c.name !== target) continue;
+		try {
+			await deleteChapter(token, studyId, c.chapterId);
+			removed += 1;
+		} catch {
+			/* best-effort: a lingering chapter is caught by the pull-side guard */
+		}
+	}
+	return removed;
+}
+
+/**
  * Delete every COBRA-SYNC chapter in the study. Used by the "Disconnect &
  * forget" flow when the user wants to clean up Lichess-side too.
  */

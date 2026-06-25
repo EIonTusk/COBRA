@@ -25,6 +25,7 @@ import type {
 	AppSettings
 } from '$lib/types';
 import type { PositionWdlRow, StoredBaselineBucket } from '$lib/storage/db';
+import { pruneRepTombstones, REP_TOMBSTONE_TTL_MS } from '$lib/storage/settings';
 
 const CTX: MergeContext = { remoteExportedAt: 1_000_000, mergedAt: 1_000_500 };
 
@@ -431,6 +432,55 @@ describe('mergeSettings', () => {
 		// All remote entries (newer) should be in; oldest local entries get evicted.
 		const ids = new Set(m.viewedWalkthroughGames?.map((x) => x.id));
 		for (let i = 0; i < 150; i++) expect(ids.has(`remote-${i}`)).toBe(true);
+	});
+
+	it('unions repTombstones by repId, keeping the latest deletedAt', () => {
+		const now = Date.now();
+		const a = baseSettings();
+		a.repTombstones = [
+			{ repId: 'rep-a', deletedAt: now - 1000 },
+			{ repId: 'rep-b', deletedAt: now - 1000 }
+		];
+		const remote: Partial<AppSettings> = {
+			repTombstones: [
+				{ repId: 'rep-a', deletedAt: now }, // newer than local
+				{ repId: 'rep-c', deletedAt: now }
+			]
+		};
+		const m = mergeSettings(a, remote);
+		const byId = new Map(m.repTombstones?.map((t) => [t.repId, t.deletedAt]));
+		expect(byId.size).toBe(3);
+		expect(byId.get('rep-a')).toBe(now); // latest deletedAt wins
+		expect(byId.get('rep-b')).toBe(now - 1000);
+		expect(byId.get('rep-c')).toBe(now);
+	});
+});
+
+describe('pruneRepTombstones', () => {
+	it('dedups by repId keeping the latest deletedAt', () => {
+		const now = 10_000_000;
+		const out = pruneRepTombstones(
+			[
+				{ repId: 'x', deletedAt: now - 5000 },
+				{ repId: 'x', deletedAt: now - 1000 },
+				{ repId: 'y', deletedAt: now - 2000 }
+			],
+			now
+		);
+		expect(out.length).toBe(2);
+		expect(out.find((t) => t.repId === 'x')?.deletedAt).toBe(now - 1000);
+	});
+
+	it('drops tombstones older than the TTL', () => {
+		const now = REP_TOMBSTONE_TTL_MS + 100_000;
+		const out = pruneRepTombstones(
+			[
+				{ repId: 'fresh', deletedAt: now - 1000 },
+				{ repId: 'stale', deletedAt: now - REP_TOMBSTONE_TTL_MS - 1 }
+			],
+			now
+		);
+		expect(out.map((t) => t.repId)).toEqual(['fresh']);
 	});
 });
 

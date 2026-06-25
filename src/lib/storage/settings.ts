@@ -1,7 +1,30 @@
 import { getDB } from './db';
-import type { AppSettings } from '$lib/types';
+import type { AppSettings, RepTombstone } from '$lib/types';
 import { generatorParameters } from 'ts-fsrs';
 import { markGlobalDirty } from '$lib/sync/dirtyMark';
+
+/**
+ * How long a repertoire deletion tombstone is retained before it's pruned.
+ * Long enough that every realistically-active device will have pulled the
+ * deletion at least once (sync pulls on app boot), short enough that the
+ * tombstone list — which rides inside the global sync chapter — stays small.
+ */
+export const REP_TOMBSTONE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * Collapse a tombstone list to one entry per repId (keeping the latest
+ * `deletedAt`) and drop anything older than {@link REP_TOMBSTONE_TTL_MS}.
+ * `now` is injected so the merge layer can prune against a single clock.
+ */
+export function pruneRepTombstones(tombstones: RepTombstone[], now: number): RepTombstone[] {
+	const latest = new Map<string, number>();
+	for (const t of tombstones) {
+		if (now - t.deletedAt > REP_TOMBSTONE_TTL_MS) continue;
+		const prev = latest.get(t.repId);
+		if (prev === undefined || t.deletedAt > prev) latest.set(t.repId, t.deletedAt);
+	}
+	return [...latest.entries()].map(([repId, deletedAt]) => ({ repId, deletedAt }));
+}
 
 export function defaultSettings(): AppSettings {
 	return {
@@ -74,6 +97,21 @@ export async function saveSettings(
 	const plain = JSON.parse(JSON.stringify({ ...s, key: 'root' }));
 	await db.put('settings', plain);
 	if (!opts.skipDirtyMark) markGlobalDirty();
+}
+
+/**
+ * Record that a repertoire was deleted on this device. Appends a tombstone
+ * to settings (pruned + deduped) and marks the global slice dirty so the
+ * next push carries the deletion to other devices. See
+ * `AppSettings.repTombstones`.
+ */
+export async function recordRepTombstone(repId: string, deletedAt: number): Promise<void> {
+	const settings = await getSettings();
+	const next = pruneRepTombstones(
+		[...(settings.repTombstones ?? []), { repId, deletedAt }],
+		deletedAt
+	);
+	await saveSettings({ ...settings, repTombstones: next });
 }
 
 /**

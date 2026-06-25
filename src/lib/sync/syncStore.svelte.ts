@@ -38,6 +38,7 @@ import {
 	buildRepBundle,
 	decodeBundle,
 	encodeBundle,
+	type AnyBundle,
 	type GlobalBundle,
 	type MergeStats,
 	type RepBundle
@@ -45,6 +46,7 @@ import {
 import { emptyMergeStats } from './merge';
 import { toast } from '$lib/ui';
 import {
+	deleteRepChapters,
 	findOrCreateSyncStudy,
 	listSyncChapters,
 	pullAllBlobs,
@@ -329,9 +331,38 @@ class SyncStore {
 				const settings = await getSettings();
 				let mergedSettings: AppSettings | null = null;
 				const aggregate = emptyMergeStats();
+
+				// Effective deletion tombstones for this pull: the union of what
+				// this device already knows and what the incoming global chapter
+				// carries. We resolve them up front so a rep chapter that's still
+				// lingering on Lichess (e.g. the deleting device's chapter-delete
+				// didn't land) can't resurrect a deleted rep within this same pull,
+				// regardless of the order chapters happen to apply in.
+				const tombstones: Record<string, number> = {};
+				const addTombstones = (list: { repId: string; deletedAt: number }[] | undefined) => {
+					for (const t of list ?? []) {
+						const prev = tombstones[t.repId];
+						if (prev === undefined || t.deletedAt > prev) tombstones[t.repId] = t.deletedAt;
+					}
+				};
+				addTombstones(settings.repTombstones);
+				const decodedByName: Record<string, AnyBundle> = {};
 				for (const parsed of Object.values(byName)) {
 					const decoded = await decodeBundle(parsed.blob);
+					decodedByName[parsed.chapterName] = decoded;
+					if (decoded.kind === 'global') addTombstones(decoded.settings?.repTombstones);
+				}
+
+				for (const parsed of Object.values(byName)) {
+					const decoded = decodedByName[parsed.chapterName];
 					if (decoded.kind === 'rep') {
+						const deletedAt = tombstones[decoded.repertoireId];
+						if (deletedAt !== undefined && deletedAt >= decoded.exportedAt) {
+							// Superseded by a deletion newer than this snapshot — skip
+							// applying, and best-effort tear down the lingering chapter.
+							void this.#deleteRepChapter(decoded.repertoireId).catch(() => {});
+							continue;
+						}
 						if (decoded.version === 2) {
 							const stats = await applyRepBundleMerge(decoded as RepBundle);
 							addStats(aggregate, stats);
@@ -481,7 +512,19 @@ class SyncStore {
 	): Promise<void> {
 		const ctx = await this.#requireSyncContext();
 		const bundle = await buildRepBundle(repId);
-		if (!bundle) return; // rep was deleted between markDirty and now
+		if (!bundle) {
+			// Rep no longer exists locally — it was deleted. Tear down its
+			// sync chapter so the deletion propagates and the blob stops
+			// resurrecting on other devices' pulls. The tombstone in the
+			// global chapter (pushed separately) is the durable signal; this
+			// is the immediate cleanup.
+			try {
+				await deleteRepChapters(ctx.token, ctx.studyId, repId);
+			} catch (e) {
+				console.warn('[sync] failed to delete chapter for removed rep:', e);
+			}
+			return;
+		}
 		const blob = await encodeBundle(bundle);
 		const prior = opts.force
 			? (opts.expectedRemote ?? null)
@@ -505,6 +548,13 @@ class SyncStore {
 		this.lastPushAt = result.pushedAt;
 		warnNearCap(result.totalChapters);
 		await this.#persistRevisions();
+	}
+
+	/** Best-effort teardown of a lingering rep chapter spotted during a pull
+	 *  (the deleting device's own cleanup didn't land). */
+	async #deleteRepChapter(repId: string): Promise<void> {
+		const ctx = await this.#requireSyncContext();
+		await deleteRepChapters(ctx.token, ctx.studyId, repId);
 	}
 
 	async #pushGlobal(opts: { force?: boolean; expectedRemote?: number } = {}): Promise<void> {
