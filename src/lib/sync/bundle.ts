@@ -20,7 +20,7 @@
 
 import { getDB } from '$lib/storage/db';
 import { defaultSettings, sanitizeSettingsForSync } from '$lib/storage/settings';
-import { getRepertoire } from '$lib/storage/repertoires';
+import { getRepertoire, purgeRepertoireLocal } from '$lib/storage/repertoires';
 import { listNodes } from '$lib/storage/nodes';
 import { listCards } from '$lib/storage/cards';
 import { listIdeaCards } from '$lib/storage/ideaCards';
@@ -488,6 +488,21 @@ export async function applyGlobalBundleMerge(
 	}
 
 	await tx.done;
+
+	// Apply deletion tombstones. The merged settings now carry the union of
+	// both devices' tombstones; remove any local rep a tombstone supersedes.
+	// Done after the GLOBAL_STORES transaction commits because purging a rep
+	// touches the per-rep stores, which aren't in this transaction's scope.
+	// A rep edited locally *after* the recorded deletion (updatedAt newer than
+	// deletedAt) is kept — an explicit local edit wins over a remote delete,
+	// matching the "adds win against deletes" philosophy.
+	for (const t of mergedSettings.repTombstones ?? []) {
+		const local = await getRepertoire(t.repId);
+		if (local && local.updatedAt <= t.deletedAt) {
+			await purgeRepertoireLocal(t.repId);
+		}
+	}
+
 	return { mergedSettings, stats };
 }
 
