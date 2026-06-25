@@ -16,7 +16,7 @@
 	} from '$lib/lichess/studies';
 	import { getCard, upsertCard } from '$lib/storage/cards';
 	import { addEdge, applyImportedNote } from '$lib/storage/nodes';
-	import { createRepertoire, setLichessStudyLink } from '$lib/storage/repertoires';
+	import { createRepertoire, listRepertoires, setLichessStudyLink } from '$lib/storage/repertoires';
 	import { getSettings } from '$lib/storage/settings';
 	import { Button, DashboardBacklink, Input, Label, Separator } from '$lib/ui';
 	import type { AppSettings, Color, LichessStudyLink } from '$lib/types';
@@ -122,8 +122,22 @@
 			const first = lines[0];
 			const matching = lines.filter((l) => l.rootFenKey === first.rootFenKey);
 
-			status = 'Creating repertoire…';
-			const rep = await createRepertoire(name, color, first.rootFen);
+			// De-dup guard: if a repertoire is already linked to this study
+			// (same id + colour), re-import into it instead of minting a fresh
+			// UUID. Without this, re-importing an updated study produces a
+			// duplicate repertoire — and with sync enabled that duplicate then
+			// propagates to every device. Edges merge by FEN, so re-applying
+			// the study's lines onto the existing rep is idempotent-safe.
+			const existing = (await listRepertoires()).find(
+				(r) => r.lichessStudy?.studyId === selectedStudyId && r.color === color
+			);
+			let rep = existing;
+			if (rep) {
+				status = 'Updating linked repertoire…';
+			} else {
+				status = 'Creating repertoire…';
+				rep = await createRepertoire(name, color, first.rootFen);
+			}
 
 			for (const line of matching) {
 				for (const { fromFenKey, edge, comment, nags } of line.edges) {
