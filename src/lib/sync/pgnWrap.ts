@@ -46,7 +46,16 @@
  * by name still removes it on the next push.
  */
 
-export type SyncKind = 'rep' | 'global';
+export type SyncKind = 'rep' | 'rep-core' | 'rep-telemetry' | 'global';
+
+/**
+ * True for any repertoire-scoped kind — i.e. one that carries a `repId`.
+ * `'rep'` is the pre-split combined scope; `'rep-core'`/`'rep-telemetry'`
+ * are the tier-split scopes (issue #68). Only `'global'` is rep-less.
+ */
+export function isRepScopeKind(kind: SyncKind): boolean {
+	return kind === 'rep' || kind === 'rep-core' || kind === 'rep-telemetry';
+}
 
 export interface BlobMeta {
 	kind: SyncKind;
@@ -81,17 +90,33 @@ export function chapterNameForGlobal(): string {
 	return `${SYNC_EVENT_PREFIX}:global`;
 }
 
+/**
+ * Scope/chapter name for any kind.
+ *
+ * `rep-core` deliberately REUSES the legacy `COBRA-SYNC:rep:<id8>` name so a
+ * core push overwrites a pre-split combined chapter in place (the import
+ * cleanup sweeps same-named chapters) — that's the combined→tier migration,
+ * for free. `rep-telemetry` gets its own `COBRA-SYNC:rep-telemetry:<id8>`
+ * name. The kind is disambiguated by the in-comment meta, not the name.
+ */
+export function chapterNameForKind(kind: SyncKind, repId?: string): string {
+	if (kind === 'global') return chapterNameForGlobal();
+	if (!repId) throw new Error(`chapterNameForKind: kind="${kind}" requires repId`);
+	if (kind === 'rep-telemetry') return `${SYNC_EVENT_PREFIX}:rep-telemetry:${repId.slice(0, 8)}`;
+	// 'rep' (legacy combined) and 'rep-core' share the `:rep:` name.
+	return `${SYNC_EVENT_PREFIX}:rep:${repId.slice(0, 8)}`;
+}
+
 export function isSyncChapterName(name: string | undefined | null): boolean {
 	if (!name) return false;
 	return name.startsWith(`${SYNC_EVENT_PREFIX}:`);
 }
 
 export function wrapBlobAsPgn(blob: string, meta: BlobMeta): string {
-	if (meta.kind === 'rep' && !meta.repId) {
-		throw new Error('wrapBlobAsPgn: kind="rep" requires repId');
+	if (isRepScopeKind(meta.kind) && !meta.repId) {
+		throw new Error(`wrapBlobAsPgn: kind="${meta.kind}" requires repId`);
 	}
-	const event =
-		meta.kind === 'rep' ? chapterNameForRep(meta.repId as string) : chapterNameForGlobal();
+	const event = chapterNameForKind(meta.kind, meta.repId);
 	const headers: string[] = [
 		`[Event "${escapeHeader(event)}"]`,
 		`[Site "https://cobra.chess/sync"]`,
@@ -102,7 +127,7 @@ export function wrapBlobAsPgn(blob: string, meta: BlobMeta): string {
 		`[Result "*"]`,
 		`[CobraKind "${meta.kind}"]`
 	];
-	if (meta.kind === 'rep' && meta.repId) {
+	if (isRepScopeKind(meta.kind) && meta.repId) {
 		headers.push(`[CobraRepId "${escapeHeader(meta.repId)}"]`);
 	}
 	headers.push(`[CobraRevision "${meta.revision}"]`);
@@ -135,7 +160,7 @@ function encodeMetaWire(meta: BlobMeta): string {
 		p: meta.pushedAt,
 		s: meta.schema ?? CURRENT_SCHEMA
 	};
-	if (meta.kind === 'rep' && meta.repId) payload.i = meta.repId;
+	if (isRepScopeKind(meta.kind) && meta.repId) payload.i = meta.repId;
 	const json = JSON.stringify(payload);
 	return btoaUrl(new TextEncoder().encode(json));
 }
@@ -146,13 +171,15 @@ function decodeMetaWire(encoded: string): BlobMeta | null {
 		const json = new TextDecoder().decode(bytes);
 		const obj = JSON.parse(json) as Record<string, unknown>;
 		const kind = obj.k;
-		if (kind !== 'rep' && kind !== 'global') return null;
+		if (kind !== 'rep' && kind !== 'rep-core' && kind !== 'rep-telemetry' && kind !== 'global') {
+			return null;
+		}
 		const revision = typeof obj.r === 'number' ? obj.r : Number.parseInt(String(obj.r), 10);
 		const pushedAt = typeof obj.p === 'number' ? obj.p : Number.parseInt(String(obj.p), 10);
 		const deviceId = typeof obj.d === 'string' ? obj.d : '';
 		if (!Number.isFinite(revision) || !Number.isFinite(pushedAt) || !deviceId) return null;
-		const repId = kind === 'rep' && typeof obj.i === 'string' ? obj.i : undefined;
-		if (kind === 'rep' && !repId) return null;
+		const repId = kind !== 'global' && typeof obj.i === 'string' ? obj.i : undefined;
+		if (kind !== 'global' && !repId) return null;
 		const schemaRaw = obj.s;
 		const schema =
 			typeof schemaRaw === 'number'
@@ -215,7 +242,14 @@ export function parseBlobFromPgn(pgn: string): ParsedBlob | null {
 
 	const headers = parseHeaders(pgn);
 	const kindRaw = headers.get('CobraKind');
-	if (kindRaw !== 'rep' && kindRaw !== 'global') return null;
+	if (
+		kindRaw !== 'rep' &&
+		kindRaw !== 'rep-core' &&
+		kindRaw !== 'rep-telemetry' &&
+		kindRaw !== 'global'
+	) {
+		return null;
+	}
 	const revisionRaw = headers.get('CobraRevision');
 	const deviceId = headers.get('CobraDeviceId');
 	const pushedAtRaw = headers.get('CobraPushedAt');
@@ -223,8 +257,8 @@ export function parseBlobFromPgn(pgn: string): ParsedBlob | null {
 	const revision = Number.parseInt(revisionRaw, 10);
 	const pushedAt = Number.parseInt(pushedAtRaw, 10);
 	if (!Number.isFinite(revision) || !Number.isFinite(pushedAt)) return null;
-	const repId = kindRaw === 'rep' ? (headers.get('CobraRepId') ?? undefined) : undefined;
-	if (kindRaw === 'rep' && !repId) return null;
+	const repId = kindRaw !== 'global' ? (headers.get('CobraRepId') ?? undefined) : undefined;
+	if (kindRaw !== 'global' && !repId) return null;
 
 	const schemaRaw = headers.get('CobraSchema');
 	const schema = schemaRaw ? Number.parseInt(schemaRaw, 10) : CURRENT_SCHEMA;

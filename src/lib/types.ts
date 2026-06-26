@@ -357,14 +357,35 @@ export interface ScanAccount {
  * higher remote revision triggers the conflict prompt instead of a
  * silent overwrite.
  */
+export type SyncBackend = 'lichess' | 'cloudflare';
+
 export interface SyncSettings {
 	enabled: boolean;
+	/**
+	 * Which sync transport is active. `'lichess'` (default) stores blobs in a
+	 * private Lichess study; `'cloudflare'` uses a hosted Worker + D1 backend
+	 * (issue #68 — no per-chapter size ceiling). Chosen before enabling.
+	 */
+	backend?: SyncBackend;
+	/** Worker origin when `backend === 'cloudflare'`. */
+	cloudflareUrl?: string;
 	studyId?: string;
 	deviceId?: string;
 	lastPushAt?: number;
 	lastPullAt?: number;
-	/** Map keyed by `'global'` or `'rep:<id>'` → last revision we wrote/read. */
+	/**
+	 * Map keyed by sync scope → last revision we wrote/read. Scope keys are
+	 * `'global'`, `'rep-core:<id>'`, `'rep-telemetry:<id>'`, or the legacy
+	 * `'rep:<id>'` for pre-split combined scopes.
+	 */
 	lastKnownRevisions?: Record<string, number>;
+	/**
+	 * Sync the bulky per-rep telemetry tier (mistakes / gaps / spar games /
+	 * position WDL) in addition to the always-synced authored tree. Off by
+	 * default (issue #68) — telemetry is regenerable scan data and the main
+	 * driver of oversized payloads.
+	 */
+	syncTelemetry?: boolean;
 }
 
 export interface AppSettings {
@@ -398,6 +419,12 @@ export interface AppSettings {
 	explorerRatings: number[];
 	lichessApiToken: string;
 	lichessOAuth: LichessOAuthToken | null;
+	/**
+	 * Scopeless Lichess token used ONLY to prove identity to the Cloudflare
+	 * sync backend. Kept separate from `lichessOAuth` so the powerful
+	 * study/challenge token never leaves the client; device-local, never synced.
+	 */
+	syncIdentityToken?: LichessOAuthToken | null;
 	lastMistakeScanAt?: number;
 	/**
 	 * Created-at timestamp of the most recent Lichess game already scanned

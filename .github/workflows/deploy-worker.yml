@@ -1,0 +1,35 @@
+name: Deploy COBRA sync Worker
+
+# Deploys the hosted sync backend (worker/) to Cloudflare on pushes that touch
+# it. Independent of the frontend deploy — the Worker changes rarely.
+#
+# DORMANT until you opt in: set repo variable CLOUDFLARE_DEPLOY=true and add the
+# secrets CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID. First-time setup (D1
+# database id in wrangler.toml, schema apply, `wrangler secret put JWT_SECRET`)
+# is manual — see worker/README.md.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: ${{ vars.CLOUDFLARE_DEPLOY == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: worker
+          command: deploy

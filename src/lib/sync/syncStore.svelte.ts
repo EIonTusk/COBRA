@@ -34,36 +34,37 @@ import {
 	applyGlobalBundleMerge,
 	applyRepBundle,
 	applyRepBundleMerge,
+	applyRepCoreBundleMerge,
+	applyRepTelemetryBundleMerge,
 	buildGlobalBundle,
-	buildRepBundle,
+	buildRepCoreBundle,
+	buildRepTelemetryBundle,
 	decodeBundle,
 	encodeBundle,
 	type AnyBundle,
 	type GlobalBundle,
 	type MergeStats,
-	type RepBundle
+	type RepBundle,
+	type RepCoreBundle,
+	type RepTelemetryBundle
 } from './bundle';
 import { emptyMergeStats } from './merge';
 import { toast } from '$lib/ui';
-import {
-	deleteRepChapters,
-	findOrCreateSyncStudy,
-	listSyncChapters,
-	pullAllBlobs,
-	pullBlob,
-	pushBlob,
-	purgeSyncChapters,
-	SyncConflictError
-} from './lichessSync';
+import { SyncConflictError } from './lichessSync';
+import { LichessStudyTransport } from './lichessTransport';
+import { CloudflareTransport } from './cloudflareTransport';
+import { dedupeScopesByName } from './scopeDedup';
+import type { SyncKind } from './pgnWrap';
+import type { SyncTransport } from './transport';
 import { setDirtyHandler } from './dirtyMark';
-import type { AppSettings, SyncSettings } from '$lib/types';
+import type { AppSettings, SyncBackend, SyncSettings } from '$lib/types';
 
 export type SyncStatus = 'disabled' | 'idle' | 'pulling' | 'pushing' | 'conflict' | 'error';
 
 export type DirtyKey = 'global' | `rep:${string}`;
 
 export interface ConflictPrompt {
-	kind: 'rep' | 'global';
+	kind: SyncKind;
 	repId?: string;
 	localRevision: number;
 	remoteRevision: number;
@@ -74,6 +75,28 @@ export interface ConflictPrompt {
 const DEBOUNCE_MS = 30_000;
 const MIN_PULL_INTERVAL_MS = 5 * 60_000;
 
+// Operator-provided default Cloudflare sync URL, baked in at build time (Vite
+// `define`, fed from process.env.COBRA_SYNC_URL). When set, users don't paste a
+// URL — they share the one hosted Worker, isolated by Lichess identity. Falls
+// back to null for self-host / dev, where the user supplies their own.
+const DEFAULT_SYNC_URL =
+	typeof __COBRA_SYNC_URL__ === 'string' && __COBRA_SYNC_URL__.trim()
+		? __COBRA_SYNC_URL__.trim()
+		: null;
+
+/**
+ * Effective backend when the user hasn't explicitly chosen one. Fresh installs
+ * default to the hosted COBRA DB (Cloudflare) when a backend URL is baked in;
+ * users who already set up Lichess-study sync (it's enabled, or they have a
+ * studyId) stay on Lichess so they're never silently switched to another
+ * remote. An explicit stored choice always wins.
+ */
+function defaultBackend(sync: SyncSettings | undefined): SyncBackend {
+	if (sync?.backend) return sync.backend;
+	if (DEFAULT_SYNC_URL && !sync?.enabled && !sync?.studyId) return 'cloudflare';
+	return 'lichess';
+}
+
 class SyncStore {
 	status = $state<SyncStatus>('disabled');
 	enabled = $state<boolean>(false);
@@ -83,10 +106,23 @@ class SyncStore {
 	conflict = $state<ConflictPrompt | null>(null);
 	dirty = $state<SvelteSet<DirtyKey>>(new SvelteSet());
 	studyId = $state<string | null>(null);
+	/** Whether the bulky per-rep telemetry tier syncs. Off by default (#68). */
+	telemetry = $state<boolean>(false);
+	/** Active transport backend. */
+	backend = $state<SyncBackend>('lichess');
+	/** Worker origin when `backend === 'cloudflare'`. */
+	cloudflareUrl = $state<string | null>(null);
+	/** Operator-baked default Worker URL (build-time); null for self-host/dev. */
+	readonly defaultCloudflareUrl = DEFAULT_SYNC_URL;
 
 	#deviceId: string | null = null;
 	#debounceTimer: ReturnType<typeof setTimeout> | null = null;
 	#flightLock: Promise<void> | null = null;
+	// Memoised Cloudflare transport so its minted JWT survives across operations
+	// instead of re-authenticating (and re-hitting Lichess /api/account) on every
+	// push/pull. Rebuilt when the backend config (url/token/device) changes.
+	#cfTransport: CloudflareTransport | null = null;
+	#cfKey: string | null = null;
 
 	/** Hydrate from settings on app boot. Idempotent. */
 	async init(): Promise<void> {
@@ -98,6 +134,9 @@ class SyncStore {
 		this.lastPullAt = sync.lastPullAt ?? null;
 		this.#deviceId = sync.deviceId ?? null;
 		this.#revisionCache = { ...(sync.lastKnownRevisions ?? {}) };
+		this.telemetry = sync.syncTelemetry === true;
+		this.backend = defaultBackend(sync);
+		this.cloudflareUrl = sync.cloudflareUrl ?? DEFAULT_SYNC_URL;
 		this.status = this.enabled ? 'idle' : 'disabled';
 		// Register the dirty-mark handler so storage modules' calls land here
 		// regardless of whether sync is currently enabled — the markDirty
@@ -124,6 +163,42 @@ class SyncStore {
 		});
 	}
 
+	/**
+	 * Toggle whether the per-rep telemetry tier (mistakes / gaps / spar / WDL)
+	 * syncs. Persists the flag; when turning it ON with sync enabled, marks
+	 * every rep dirty so the telemetry actually gets pushed up on the next
+	 * flush. Turning it off just stops emitting telemetry going forward —
+	 * existing remote telemetry scopes are left in place.
+	 */
+	async setTelemetry(enabled: boolean): Promise<void> {
+		this.telemetry = enabled;
+		const s = await getSettings();
+		const next: SyncSettings = { ...(s.sync ?? { enabled: false }), syncTelemetry: enabled };
+		await saveSettings({ ...s, sync: next }, { skipDirtyMark: true });
+		if (enabled && this.enabled) {
+			const db = await (await import('$lib/storage/db')).getDB();
+			const reps = await db.getAll('repertoires');
+			for (const rep of reps) this.markDirty(`rep:${rep.id}`);
+		}
+	}
+
+	/**
+	 * Choose the sync backend before enabling. Persisted so `enable()` and the
+	 * `#transport()` factory pick it up. Only meaningful while disabled — switch
+	 * backends by disabling first, since the two remotes are independent.
+	 */
+	async configureBackend(backend: SyncBackend, cloudflareUrl?: string): Promise<void> {
+		this.backend = backend;
+		if (cloudflareUrl !== undefined) this.cloudflareUrl = cloudflareUrl || null;
+		const s = await getSettings();
+		const next: SyncSettings = {
+			...(s.sync ?? { enabled: false }),
+			backend,
+			cloudflareUrl: this.cloudflareUrl ?? undefined
+		};
+		await saveSettings({ ...s, sync: next }, { skipDirtyMark: true });
+	}
+
 	/** Manual "Sync now" — pull everything, then push everything dirty. */
 	async syncNow(): Promise<void> {
 		if (!this.enabled) return;
@@ -142,40 +217,58 @@ class SyncStore {
 	}
 
 	/**
-	 * First-run setup. Locates or creates the COBRA Sync study, and decides
-	 * whether to push local data up or pull remote data down based on what
-	 * `mode` the caller supplies. Caller (Settings UI) is responsible for
-	 * showing a chooser when remote already has chapters.
+	 * First-run setup. Connects the active backend (locating/creating the
+	 * Lichess study, or authenticating with the Cloudflare Worker), and decides
+	 * whether to push local data up or pull remote data down based on `mode`.
+	 * Caller (Settings UI) shows a chooser when the remote already has data.
 	 */
 	async enable(opts: {
 		mode: 'push-local' | 'pull-remote' | 'fresh';
 	}): Promise<{ remoteHasData: boolean }> {
 		const s = await getSettings();
-		const token = effectiveLichessToken(s);
-		if (!token) throw new Error('Connect Lichess in Settings before enabling sync.');
-		if (!tokenHasStudyScopes(s.lichessOAuth)) {
-			throw new Error('Lichess token is missing study:read/study:write scopes. Reconnect.');
-		}
-		const username = s.lichessOAuth?.username;
-		if (!username) throw new Error('Lichess OAuth account has no username.');
-
-		const { studyId } = await findOrCreateSyncStudy(token, username, s.sync?.studyId);
-		this.studyId = studyId;
+		const backend: SyncBackend = defaultBackend(s.sync);
 		this.#deviceId = this.#deviceId ?? s.sync?.deviceId ?? crypto.randomUUID();
+
+		let remoteHasData: boolean;
+		let studyId = s.sync?.studyId;
+		if (backend === 'cloudflare') {
+			const baseUrl = s.sync?.cloudflareUrl ?? DEFAULT_SYNC_URL;
+			if (!baseUrl) throw new Error('Set the Cloudflare sync URL in Settings before enabling.');
+			const idToken = s.syncIdentityToken?.accessToken;
+			if (!idToken) {
+				throw new Error('Connect a sync identity (Settings) before enabling Cloudflare sync.');
+			}
+			const transport = new CloudflareTransport({
+				baseUrl,
+				lichessToken: idToken,
+				deviceId: this.#deviceId
+			});
+			({ remoteHasData } = await transport.connect());
+		} else {
+			const token = effectiveLichessToken(s);
+			if (!token) throw new Error('Connect Lichess in Settings before enabling sync.');
+			if (!tokenHasStudyScopes(s.lichessOAuth)) {
+				throw new Error('Lichess token is missing study:read/study:write scopes. Reconnect.');
+			}
+			const username = s.lichessOAuth?.username;
+			if (!username) throw new Error('Lichess OAuth account has no username.');
+			const transport = new LichessStudyTransport({ token, username, studyId: s.sync?.studyId });
+			({ remoteHasData } = await transport.connect());
+			studyId = transport.studyId as string;
+			this.studyId = studyId;
+		}
+
 		this.enabled = true;
 		this.status = 'idle';
 
 		const next: SyncSettings = {
 			...(s.sync ?? { enabled: false }),
 			enabled: true,
+			backend,
 			studyId,
 			deviceId: this.#deviceId
 		};
 		await saveSettings({ ...s, sync: next }, { skipDirtyMark: true });
-
-		// Probe the study for existing COBRA-SYNC chapters.
-		const chapters = await listSyncChapters(token, studyId);
-		const remoteHasData = chapters.length > 0;
 
 		if (opts.mode === 'pull-remote' && remoteHasData) {
 			await this.pullAll();
@@ -200,21 +293,18 @@ class SyncStore {
 		this.dirty.clear();
 		this.conflict = null;
 		this.error = null;
+		this.#cfTransport = null;
+		this.#cfKey = null;
 	}
 
-	/** Disable + delete every COBRA-SYNC chapter on Lichess + clear local
-	 *  revision tracking. Leaves the (now empty) study itself in place — the
-	 *  user can delete it on Lichess if they care. */
+	/** Disable + delete every remote sync scope (Lichess chapters or Cloudflare
+	 *  rows) + clear local revision tracking. For Lichess, leaves the (now
+	 *  empty) study in place — the user can delete it themselves. */
 	async disconnectAndForget(): Promise<void> {
-		const s = await getSettings();
-		const token = effectiveLichessToken(s);
-		const studyId = s.sync?.studyId;
-		if (token && studyId) {
-			try {
-				await purgeSyncChapters(token, studyId);
-			} catch (e) {
-				console.warn('[sync] purge failed:', e);
-			}
+		try {
+			await (await this.#transport()).purgeAll();
+		} catch (e) {
+			console.warn('[sync] purge failed:', e);
 		}
 		await this.disable();
 		const fresh = await getSettings();
@@ -238,7 +328,7 @@ class SyncStore {
 						await this.#pushGlobal();
 					} else {
 						const repId = key.slice('rep:'.length);
-						await this.#pushRep(repId);
+						await this.#pushRepScopes(repId);
 					}
 					this.dirty.delete(key);
 				} catch (e) {
@@ -271,7 +361,7 @@ class SyncStore {
 				const db = await (await import('$lib/storage/db')).getDB();
 				const reps = await db.getAll('repertoires');
 				for (const rep of reps) {
-					await this.#pushRep(rep.id);
+					await this.#pushRepScopes(rep.id);
 				}
 				await this.#pushGlobal();
 				this.dirty.clear();
@@ -300,33 +390,22 @@ class SyncStore {
 		await this.#withFlightLock(async () => {
 			try {
 				this.status = 'pulling';
-				const ctx = await this.#requireSyncContext();
-				// One PGN fetch covers every chapter — we used to call
-				// `pullBlob` once per chapter, which re-fetched the whole
-				// study each time (N+1 HTTP calls). `pullAllBlobs` also
-				// resolves chapters whose meta got stripped by Lichess
-				// (recovering kind/repId via bundle decode), which the
-				// old `listSyncChapters` → `pullBlob` path silently
-				// dropped — that drop was the "pill says Synced but
-				// nothing applied" bug.
-				const blobs = await pullAllBlobs(ctx.token, ctx.studyId);
-				// Multiple chapters can share a `[Event]` name when the
-				// pre-fix cleanup left duplicates behind. Keep the one
-				// with the highest revision (or highest pushedAt as
-				// tiebreaker) so we don't apply stale data. Plain object
-				// — this isn't reactive, the values just feed the apply
-				// loop below.
-				const byName: Record<string, (typeof blobs)[number]> = {};
-				for (const b of blobs) {
-					const prev = byName[b.chapterName];
-					if (!prev) {
-						byName[b.chapterName] = b;
-						continue;
-					}
-					const prevKey = prev.revision * 1e15 + prev.pushedAt;
-					const curKey = b.revision * 1e15 + b.pushedAt;
-					if (curKey > prevKey) byName[b.chapterName] = b;
-				}
+				const transport = await this.#transport();
+				// One round trip covers every scope — we used to call
+				// `pull` once per scope, which re-fetched the whole study
+				// each time (N+1 HTTP calls). `pullAll` also resolves
+				// scopes whose meta got stripped by Lichess (recovering
+				// kind/repId via bundle decode), which the old
+				// per-scope path silently dropped — that drop was the
+				// "pill says Synced but nothing applied" bug.
+				const blobs = await transport.pullAll();
+				// Multiple slots can share a scope name — duplicate chapters from
+				// a failed cleanup sweep, or a stale pre-split combined chapter
+				// lingering next to its rep-core replacement (which reuses the
+				// `:rep:` name). Collapse to one winner per name: a tier scope
+				// supersedes a same-named legacy combined one; otherwise newest
+				// (revision, pushedAt) wins. See `dedupeScopesByName`.
+				const deduped = dedupeScopesByName(blobs);
 
 				const settings = await getSettings();
 				let mergedSettings: AppSettings | null = null;
@@ -347,32 +426,15 @@ class SyncStore {
 				};
 				addTombstones(settings.repTombstones);
 				const decodedByName: Record<string, AnyBundle> = {};
-				for (const parsed of Object.values(byName)) {
+				for (const parsed of deduped) {
 					const decoded = await decodeBundle(parsed.blob);
-					decodedByName[parsed.chapterName] = decoded;
+					decodedByName[parsed.scopeName] = decoded;
 					if (decoded.kind === 'global') addTombstones(decoded.settings?.repTombstones);
 				}
 
-				for (const parsed of Object.values(byName)) {
-					const decoded = decodedByName[parsed.chapterName];
-					if (decoded.kind === 'rep') {
-						const deletedAt = tombstones[decoded.repertoireId];
-						if (deletedAt !== undefined && deletedAt >= decoded.exportedAt) {
-							// Superseded by a deletion newer than this snapshot — skip
-							// applying, and best-effort tear down the lingering chapter.
-							void this.#deleteRepChapter(decoded.repertoireId).catch(() => {});
-							continue;
-						}
-						if (decoded.version === 2) {
-							const stats = await applyRepBundleMerge(decoded as RepBundle);
-							addStats(aggregate, stats);
-						} else {
-							// v1 bundle from a not-yet-upgraded device — fall back
-							// to the legacy wipe-and-restore. We can't merge what
-							// we don't have timestamps for.
-							await applyRepBundle(decoded as RepBundle);
-						}
-					} else {
+				for (const parsed of deduped) {
+					const decoded = decodedByName[parsed.scopeName];
+					if (decoded.kind === 'global') {
 						if (decoded.version === 2) {
 							const r = await applyGlobalBundleMerge(decoded as GlobalBundle, settings);
 							mergedSettings = r.mergedSettings;
@@ -381,9 +443,33 @@ class SyncStore {
 							const r = await applyGlobalBundle(decoded as GlobalBundle, settings);
 							mergedSettings = r.mergedSettings;
 						}
+					} else {
+						// Any rep-scoped tier (legacy 'rep', 'rep-core', 'rep-telemetry').
+						const deletedAt = tombstones[decoded.repertoireId];
+						if (deletedAt !== undefined && deletedAt >= decoded.exportedAt) {
+							// Superseded by a deletion newer than this snapshot — skip
+							// applying, and best-effort tear down the lingering scope.
+							void this.#deleteRepChapter(decoded.repertoireId).catch(() => {});
+							continue;
+						}
+						if (decoded.kind === 'rep-core') {
+							addStats(aggregate, await applyRepCoreBundleMerge(decoded as RepCoreBundle));
+						} else if (decoded.kind === 'rep-telemetry') {
+							addStats(
+								aggregate,
+								await applyRepTelemetryBundleMerge(decoded as RepTelemetryBundle)
+							);
+						} else if (decoded.version === 2) {
+							addStats(aggregate, await applyRepBundleMerge(decoded as RepBundle));
+						} else {
+							// v1 combined bundle from a not-yet-upgraded device — fall
+							// back to the legacy wipe-and-restore. We can't merge what
+							// we don't have timestamps for.
+							await applyRepBundle(decoded as RepBundle);
+						}
 					}
 					this.#rememberRevisionByKey(
-						parsed.kind === 'global' ? 'global' : (`rep:${parsed.repId as string}` as DirtyKey),
+						this.#scopeRevKey(parsed.kind, parsed.repId),
 						parsed.revision
 					);
 				}
@@ -394,7 +480,7 @@ class SyncStore {
 				const sync: SyncSettings = {
 					...(final.sync ?? { enabled: false }),
 					enabled: true,
-					studyId: ctx.studyId,
+					studyId: this.studyId ?? undefined,
 					deviceId: this.#deviceId ?? undefined,
 					lastPushAt: this.lastPushAt ?? undefined,
 					lastPullAt: now,
@@ -414,15 +500,18 @@ class SyncStore {
 		const c = this.conflict;
 		this.conflict = null;
 		try {
-			const ctx = await this.#requireSyncContext();
-			const parsed = await pullBlob(ctx.token, ctx.studyId, c.kind, c.repId);
+			const transport = await this.#transport();
+			const parsed = await transport.pull(c.kind, c.repId);
 			if (parsed) {
 				const decoded = await decodeBundle(parsed.blob);
 				const aggregate = emptyMergeStats();
-				if (decoded.kind === 'rep') {
+				if (decoded.kind === 'rep-core') {
+					addStats(aggregate, await applyRepCoreBundleMerge(decoded as RepCoreBundle));
+				} else if (decoded.kind === 'rep-telemetry') {
+					addStats(aggregate, await applyRepTelemetryBundleMerge(decoded as RepTelemetryBundle));
+				} else if (decoded.kind === 'rep') {
 					if (decoded.version === 2) {
-						const stats = await applyRepBundleMerge(decoded as RepBundle);
-						addStats(aggregate, stats);
+						addStats(aggregate, await applyRepBundleMerge(decoded as RepBundle));
 					} else {
 						await applyRepBundle(decoded as RepBundle);
 					}
@@ -455,7 +544,8 @@ class SyncStore {
 			if (c.kind === 'global') {
 				await this.#pushGlobal({ force: true, expectedRemote: c.remoteRevision });
 			} else {
-				await this.#pushRep(c.repId as string, {
+				// Overwrite exactly the conflicted scope (one tier), not both.
+				await this.#pushScope(c.kind, c.repId, {
 					force: true,
 					expectedRemote: c.remoteRevision
 				});
@@ -506,37 +596,67 @@ class SyncStore {
 		await promise;
 	}
 
-	async #pushRep(
-		repId: string,
-		opts: { force?: boolean; expectedRemote?: number } = {}
-	): Promise<void> {
-		const ctx = await this.#requireSyncContext();
-		const bundle = await buildRepBundle(repId);
+	/**
+	 * Push a repertoire as the tier-split scopes: the authored `rep-core` tier
+	 * always, plus the `rep-telemetry` tier only when the user opted into
+	 * telemetry sync (off by default — issue #68). A deleted rep tears down
+	 * all its remote scopes.
+	 */
+	async #pushRepScopes(repId: string): Promise<void> {
+		const present = await this.#pushScope('rep-core', repId, {});
+		if (!present) return; // rep was deleted; #pushScope tore its scopes down
+		const s = await getSettings();
+		if (s.sync?.syncTelemetry === true) {
+			await this.#pushScope('rep-telemetry', repId, {});
+		}
+	}
+
+	/**
+	 * Push a single sync scope (global, or one rep tier), bumping its own
+	 * revision. Returns false when a rep-scoped push finds the rep gone — in
+	 * which case it tears down the rep's remote scopes and writes nothing.
+	 */
+	async #pushScope(
+		kind: SyncKind,
+		repId: string | undefined,
+		opts: { force?: boolean; expectedRemote?: number }
+	): Promise<boolean> {
+		const transport = await this.#transport();
+		let bundle: AnyBundle | null;
+		if (kind === 'global') {
+			bundle = await buildGlobalBundle(await getSettings());
+		} else if (kind === 'rep-core') {
+			bundle = await buildRepCoreBundle(repId as string);
+		} else if (kind === 'rep-telemetry') {
+			bundle = await buildRepTelemetryBundle(repId as string);
+		} else {
+			// Legacy combined 'rep' is never emitted; guard for completeness.
+			bundle = null;
+		}
 		if (!bundle) {
-			// Rep no longer exists locally — it was deleted. Tear down its
-			// sync chapter so the deletion propagates and the blob stops
-			// resurrecting on other devices' pulls. The tombstone in the
-			// global chapter (pushed separately) is the durable signal; this
-			// is the immediate cleanup.
-			try {
-				await deleteRepChapters(ctx.token, ctx.studyId, repId);
-			} catch (e) {
-				console.warn('[sync] failed to delete chapter for removed rep:', e);
+			if (kind !== 'global' && repId) {
+				// Rep no longer exists locally — it was deleted. Tear down its
+				// remote scopes so the deletion propagates and the blobs stop
+				// resurrecting on other devices' pulls. The tombstone in the
+				// global scope (pushed separately) is the durable signal; this
+				// is the immediate cleanup.
+				try {
+					await transport.deleteRep(repId);
+				} catch (e) {
+					console.warn('[sync] failed to delete remote scopes for removed rep:', e);
+				}
 			}
-			return;
+			return false;
 		}
 		const blob = await encodeBundle(bundle);
-		const prior = opts.force
-			? (opts.expectedRemote ?? null)
-			: (this.#revisionFor(`rep:${repId}`) ?? null);
+		const revKey = this.#scopeRevKey(kind, repId);
+		const prior = opts.force ? (opts.expectedRemote ?? null) : (this.#revisionFor(revKey) ?? null);
 		const nextRevision = (prior ?? -1) + 1;
 		this.status = 'pushing';
-		const result = await pushBlob(
-			ctx.token,
-			ctx.studyId,
+		const result = await transport.push(
 			blob,
 			{
-				kind: 'rep',
+				kind,
 				repId,
 				revision: nextRevision,
 				deviceId: this.#deviceId as string,
@@ -544,64 +664,70 @@ class SyncStore {
 			},
 			prior
 		);
-		this.#rememberRevisionByKey(`rep:${repId}`, result.revision);
+		this.#rememberRevisionByKey(revKey, result.revision);
 		this.lastPushAt = result.pushedAt;
 		warnNearCap(result.totalChapters);
 		await this.#persistRevisions();
+		return true;
 	}
 
-	/** Best-effort teardown of a lingering rep chapter spotted during a pull
+	/** Best-effort teardown of a lingering rep scope spotted during a pull
 	 *  (the deleting device's own cleanup didn't land). */
 	async #deleteRepChapter(repId: string): Promise<void> {
-		const ctx = await this.#requireSyncContext();
-		await deleteRepChapters(ctx.token, ctx.studyId, repId);
+		const transport = await this.#transport();
+		await transport.deleteRep(repId);
 	}
 
 	async #pushGlobal(opts: { force?: boolean; expectedRemote?: number } = {}): Promise<void> {
-		const ctx = await this.#requireSyncContext();
-		const settings = await getSettings();
-		const bundle = await buildGlobalBundle(settings);
-		const blob = await encodeBundle(bundle);
-		const prior = opts.force
-			? (opts.expectedRemote ?? null)
-			: (this.#revisionFor('global') ?? null);
-		const nextRevision = (prior ?? -1) + 1;
-		this.status = 'pushing';
-		const result = await pushBlob(
-			ctx.token,
-			ctx.studyId,
-			blob,
-			{
-				kind: 'global',
-				revision: nextRevision,
-				deviceId: this.#deviceId as string,
-				pushedAt: Date.now()
-			},
-			prior
-		);
-		this.#rememberRevisionByKey('global', result.revision);
-		this.lastPushAt = result.pushedAt;
-		warnNearCap(result.totalChapters);
-		await this.#persistRevisions();
+		await this.#pushScope('global', undefined, opts);
 	}
 
-	async #requireSyncContext(): Promise<{ token: string; studyId: string; settings: AppSettings }> {
+	/**
+	 * Build the active sync transport from current settings. This is the one
+	 * place that picks which backend to instantiate — Lichess study or
+	 * Cloudflare Worker — so every push/pull/delete path is backend-agnostic.
+	 */
+	async #transport(): Promise<SyncTransport> {
 		const settings = await getSettings();
+		const backend: SyncBackend = defaultBackend(settings.sync);
 		const token = effectiveLichessToken(settings);
+		this.#deviceId = this.#deviceId ?? settings.sync?.deviceId ?? crypto.randomUUID();
+
+		if (backend === 'cloudflare') {
+			const baseUrl = settings.sync?.cloudflareUrl ?? this.cloudflareUrl ?? DEFAULT_SYNC_URL;
+			if (!baseUrl) throw new Error('Cloudflare sync URL is not configured. Set it in Settings.');
+			const idToken = settings.syncIdentityToken?.accessToken;
+			if (!idToken) throw new Error('Connect a sync identity (Settings) for Cloudflare sync.');
+			const key = `${baseUrl} ${idToken} ${this.#deviceId}`;
+			if (!this.#cfTransport || this.#cfKey !== key) {
+				this.#cfTransport = new CloudflareTransport({
+					baseUrl,
+					lichessToken: idToken,
+					deviceId: this.#deviceId
+				});
+				this.#cfKey = key;
+			}
+			return this.#cfTransport;
+		}
+
 		if (!token) throw new Error('Lichess token is missing — reconnect in Settings.');
 		const studyId = settings.sync?.studyId ?? this.studyId;
 		if (!studyId) throw new Error('Sync study is not configured. Re-enable sync in Settings.');
 		this.studyId = studyId;
-		this.#deviceId =
-			this.#deviceId ?? settings.sync?.deviceId ?? settings.sync?.deviceId ?? crypto.randomUUID();
-		return { token, studyId, settings };
+		return new LichessStudyTransport({ token, studyId });
 	}
 
-	#rememberRevisionByKey(key: DirtyKey, revision: number): void {
+	/** Revision-tracking key for a scope. Distinct per tier so `rep-core` and
+	 *  `rep-telemetry` keep independent revisions; `global` is rep-less. */
+	#scopeRevKey(kind: SyncKind, repId: string | undefined): string {
+		return kind === 'global' ? 'global' : `${kind}:${repId}`;
+	}
+
+	#rememberRevisionByKey(key: string, revision: number): void {
 		this.#revisionCache[key] = revision;
 	}
 
-	#revisionFor(key: DirtyKey): number | undefined {
+	#revisionFor(key: string): number | undefined {
 		return this.#revisionCache[key];
 	}
 
@@ -632,7 +758,7 @@ class SyncStore {
 	}
 }
 
-function conflictDirtyKey(c: { kind: 'rep' | 'global'; repId?: string }): DirtyKey {
+function conflictDirtyKey(c: { kind: SyncKind; repId?: string }): DirtyKey {
 	return c.kind === 'global' ? 'global' : (`rep:${c.repId as string}` as DirtyKey);
 }
 

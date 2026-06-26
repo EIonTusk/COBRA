@@ -7,3 +7,6 @@ bun.lockb
 
 # Miscellaneous
 /static/
+
+# Sync backend Worker — has its own toolchain (worker/tsconfig.json)
+/worker/

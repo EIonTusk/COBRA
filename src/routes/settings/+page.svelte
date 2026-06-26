@@ -394,6 +394,12 @@
 	const syncStudyId = $derived(sync.studyId);
 	const syncDirtyCount = $derived(sync.dirty.size);
 	const syncError = $derived(sync.error);
+	const syncTelemetry = $derived(sync.telemetry);
+	const syncBackend = $derived(sync.backend);
+	const syncHasDefaultUrl = $derived(sync.defaultCloudflareUrl != null);
+	const syncIdentityUser = $derived(settings?.syncIdentityToken?.username ?? null);
+	const syncIdentityConnected = $derived(!!settings?.syncIdentityToken?.accessToken);
+	let cfUrl = $state(sync.cloudflareUrl ?? '');
 	let syncBusyLocal = $state(false);
 
 	const lichessReadyForSync = $derived.by(() => {
@@ -753,7 +759,8 @@
 							<Button
 								variant="primary"
 								size="sm"
-								onclick={() => startOAuth([...ALL_SCOPES], lichessReturnTo)}
+								onclick={() =>
+									startOAuth([...ALL_SCOPES], lichessReturnTo ?? `${base}/settings#lichess`)}
 							>
 								Reconnect
 							</Button>
@@ -1214,19 +1221,99 @@
 						COBRA server.
 					</div>
 				{:else if !syncEnabled}
+					<div class="ink-panel mb-4 p-4">
+						<div class="eyebrow mb-2">Backend</div>
+						<div class="flex flex-col gap-2 font-serif text-sm text-[var(--color-parchment-200)]">
+							<label class="flex cursor-pointer items-start gap-2">
+								<input
+									type="radio"
+									name="sync-backend"
+									checked={syncBackend === 'cloudflare'}
+									onchange={() =>
+										sync.configureBackend('cloudflare', syncHasDefaultUrl ? undefined : cfUrl)}
+									class="mt-0.5 accent-[var(--color-brass-300)]"
+								/>
+								<span
+									>COBRA DB (via Cloudflare)
+									<span class="text-[var(--color-parchment-500)] italic"
+										>{syncHasDefaultUrl
+											? '— recommended; no size limit, synced via COBRA’s hosted database.'
+											: '— no size limit; needs your own Worker URL (self-host).'}</span
+									></span
+								>
+							</label>
+							<label class="flex cursor-pointer items-start gap-2">
+								<input
+									type="radio"
+									name="sync-backend"
+									checked={syncBackend === 'lichess'}
+									onchange={() => sync.configureBackend('lichess')}
+									class="mt-0.5 accent-[var(--color-brass-300)]"
+								/>
+								<span
+									>Lichess study
+									<span class="text-[var(--color-parchment-500)] italic"
+										>— zero setup; stored in a private Lichess study (best for smaller repertoires).</span
+									></span
+								>
+							</label>
+							{#if syncBackend === 'cloudflare'}
+								{#if !syncHasDefaultUrl}
+									<input
+										type="url"
+										placeholder="https://cobra-sync.<account>.workers.dev"
+										bind:value={cfUrl}
+										onblur={() => sync.configureBackend('cloudflare', cfUrl)}
+										class="mt-1 w-full rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-xs text-[var(--color-parchment-100)]"
+									/>
+								{/if}
+								<div class="mt-1 flex flex-wrap items-center gap-2">
+									{#if syncIdentityConnected}
+										<span class="font-serif text-xs text-[var(--color-parchment-400)] italic">
+											Sync identity connected{syncIdentityUser ? ` as ${syncIdentityUser}` : ''}.
+										</span>
+										<Button
+											variant="ghost"
+											size="sm"
+											onclick={() =>
+												startOAuth([], lichessReturnTo ?? `${base}/settings#sync`, 'identity')}
+										>
+											Reconnect
+										</Button>
+									{:else}
+										<Button
+											variant="secondary"
+											size="sm"
+											onclick={() =>
+												startOAuth([], lichessReturnTo ?? `${base}/settings#sync`, 'identity')}
+										>
+											Connect sync identity
+										</Button>
+										<span class="font-serif text-xs text-[var(--color-parchment-500)] italic">
+											A scopeless Lichess token — the backend can't act on your Lichess account.
+										</span>
+									{/if}
+								</div>
+							{/if}
+						</div>
+					</div>
 					<div class="ink-panel mb-4 flex flex-wrap items-center justify-between gap-3 p-4">
 						<div class="flex-1">
 							<div class="eyebrow mb-1">Status</div>
 							<p class="font-serif text-sm text-[var(--color-parchment-400)] italic">
-								Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA
-								Sync".
+								{syncBackend === 'cloudflare'
+									? 'Disabled. Enabling will sync via the COBRA DB (Cloudflare).'
+									: 'Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA Sync".'}
 							</p>
 						</div>
 						<Button
 							variant="primary"
 							size="sm"
 							onclick={enableSync}
-							disabled={syncBusyLocal || syncBusy}
+							disabled={syncBusyLocal ||
+								syncBusy ||
+								(syncBackend === 'cloudflare' &&
+									((!cfUrl && !syncHasDefaultUrl) || !syncIdentityConnected))}
 						>
 							{syncBusyLocal ? 'Working…' : 'Enable Sync'}
 						</Button>
@@ -1299,6 +1386,30 @@
 							</Button>
 						</div>
 					</div>
+
+					<label
+						class="flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
+					>
+						<input
+							type="checkbox"
+							checked={syncTelemetry}
+							onchange={(e) => sync.setTelemetry((e.currentTarget as HTMLInputElement).checked)}
+							class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
+						/>
+						<div class="min-w-0 flex-1">
+							<span class="font-serif text-sm text-[var(--color-parchment-100)]"
+								>Also sync scan history (telemetry)</span
+							>
+							<p
+								class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+							>
+								Mistakes, empirical gaps, spar games and position WDL. Off by default — this data is
+								bulky and regenerable by re-scanning, and excluding it keeps large repertoires under
+								Lichess's per-chapter size limit. Your authored tree (moves, cards, ideas) always
+								syncs regardless.
+							</p>
+						</div>
+					</label>
 				{/if}
 
 				<details class="ink-panel p-4 font-serif text-sm text-[var(--color-parchment-400)]">
@@ -1309,7 +1420,11 @@
 					</summary>
 					<ul class="mt-3 list-disc space-y-1 pl-5 italic">
 						<li>
-							Synced: repertoires, FSRS card progress, idea cards, mistakes, baselines, settings.
+							Always synced: repertoires, FSRS card progress, idea cards, baselines, settings.
+						</li>
+						<li>
+							Synced only with “scan history” enabled above: mistakes, empirical gaps, spar games,
+							position WDL. Off by default — bulky and regenerable by re-scanning.
 						</li>
 						<li>
 							Not synced: Lichess token (stays device-local), explorer + opening name caches

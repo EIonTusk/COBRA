@@ -12,6 +12,9 @@ const gitignorePath = path.resolve(import.meta.dirname, '.gitignore');
 
 export default defineConfig(
 	includeIgnoreFile(gitignorePath),
+	// The sync backend Worker has its own toolchain (worker/tsconfig.json) and
+	// Cloudflare runtime globals — keep it out of the app's lint pass.
+	{ ignores: ['worker/'] },
 	js.configs.recommended,
 	ts.configs.recommended,
 	svelte.configs.recommended,

@@ -42,6 +42,7 @@ export function defaultSettings(): AppSettings {
 		explorerRatings: [1600, 1800, 2000, 2200, 2500],
 		lichessApiToken: '',
 		lichessOAuth: null,
+		syncIdentityToken: null,
 		useLichessServerEval: true,
 		styleAdviceEnabled: false,
 		soundsEnabled: true,
@@ -61,12 +62,16 @@ export function defaultSettings(): AppSettings {
  */
 export function sanitizeSettingsForSync(
 	s: AppSettings
-): Omit<AppSettings, 'lichessApiToken' | 'lichessOAuth' | 'sync'> {
+): Omit<AppSettings, 'lichessApiToken' | 'lichessOAuth' | 'syncIdentityToken' | 'sync'> {
 	const copy = JSON.parse(JSON.stringify(s)) as AppSettings;
 	delete (copy as Partial<AppSettings>).lichessApiToken;
 	delete (copy as Partial<AppSettings>).lichessOAuth;
+	delete (copy as Partial<AppSettings>).syncIdentityToken;
 	delete (copy as Partial<AppSettings>).sync;
-	return copy as Omit<AppSettings, 'lichessApiToken' | 'lichessOAuth' | 'sync'>;
+	return copy as Omit<
+		AppSettings,
+		'lichessApiToken' | 'lichessOAuth' | 'syncIdentityToken' | 'sync'
+	>;
 }
 
 export async function getSettings(): Promise<AppSettings> {
