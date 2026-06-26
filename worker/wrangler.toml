@@ -15,6 +15,10 @@ database_id = "PASTE_D1_DATABASE_ID_HERE"
 # binding = "BLOBS"
 # bucket_name = "cobra-sync-blobs"
 
+# Daily tombstone purge (hard-deletes soft-deleted rows past the 30-day window).
+[triggers]
+crons = ["0 3 * * *"]
+
 [vars]
 # CORS allow-origin for the app. Set to your deployed origin in production
 # (e.g. "https://cobra.pages.dev"); '*' is acceptable since auth is bearer-only.

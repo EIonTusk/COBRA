@@ -32,6 +32,8 @@ export interface Env {
 const R2_THRESHOLD = 700_000; // bytes of blob string above which we offload to R2
 const JWT_TTL_SECONDS = 60 * 60;
 const SCOPE_KINDS = new Set(['global', 'rep-core', 'rep-telemetry']);
+const QUOTA_BYTES = 50 * 1024 * 1024; // per-user storage cap (~50 MB)
+const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // hard-delete soft-deletes after 30 days
 
 export default {
 	async fetch(req: Request, env: Env): Promise<Response> {
@@ -52,6 +54,17 @@ export default {
 			const msg = e instanceof Error ? e.message : 'internal error';
 			return cors(env, json({ error: msg }, 500));
 		}
+	},
+
+	// Cron (see wrangler.toml [triggers]): hard-delete tombstones older than the
+	// retention window. Their byte_len is already 0 (zeroed on soft-delete), so
+	// no bytes_used reconciliation is needed; their R2 objects were dropped at
+	// delete time.
+	async scheduled(_event: ScheduledController, env: Env): Promise<void> {
+		const cutoff = Date.now() - TOMBSTONE_TTL_MS;
+		await env.DB.prepare(`DELETE FROM blobs WHERE deleted_at IS NOT NULL AND deleted_at < ?1`)
+			.bind(cutoff)
+			.run();
 	}
 };
 
@@ -138,6 +151,16 @@ async function handlePush(req: Request, env: Env): Promise<Response> {
 	const now = Date.now();
 	const pushedAt = typeof body.pushedAt === 'number' ? body.pushedAt : now;
 
+	// Existing row (for quota delta + R2 cleanup) and the user's running total.
+	const existing = await env.DB.prepare(
+		`SELECT byte_len, r2_key FROM blobs WHERE user_id = ?1 AND kind = ?2 AND rep_id = ?3`
+	)
+		.bind(userId, kind, repId)
+		.first<{ byte_len: number; r2_key: string | null }>();
+	const usage = await env.DB.prepare(`SELECT bytes_used FROM users WHERE user_id = ?1`)
+		.bind(userId)
+		.first<{ bytes_used: number }>();
+
 	// Decide payload storage: deleted -> neither; large -> R2; else inline.
 	let blob: string | null = null;
 	let r2Key: string | null = null;
@@ -148,11 +171,22 @@ async function handlePush(req: Request, env: Env): Promise<Response> {
 		byteLen = payload.length;
 		if (byteLen > R2_THRESHOLD && env.BLOBS) {
 			r2Key = `${userId}/${kind}/${repId || 'global'}`;
-			await env.BLOBS.put(r2Key, payload);
 		} else {
 			blob = payload;
 		}
 	}
+
+	// Quota: projected total after this write (delta against the old row).
+	const projected = Math.max(0, (usage?.bytes_used ?? 0) - (existing?.byte_len ?? 0) + byteLen);
+	if (!deleted && projected > QUOTA_BYTES) {
+		return json({ error: 'storage quota exceeded', quotaBytes: QUOTA_BYTES }, 413);
+	}
+
+	// Write the R2 object before the row commits so a pull never sees a row
+	// pointing at a missing object. (Note: under concurrent same-scope pushes
+	// the loser can overwrite the winner's object at this deterministic key —
+	// acceptable for the rare large-telemetry case; the CAS still protects D1.)
+	if (r2Key) await env.BLOBS!.put(r2Key, body.blob as string);
 
 	const res = await env.DB.prepare(
 		`INSERT INTO blobs (user_id, kind, rep_id, revision, device_id, pushed_at,
@@ -201,6 +235,15 @@ async function handlePush(req: Request, env: Env): Promise<Response> {
 			},
 			409
 		);
+	}
+
+	// CAS won. Reconcile the user's byte total, and drop an R2 object the row no
+	// longer references (a delete, or an overwrite that moved back inline).
+	await env.DB.prepare(`UPDATE users SET bytes_used = ?2, last_seen = ?3 WHERE user_id = ?1`)
+		.bind(userId, projected, now)
+		.run();
+	if (existing?.r2_key && existing.r2_key !== r2Key && env.BLOBS) {
+		await env.BLOBS.delete(existing.r2_key).catch(() => {});
 	}
 
 	return json({ ok: true, revision: body.revision, updatedAt: now });
