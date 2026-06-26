@@ -52,6 +52,7 @@ import { emptyMergeStats } from './merge';
 import { toast } from '$lib/ui';
 import { SyncConflictError } from './lichessSync';
 import { LichessStudyTransport } from './lichessTransport';
+import { dedupeScopesByName } from './scopeDedup';
 import type { SyncKind } from './pgnWrap';
 import { setDirtyHandler } from './dirtyMark';
 import type { AppSettings, SyncSettings } from '$lib/types';
@@ -328,23 +329,13 @@ class SyncStore {
 				// per-scope path silently dropped — that drop was the
 				// "pill says Synced but nothing applied" bug.
 				const blobs = await transport.pullAll();
-				// Multiple slots can share a scope name when the pre-fix
-				// cleanup left duplicates behind (e.g. duplicate Lichess
-				// chapters with the same `[Event]`). Keep the one with the
-				// highest revision (or highest pushedAt as tiebreaker) so
-				// we don't apply stale data. Plain object — this isn't
-				// reactive, the values just feed the apply loop below.
-				const byName: Record<string, (typeof blobs)[number]> = {};
-				for (const b of blobs) {
-					const prev = byName[b.scopeName];
-					if (!prev) {
-						byName[b.scopeName] = b;
-						continue;
-					}
-					const prevKey = prev.revision * 1e15 + prev.pushedAt;
-					const curKey = b.revision * 1e15 + b.pushedAt;
-					if (curKey > prevKey) byName[b.scopeName] = b;
-				}
+				// Multiple slots can share a scope name — duplicate chapters from
+				// a failed cleanup sweep, or a stale pre-split combined chapter
+				// lingering next to its rep-core replacement (which reuses the
+				// `:rep:` name). Collapse to one winner per name: a tier scope
+				// supersedes a same-named legacy combined one; otherwise newest
+				// (revision, pushedAt) wins. See `dedupeScopesByName`.
+				const deduped = dedupeScopesByName(blobs);
 
 				const settings = await getSettings();
 				let mergedSettings: AppSettings | null = null;
@@ -365,13 +356,13 @@ class SyncStore {
 				};
 				addTombstones(settings.repTombstones);
 				const decodedByName: Record<string, AnyBundle> = {};
-				for (const parsed of Object.values(byName)) {
+				for (const parsed of deduped) {
 					const decoded = await decodeBundle(parsed.blob);
 					decodedByName[parsed.scopeName] = decoded;
 					if (decoded.kind === 'global') addTombstones(decoded.settings?.repTombstones);
 				}
 
-				for (const parsed of Object.values(byName)) {
+				for (const parsed of deduped) {
 					const decoded = decodedByName[parsed.scopeName];
 					if (decoded.kind === 'global') {
 						if (decoded.version === 2) {
