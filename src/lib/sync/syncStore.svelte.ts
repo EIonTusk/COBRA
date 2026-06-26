@@ -47,6 +47,7 @@ import { emptyMergeStats } from './merge';
 import { toast } from '$lib/ui';
 import { SyncConflictError } from './lichessSync';
 import { LichessStudyTransport } from './lichessTransport';
+import type { SyncKind } from './pgnWrap';
 import { setDirtyHandler } from './dirtyMark';
 import type { AppSettings, SyncSettings } from '$lib/types';
 
@@ -55,7 +56,7 @@ export type SyncStatus = 'disabled' | 'idle' | 'pulling' | 'pushing' | 'conflict
 export type DirtyKey = 'global' | `rep:${string}`;
 
 export interface ConflictPrompt {
-	kind: 'rep' | 'global';
+	kind: SyncKind;
 	repId?: string;
 	localRevision: number;
 	remoteRevision: number;
@@ -624,7 +625,7 @@ class SyncStore {
 	}
 }
 
-function conflictDirtyKey(c: { kind: 'rep' | 'global'; repId?: string }): DirtyKey {
+function conflictDirtyKey(c: { kind: SyncKind; repId?: string }): DirtyKey {
 	return c.kind === 'global' ? 'global' : (`rep:${c.repId as string}` as DirtyKey);
 }
 

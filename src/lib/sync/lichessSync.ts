@@ -42,8 +42,7 @@ import {
 } from '$lib/lichess/studies';
 import {
 	SYNC_EVENT_PREFIX,
-	chapterNameForGlobal,
-	chapterNameForRep,
+	chapterNameForKind,
 	extractRawBlobString,
 	isSyncChapterName,
 	parseBlobFromPgn,
@@ -212,9 +211,13 @@ export async function inspectStudy(
 	return { syncChapters, totalChapters };
 }
 
-/** Map a sync chapter's `[Event]` name back to its kind discriminator. */
+/** Map a sync chapter's `[Event]` name back to its kind discriminator. The
+ *  tier prefixes are checked before the legacy `rep:` so the longer match
+ *  wins (`rep-core:` would otherwise never be reached). */
 function nameToKind(name: string): SyncKind | null {
 	if (name === `${SYNC_EVENT_PREFIX}:global`) return 'global';
+	if (name.startsWith(`${SYNC_EVENT_PREFIX}:rep-core:`)) return 'rep-core';
+	if (name.startsWith(`${SYNC_EVENT_PREFIX}:rep-telemetry:`)) return 'rep-telemetry';
 	if (name.startsWith(`${SYNC_EVENT_PREFIX}:rep:`)) return 'rep';
 	return null;
 }
@@ -394,8 +397,7 @@ export async function pushBlob(
 	}
 
 	const pgn = wrapBlobAsPgn(blob, meta);
-	const chapterName =
-		meta.kind === 'rep' ? chapterNameForRep(meta.repId as string) : chapterNameForGlobal();
+	const chapterName = chapterNameForKind(meta.kind, meta.repId);
 	// One-line size diagnostic so a "PGN too large" rejection surfaces
 	// which chapter and how big it was without the user having to dig.
 	console.log(`[sync] pushing ${chapterName}: blob=${blob.length} pgn=${pgn.length} bytes`);
@@ -454,18 +456,24 @@ export async function pushBlob(
  * deleted locally so its blob stops resurrecting on other devices' pulls and
  * stops accumulating as a duplicate. Matches by `[Event]` name — the only
  * metadata Lichess reliably preserves — so it also sweeps any stale duplicate
- * chapters that share the rep's name. Returns the count removed.
+ * chapters that share the rep's name. Sweeps every tier (legacy combined
+ * `rep`, plus `rep-core`/`rep-telemetry`) so a deleted rep leaves nothing
+ * behind. Returns the count removed.
  */
 export async function deleteRepChapters(
 	token: string,
 	studyId: string,
 	repId: string
 ): Promise<number> {
-	const target = chapterNameForRep(repId);
+	const targets = new Set([
+		chapterNameForKind('rep', repId),
+		chapterNameForKind('rep-core', repId),
+		chapterNameForKind('rep-telemetry', repId)
+	]);
 	const chapters = await listSyncChapters(token, studyId);
 	let removed = 0;
 	for (const c of chapters) {
-		if (c.name !== target) continue;
+		if (!targets.has(c.name)) continue;
 		try {
 			await deleteChapter(token, studyId, c.chapterId);
 			removed += 1;

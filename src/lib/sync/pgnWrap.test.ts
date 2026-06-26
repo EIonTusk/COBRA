@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
 	chapterNameForGlobal,
+	chapterNameForKind,
 	chapterNameForRep,
 	extractRawBlobString,
+	isRepScopeKind,
 	isSyncChapterName,
 	parseBlobFromPgn,
 	parseEventFromPgn,
@@ -150,4 +152,47 @@ describe('pgnWrap', () => {
 			wrapBlobAsPgn('AAA', { kind: 'rep', revision: 1, deviceId: 'd', pushedAt: 0 })
 		).toThrow();
 	});
+});
+
+describe('tier scope kinds', () => {
+	const REP_ID = '9f8a1234-aaaa-bbbb-cccc-deadbeefbeef';
+
+	it('chapterNameForKind gives each tier a distinct, non-colliding name', () => {
+		expect(chapterNameForKind('rep', REP_ID)).toBe('COBRA-SYNC:rep:9f8a1234');
+		expect(chapterNameForKind('rep-core', REP_ID)).toBe('COBRA-SYNC:rep-core:9f8a1234');
+		expect(chapterNameForKind('rep-telemetry', REP_ID)).toBe('COBRA-SYNC:rep-telemetry:9f8a1234');
+		expect(chapterNameForKind('global')).toBe('COBRA-SYNC:global');
+		const names = new Set([
+			chapterNameForKind('rep', REP_ID),
+			chapterNameForKind('rep-core', REP_ID),
+			chapterNameForKind('rep-telemetry', REP_ID)
+		]);
+		expect(names.size).toBe(3);
+	});
+
+	it('chapterNameForKind requires a repId for rep-scoped kinds', () => {
+		expect(() => chapterNameForKind('rep-core')).toThrow();
+		expect(() => chapterNameForKind('rep-telemetry')).toThrow();
+	});
+
+	it('isRepScopeKind classifies every rep tier as rep-scoped', () => {
+		expect(isRepScopeKind('rep')).toBe(true);
+		expect(isRepScopeKind('rep-core')).toBe(true);
+		expect(isRepScopeKind('rep-telemetry')).toBe(true);
+		expect(isRepScopeKind('global')).toBe(false);
+	});
+
+	for (const kind of ['rep-core', 'rep-telemetry'] as const) {
+		it(`round-trips a ${kind} blob through wrap → parse (incl. in-comment meta)`, () => {
+			const blob = 'H4sIAAAAAAAA_3MzMjMzAAJTAwAuKsXJBQAAAA';
+			const meta: BlobMeta = { kind, repId: REP_ID, revision: 5, deviceId: 'dev-x', pushedAt: 42 };
+			const pgn = wrapBlobAsPgn(blob, meta);
+			expect(parseEventFromPgn(pgn)).toBe(chapterNameForKind(kind, REP_ID));
+			const parsed = parseBlobFromPgn(pgn);
+			expect(parsed?.kind).toBe(kind);
+			expect(parsed?.repId).toBe(REP_ID);
+			expect(parsed?.revision).toBe(5);
+			expect(parsed?.blob).toBe(blob);
+		});
+	}
 });
