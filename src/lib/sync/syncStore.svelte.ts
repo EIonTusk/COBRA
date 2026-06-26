@@ -45,16 +45,8 @@ import {
 } from './bundle';
 import { emptyMergeStats } from './merge';
 import { toast } from '$lib/ui';
-import {
-	deleteRepChapters,
-	findOrCreateSyncStudy,
-	listSyncChapters,
-	pullAllBlobs,
-	pullBlob,
-	pushBlob,
-	purgeSyncChapters,
-	SyncConflictError
-} from './lichessSync';
+import { SyncConflictError } from './lichessSync';
+import { LichessStudyTransport } from './lichessTransport';
 import { setDirtyHandler } from './dirtyMark';
 import type { AppSettings, SyncSettings } from '$lib/types';
 
@@ -159,7 +151,10 @@ class SyncStore {
 		const username = s.lichessOAuth?.username;
 		if (!username) throw new Error('Lichess OAuth account has no username.');
 
-		const { studyId } = await findOrCreateSyncStudy(token, username, s.sync?.studyId);
+		// Locate/create the remote store and probe whether it already has data.
+		const transport = new LichessStudyTransport({ token, username, studyId: s.sync?.studyId });
+		const { remoteHasData } = await transport.connect();
+		const studyId = transport.studyId as string;
 		this.studyId = studyId;
 		this.#deviceId = this.#deviceId ?? s.sync?.deviceId ?? crypto.randomUUID();
 		this.enabled = true;
@@ -172,10 +167,6 @@ class SyncStore {
 			deviceId: this.#deviceId
 		};
 		await saveSettings({ ...s, sync: next }, { skipDirtyMark: true });
-
-		// Probe the study for existing COBRA-SYNC chapters.
-		const chapters = await listSyncChapters(token, studyId);
-		const remoteHasData = chapters.length > 0;
 
 		if (opts.mode === 'pull-remote' && remoteHasData) {
 			await this.pullAll();
@@ -211,7 +202,7 @@ class SyncStore {
 		const studyId = s.sync?.studyId;
 		if (token && studyId) {
 			try {
-				await purgeSyncChapters(token, studyId);
+				await new LichessStudyTransport({ token, studyId }).purgeAll();
 			} catch (e) {
 				console.warn('[sync] purge failed:', e);
 			}
@@ -300,32 +291,31 @@ class SyncStore {
 		await this.#withFlightLock(async () => {
 			try {
 				this.status = 'pulling';
-				const ctx = await this.#requireSyncContext();
-				// One PGN fetch covers every chapter — we used to call
-				// `pullBlob` once per chapter, which re-fetched the whole
-				// study each time (N+1 HTTP calls). `pullAllBlobs` also
-				// resolves chapters whose meta got stripped by Lichess
-				// (recovering kind/repId via bundle decode), which the
-				// old `listSyncChapters` → `pullBlob` path silently
-				// dropped — that drop was the "pill says Synced but
-				// nothing applied" bug.
-				const blobs = await pullAllBlobs(ctx.token, ctx.studyId);
-				// Multiple chapters can share a `[Event]` name when the
-				// pre-fix cleanup left duplicates behind. Keep the one
-				// with the highest revision (or highest pushedAt as
-				// tiebreaker) so we don't apply stale data. Plain object
-				// — this isn't reactive, the values just feed the apply
-				// loop below.
+				const transport = await this.#transport();
+				// One round trip covers every scope — we used to call
+				// `pull` once per scope, which re-fetched the whole study
+				// each time (N+1 HTTP calls). `pullAll` also resolves
+				// scopes whose meta got stripped by Lichess (recovering
+				// kind/repId via bundle decode), which the old
+				// per-scope path silently dropped — that drop was the
+				// "pill says Synced but nothing applied" bug.
+				const blobs = await transport.pullAll();
+				// Multiple slots can share a scope name when the pre-fix
+				// cleanup left duplicates behind (e.g. duplicate Lichess
+				// chapters with the same `[Event]`). Keep the one with the
+				// highest revision (or highest pushedAt as tiebreaker) so
+				// we don't apply stale data. Plain object — this isn't
+				// reactive, the values just feed the apply loop below.
 				const byName: Record<string, (typeof blobs)[number]> = {};
 				for (const b of blobs) {
-					const prev = byName[b.chapterName];
+					const prev = byName[b.scopeName];
 					if (!prev) {
-						byName[b.chapterName] = b;
+						byName[b.scopeName] = b;
 						continue;
 					}
 					const prevKey = prev.revision * 1e15 + prev.pushedAt;
 					const curKey = b.revision * 1e15 + b.pushedAt;
-					if (curKey > prevKey) byName[b.chapterName] = b;
+					if (curKey > prevKey) byName[b.scopeName] = b;
 				}
 
 				const settings = await getSettings();
@@ -349,12 +339,12 @@ class SyncStore {
 				const decodedByName: Record<string, AnyBundle> = {};
 				for (const parsed of Object.values(byName)) {
 					const decoded = await decodeBundle(parsed.blob);
-					decodedByName[parsed.chapterName] = decoded;
+					decodedByName[parsed.scopeName] = decoded;
 					if (decoded.kind === 'global') addTombstones(decoded.settings?.repTombstones);
 				}
 
 				for (const parsed of Object.values(byName)) {
-					const decoded = decodedByName[parsed.chapterName];
+					const decoded = decodedByName[parsed.scopeName];
 					if (decoded.kind === 'rep') {
 						const deletedAt = tombstones[decoded.repertoireId];
 						if (deletedAt !== undefined && deletedAt >= decoded.exportedAt) {
@@ -394,7 +384,7 @@ class SyncStore {
 				const sync: SyncSettings = {
 					...(final.sync ?? { enabled: false }),
 					enabled: true,
-					studyId: ctx.studyId,
+					studyId: this.studyId ?? undefined,
 					deviceId: this.#deviceId ?? undefined,
 					lastPushAt: this.lastPushAt ?? undefined,
 					lastPullAt: now,
@@ -414,8 +404,8 @@ class SyncStore {
 		const c = this.conflict;
 		this.conflict = null;
 		try {
-			const ctx = await this.#requireSyncContext();
-			const parsed = await pullBlob(ctx.token, ctx.studyId, c.kind, c.repId);
+			const transport = await this.#transport();
+			const parsed = await transport.pull(c.kind, c.repId);
 			if (parsed) {
 				const decoded = await decodeBundle(parsed.blob);
 				const aggregate = emptyMergeStats();
@@ -510,18 +500,18 @@ class SyncStore {
 		repId: string,
 		opts: { force?: boolean; expectedRemote?: number } = {}
 	): Promise<void> {
-		const ctx = await this.#requireSyncContext();
+		const transport = await this.#transport();
 		const bundle = await buildRepBundle(repId);
 		if (!bundle) {
 			// Rep no longer exists locally — it was deleted. Tear down its
-			// sync chapter so the deletion propagates and the blob stops
+			// remote scope so the deletion propagates and the blob stops
 			// resurrecting on other devices' pulls. The tombstone in the
-			// global chapter (pushed separately) is the durable signal; this
+			// global scope (pushed separately) is the durable signal; this
 			// is the immediate cleanup.
 			try {
-				await deleteRepChapters(ctx.token, ctx.studyId, repId);
+				await transport.deleteRep(repId);
 			} catch (e) {
-				console.warn('[sync] failed to delete chapter for removed rep:', e);
+				console.warn('[sync] failed to delete remote scope for removed rep:', e);
 			}
 			return;
 		}
@@ -531,9 +521,7 @@ class SyncStore {
 			: (this.#revisionFor(`rep:${repId}`) ?? null);
 		const nextRevision = (prior ?? -1) + 1;
 		this.status = 'pushing';
-		const result = await pushBlob(
-			ctx.token,
-			ctx.studyId,
+		const result = await transport.push(
 			blob,
 			{
 				kind: 'rep',
@@ -550,15 +538,15 @@ class SyncStore {
 		await this.#persistRevisions();
 	}
 
-	/** Best-effort teardown of a lingering rep chapter spotted during a pull
+	/** Best-effort teardown of a lingering rep scope spotted during a pull
 	 *  (the deleting device's own cleanup didn't land). */
 	async #deleteRepChapter(repId: string): Promise<void> {
-		const ctx = await this.#requireSyncContext();
-		await deleteRepChapters(ctx.token, ctx.studyId, repId);
+		const transport = await this.#transport();
+		await transport.deleteRep(repId);
 	}
 
 	async #pushGlobal(opts: { force?: boolean; expectedRemote?: number } = {}): Promise<void> {
-		const ctx = await this.#requireSyncContext();
+		const transport = await this.#transport();
 		const settings = await getSettings();
 		const bundle = await buildGlobalBundle(settings);
 		const blob = await encodeBundle(bundle);
@@ -567,9 +555,7 @@ class SyncStore {
 			: (this.#revisionFor('global') ?? null);
 		const nextRevision = (prior ?? -1) + 1;
 		this.status = 'pushing';
-		const result = await pushBlob(
-			ctx.token,
-			ctx.studyId,
+		const result = await transport.push(
 			blob,
 			{
 				kind: 'global',
@@ -585,16 +571,22 @@ class SyncStore {
 		await this.#persistRevisions();
 	}
 
-	async #requireSyncContext(): Promise<{ token: string; studyId: string; settings: AppSettings }> {
+	/**
+	 * Build the active sync transport from current settings. Resolves the
+	 * Lichess token + study id (the connection context) and backfills the
+	 * device id, mirroring the pre-seam `#requireSyncContext`. When a hosted
+	 * backend lands, this is the one place that picks which transport to
+	 * instantiate.
+	 */
+	async #transport(): Promise<LichessStudyTransport> {
 		const settings = await getSettings();
 		const token = effectiveLichessToken(settings);
 		if (!token) throw new Error('Lichess token is missing — reconnect in Settings.');
 		const studyId = settings.sync?.studyId ?? this.studyId;
 		if (!studyId) throw new Error('Sync study is not configured. Re-enable sync in Settings.');
 		this.studyId = studyId;
-		this.#deviceId =
-			this.#deviceId ?? settings.sync?.deviceId ?? settings.sync?.deviceId ?? crypto.randomUUID();
-		return { token, studyId, settings };
+		this.#deviceId = this.#deviceId ?? settings.sync?.deviceId ?? crypto.randomUUID();
+		return new LichessStudyTransport({ token, studyId });
 	}
 
 	#rememberRevisionByKey(key: DirtyKey, revision: number): void {
