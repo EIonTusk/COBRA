@@ -34,14 +34,19 @@ import {
 	applyGlobalBundleMerge,
 	applyRepBundle,
 	applyRepBundleMerge,
+	applyRepCoreBundleMerge,
+	applyRepTelemetryBundleMerge,
 	buildGlobalBundle,
-	buildRepBundle,
+	buildRepCoreBundle,
+	buildRepTelemetryBundle,
 	decodeBundle,
 	encodeBundle,
 	type AnyBundle,
 	type GlobalBundle,
 	type MergeStats,
-	type RepBundle
+	type RepBundle,
+	type RepCoreBundle,
+	type RepTelemetryBundle
 } from './bundle';
 import { emptyMergeStats } from './merge';
 import { toast } from '$lib/ui';
@@ -76,6 +81,8 @@ class SyncStore {
 	conflict = $state<ConflictPrompt | null>(null);
 	dirty = $state<SvelteSet<DirtyKey>>(new SvelteSet());
 	studyId = $state<string | null>(null);
+	/** Whether the bulky per-rep telemetry tier syncs. Off by default (#68). */
+	telemetry = $state<boolean>(false);
 
 	#deviceId: string | null = null;
 	#debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -91,6 +98,7 @@ class SyncStore {
 		this.lastPullAt = sync.lastPullAt ?? null;
 		this.#deviceId = sync.deviceId ?? null;
 		this.#revisionCache = { ...(sync.lastKnownRevisions ?? {}) };
+		this.telemetry = sync.syncTelemetry === true;
 		this.status = this.enabled ? 'idle' : 'disabled';
 		// Register the dirty-mark handler so storage modules' calls land here
 		// regardless of whether sync is currently enabled — the markDirty
@@ -115,6 +123,25 @@ class SyncStore {
 		void this.pushDirty().catch((e) => {
 			console.warn('[sync] flushOnExit push failed:', e);
 		});
+	}
+
+	/**
+	 * Toggle whether the per-rep telemetry tier (mistakes / gaps / spar / WDL)
+	 * syncs. Persists the flag; when turning it ON with sync enabled, marks
+	 * every rep dirty so the telemetry actually gets pushed up on the next
+	 * flush. Turning it off just stops emitting telemetry going forward —
+	 * existing remote telemetry scopes are left in place.
+	 */
+	async setTelemetry(enabled: boolean): Promise<void> {
+		this.telemetry = enabled;
+		const s = await getSettings();
+		const next: SyncSettings = { ...(s.sync ?? { enabled: false }), syncTelemetry: enabled };
+		await saveSettings({ ...s, sync: next }, { skipDirtyMark: true });
+		if (enabled && this.enabled) {
+			const db = await (await import('$lib/storage/db')).getDB();
+			const reps = await db.getAll('repertoires');
+			for (const rep of reps) this.markDirty(`rep:${rep.id}`);
+		}
 	}
 
 	/** Manual "Sync now" — pull everything, then push everything dirty. */
@@ -230,7 +257,7 @@ class SyncStore {
 						await this.#pushGlobal();
 					} else {
 						const repId = key.slice('rep:'.length);
-						await this.#pushRep(repId);
+						await this.#pushRepScopes(repId);
 					}
 					this.dirty.delete(key);
 				} catch (e) {
@@ -263,7 +290,7 @@ class SyncStore {
 				const db = await (await import('$lib/storage/db')).getDB();
 				const reps = await db.getAll('repertoires');
 				for (const rep of reps) {
-					await this.#pushRep(rep.id);
+					await this.#pushRepScopes(rep.id);
 				}
 				await this.#pushGlobal();
 				this.dirty.clear();
@@ -346,24 +373,7 @@ class SyncStore {
 
 				for (const parsed of Object.values(byName)) {
 					const decoded = decodedByName[parsed.scopeName];
-					if (decoded.kind === 'rep') {
-						const deletedAt = tombstones[decoded.repertoireId];
-						if (deletedAt !== undefined && deletedAt >= decoded.exportedAt) {
-							// Superseded by a deletion newer than this snapshot — skip
-							// applying, and best-effort tear down the lingering chapter.
-							void this.#deleteRepChapter(decoded.repertoireId).catch(() => {});
-							continue;
-						}
-						if (decoded.version === 2) {
-							const stats = await applyRepBundleMerge(decoded as RepBundle);
-							addStats(aggregate, stats);
-						} else {
-							// v1 bundle from a not-yet-upgraded device — fall back
-							// to the legacy wipe-and-restore. We can't merge what
-							// we don't have timestamps for.
-							await applyRepBundle(decoded as RepBundle);
-						}
-					} else {
+					if (decoded.kind === 'global') {
 						if (decoded.version === 2) {
 							const r = await applyGlobalBundleMerge(decoded as GlobalBundle, settings);
 							mergedSettings = r.mergedSettings;
@@ -372,9 +382,33 @@ class SyncStore {
 							const r = await applyGlobalBundle(decoded as GlobalBundle, settings);
 							mergedSettings = r.mergedSettings;
 						}
+					} else {
+						// Any rep-scoped tier (legacy 'rep', 'rep-core', 'rep-telemetry').
+						const deletedAt = tombstones[decoded.repertoireId];
+						if (deletedAt !== undefined && deletedAt >= decoded.exportedAt) {
+							// Superseded by a deletion newer than this snapshot — skip
+							// applying, and best-effort tear down the lingering scope.
+							void this.#deleteRepChapter(decoded.repertoireId).catch(() => {});
+							continue;
+						}
+						if (decoded.kind === 'rep-core') {
+							addStats(aggregate, await applyRepCoreBundleMerge(decoded as RepCoreBundle));
+						} else if (decoded.kind === 'rep-telemetry') {
+							addStats(
+								aggregate,
+								await applyRepTelemetryBundleMerge(decoded as RepTelemetryBundle)
+							);
+						} else if (decoded.version === 2) {
+							addStats(aggregate, await applyRepBundleMerge(decoded as RepBundle));
+						} else {
+							// v1 combined bundle from a not-yet-upgraded device — fall
+							// back to the legacy wipe-and-restore. We can't merge what
+							// we don't have timestamps for.
+							await applyRepBundle(decoded as RepBundle);
+						}
 					}
 					this.#rememberRevisionByKey(
-						parsed.kind === 'global' ? 'global' : (`rep:${parsed.repId as string}` as DirtyKey),
+						this.#scopeRevKey(parsed.kind, parsed.repId),
 						parsed.revision
 					);
 				}
@@ -410,10 +444,13 @@ class SyncStore {
 			if (parsed) {
 				const decoded = await decodeBundle(parsed.blob);
 				const aggregate = emptyMergeStats();
-				if (decoded.kind === 'rep') {
+				if (decoded.kind === 'rep-core') {
+					addStats(aggregate, await applyRepCoreBundleMerge(decoded as RepCoreBundle));
+				} else if (decoded.kind === 'rep-telemetry') {
+					addStats(aggregate, await applyRepTelemetryBundleMerge(decoded as RepTelemetryBundle));
+				} else if (decoded.kind === 'rep') {
 					if (decoded.version === 2) {
-						const stats = await applyRepBundleMerge(decoded as RepBundle);
-						addStats(aggregate, stats);
+						addStats(aggregate, await applyRepBundleMerge(decoded as RepBundle));
 					} else {
 						await applyRepBundle(decoded as RepBundle);
 					}
@@ -446,7 +483,8 @@ class SyncStore {
 			if (c.kind === 'global') {
 				await this.#pushGlobal({ force: true, expectedRemote: c.remoteRevision });
 			} else {
-				await this.#pushRep(c.repId as string, {
+				// Overwrite exactly the conflicted scope (one tier), not both.
+				await this.#pushScope(c.kind, c.repId, {
 					force: true,
 					expectedRemote: c.remoteRevision
 				});
@@ -497,35 +535,67 @@ class SyncStore {
 		await promise;
 	}
 
-	async #pushRep(
-		repId: string,
-		opts: { force?: boolean; expectedRemote?: number } = {}
-	): Promise<void> {
+	/**
+	 * Push a repertoire as the tier-split scopes: the authored `rep-core` tier
+	 * always, plus the `rep-telemetry` tier only when the user opted into
+	 * telemetry sync (off by default — issue #68). A deleted rep tears down
+	 * all its remote scopes.
+	 */
+	async #pushRepScopes(repId: string): Promise<void> {
+		const present = await this.#pushScope('rep-core', repId, {});
+		if (!present) return; // rep was deleted; #pushScope tore its scopes down
+		const s = await getSettings();
+		if (s.sync?.syncTelemetry === true) {
+			await this.#pushScope('rep-telemetry', repId, {});
+		}
+	}
+
+	/**
+	 * Push a single sync scope (global, or one rep tier), bumping its own
+	 * revision. Returns false when a rep-scoped push finds the rep gone — in
+	 * which case it tears down the rep's remote scopes and writes nothing.
+	 */
+	async #pushScope(
+		kind: SyncKind,
+		repId: string | undefined,
+		opts: { force?: boolean; expectedRemote?: number }
+	): Promise<boolean> {
 		const transport = await this.#transport();
-		const bundle = await buildRepBundle(repId);
+		let bundle: AnyBundle | null;
+		if (kind === 'global') {
+			bundle = await buildGlobalBundle(await getSettings());
+		} else if (kind === 'rep-core') {
+			bundle = await buildRepCoreBundle(repId as string);
+		} else if (kind === 'rep-telemetry') {
+			bundle = await buildRepTelemetryBundle(repId as string);
+		} else {
+			// Legacy combined 'rep' is never emitted; guard for completeness.
+			bundle = null;
+		}
 		if (!bundle) {
-			// Rep no longer exists locally — it was deleted. Tear down its
-			// remote scope so the deletion propagates and the blob stops
-			// resurrecting on other devices' pulls. The tombstone in the
-			// global scope (pushed separately) is the durable signal; this
-			// is the immediate cleanup.
-			try {
-				await transport.deleteRep(repId);
-			} catch (e) {
-				console.warn('[sync] failed to delete remote scope for removed rep:', e);
+			if (kind !== 'global' && repId) {
+				// Rep no longer exists locally — it was deleted. Tear down its
+				// remote scopes so the deletion propagates and the blobs stop
+				// resurrecting on other devices' pulls. The tombstone in the
+				// global scope (pushed separately) is the durable signal; this
+				// is the immediate cleanup.
+				try {
+					await transport.deleteRep(repId);
+				} catch (e) {
+					console.warn('[sync] failed to delete remote scopes for removed rep:', e);
+				}
 			}
-			return;
+			return false;
 		}
 		const blob = await encodeBundle(bundle);
-		const prior = opts.force
-			? (opts.expectedRemote ?? null)
-			: (this.#revisionFor(`rep:${repId}`) ?? null);
+		const revKey = this.#scopeRevKey(kind, repId);
+		const prior = opts.force ? (opts.expectedRemote ?? null) : (this.#revisionFor(revKey) ?? null);
 		const nextRevision = (prior ?? -1) + 1;
 		this.status = 'pushing';
 		const result = await transport.push(
 			blob,
 			{
-				kind: 'rep',
+				kind,
 				repId,
 				revision: nextRevision,
 				deviceId: this.#deviceId as string,
@@ -533,10 +603,11 @@ class SyncStore {
 			},
 			prior
 		);
-		this.#rememberRevisionByKey(`rep:${repId}`, result.revision);
+		this.#rememberRevisionByKey(revKey, result.revision);
 		this.lastPushAt = result.pushedAt;
 		warnNearCap(result.totalChapters);
 		await this.#persistRevisions();
+		return true;
 	}
 
 	/** Best-effort teardown of a lingering rep scope spotted during a pull
@@ -547,29 +618,7 @@ class SyncStore {
 	}
 
 	async #pushGlobal(opts: { force?: boolean; expectedRemote?: number } = {}): Promise<void> {
-		const transport = await this.#transport();
-		const settings = await getSettings();
-		const bundle = await buildGlobalBundle(settings);
-		const blob = await encodeBundle(bundle);
-		const prior = opts.force
-			? (opts.expectedRemote ?? null)
-			: (this.#revisionFor('global') ?? null);
-		const nextRevision = (prior ?? -1) + 1;
-		this.status = 'pushing';
-		const result = await transport.push(
-			blob,
-			{
-				kind: 'global',
-				revision: nextRevision,
-				deviceId: this.#deviceId as string,
-				pushedAt: Date.now()
-			},
-			prior
-		);
-		this.#rememberRevisionByKey('global', result.revision);
-		this.lastPushAt = result.pushedAt;
-		warnNearCap(result.totalChapters);
-		await this.#persistRevisions();
+		await this.#pushScope('global', undefined, opts);
 	}
 
 	/**
@@ -590,11 +639,17 @@ class SyncStore {
 		return new LichessStudyTransport({ token, studyId });
 	}
 
-	#rememberRevisionByKey(key: DirtyKey, revision: number): void {
+	/** Revision-tracking key for a scope. Distinct per tier so `rep-core` and
+	 *  `rep-telemetry` keep independent revisions; `global` is rep-less. */
+	#scopeRevKey(kind: SyncKind, repId: string | undefined): string {
+		return kind === 'global' ? 'global' : `${kind}:${repId}`;
+	}
+
+	#rememberRevisionByKey(key: string, revision: number): void {
 		this.#revisionCache[key] = revision;
 	}
 
-	#revisionFor(key: DirtyKey): number | undefined {
+	#revisionFor(key: string): number | undefined {
 		return this.#revisionCache[key];
 	}
 

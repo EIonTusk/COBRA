@@ -91,15 +91,20 @@ export function chapterNameForGlobal(): string {
 }
 
 /**
- * Scope/chapter name for any kind. Rep-scoped kinds embed the kind verbatim,
- * so the tier scopes get distinct names —
- *   `COBRA-SYNC:rep-core:<id8>` / `COBRA-SYNC:rep-telemetry:<id8>` —
- * and never collide with the legacy `COBRA-SYNC:rep:<id8>`.
+ * Scope/chapter name for any kind.
+ *
+ * `rep-core` deliberately REUSES the legacy `COBRA-SYNC:rep:<id8>` name so a
+ * core push overwrites a pre-split combined chapter in place (the import
+ * cleanup sweeps same-named chapters) — that's the combined→tier migration,
+ * for free. `rep-telemetry` gets its own `COBRA-SYNC:rep-telemetry:<id8>`
+ * name. The kind is disambiguated by the in-comment meta, not the name.
  */
 export function chapterNameForKind(kind: SyncKind, repId?: string): string {
 	if (kind === 'global') return chapterNameForGlobal();
 	if (!repId) throw new Error(`chapterNameForKind: kind="${kind}" requires repId`);
-	return `${SYNC_EVENT_PREFIX}:${kind}:${repId.slice(0, 8)}`;
+	if (kind === 'rep-telemetry') return `${SYNC_EVENT_PREFIX}:rep-telemetry:${repId.slice(0, 8)}`;
+	// 'rep' (legacy combined) and 'rep-core' share the `:rep:` name.
+	return `${SYNC_EVENT_PREFIX}:rep:${repId.slice(0, 8)}`;
 }
 
 export function isSyncChapterName(name: string | undefined | null): boolean {

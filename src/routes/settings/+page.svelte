@@ -394,6 +394,7 @@
 	const syncStudyId = $derived(sync.studyId);
 	const syncDirtyCount = $derived(sync.dirty.size);
 	const syncError = $derived(sync.error);
+	const syncTelemetry = $derived(sync.telemetry);
 	let syncBusyLocal = $state(false);
 
 	const lichessReadyForSync = $derived.by(() => {
@@ -1299,6 +1300,30 @@
 							</Button>
 						</div>
 					</div>
+
+					<label
+						class="flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
+					>
+						<input
+							type="checkbox"
+							checked={syncTelemetry}
+							onchange={(e) => sync.setTelemetry((e.currentTarget as HTMLInputElement).checked)}
+							class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
+						/>
+						<div class="min-w-0 flex-1">
+							<span class="font-serif text-sm text-[var(--color-parchment-100)]"
+								>Also sync scan history (telemetry)</span
+							>
+							<p
+								class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+							>
+								Mistakes, empirical gaps, spar games and position WDL. Off by default — this data is
+								bulky and regenerable by re-scanning, and excluding it keeps large repertoires under
+								Lichess's per-chapter size limit. Your authored tree (moves, cards, ideas) always
+								syncs regardless.
+							</p>
+						</div>
+					</label>
 				{/if}
 
 				<details class="ink-panel p-4 font-serif text-sm text-[var(--color-parchment-400)]">
@@ -1309,7 +1334,11 @@
 					</summary>
 					<ul class="mt-3 list-disc space-y-1 pl-5 italic">
 						<li>
-							Synced: repertoires, FSRS card progress, idea cards, mistakes, baselines, settings.
+							Always synced: repertoires, FSRS card progress, idea cards, baselines, settings.
+						</li>
+						<li>
+							Synced only with “scan history” enabled above: mistakes, empirical gaps, spar games,
+							position WDL. Off by default — bulky and regenerable by re-scanning.
 						</li>
 						<li>
 							Not synced: Lichess token (stays device-local), explorer + opening name caches

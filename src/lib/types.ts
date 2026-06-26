@@ -363,8 +363,19 @@ export interface SyncSettings {
 	deviceId?: string;
 	lastPushAt?: number;
 	lastPullAt?: number;
-	/** Map keyed by `'global'` or `'rep:<id>'` → last revision we wrote/read. */
+	/**
+	 * Map keyed by sync scope → last revision we wrote/read. Scope keys are
+	 * `'global'`, `'rep-core:<id>'`, `'rep-telemetry:<id>'`, or the legacy
+	 * `'rep:<id>'` for pre-split combined scopes.
+	 */
 	lastKnownRevisions?: Record<string, number>;
+	/**
+	 * Sync the bulky per-rep telemetry tier (mistakes / gaps / spar games /
+	 * position WDL) in addition to the always-synced authored tree. Off by
+	 * default (issue #68) — telemetry is regenerable scan data and the main
+	 * driver of oversized payloads.
+	 */
+	syncTelemetry?: boolean;
 }
 
 export interface AppSettings {

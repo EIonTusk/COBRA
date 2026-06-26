@@ -157,17 +157,20 @@ describe('pgnWrap', () => {
 describe('tier scope kinds', () => {
 	const REP_ID = '9f8a1234-aaaa-bbbb-cccc-deadbeefbeef';
 
-	it('chapterNameForKind gives each tier a distinct, non-colliding name', () => {
+	it('rep-core reuses the legacy rep name; telemetry gets its own', () => {
+		// Option-1 migration: core shares the `:rep:` name so it overwrites a
+		// pre-split combined chapter in place. Telemetry is distinct.
 		expect(chapterNameForKind('rep', REP_ID)).toBe('COBRA-SYNC:rep:9f8a1234');
-		expect(chapterNameForKind('rep-core', REP_ID)).toBe('COBRA-SYNC:rep-core:9f8a1234');
+		expect(chapterNameForKind('rep-core', REP_ID)).toBe('COBRA-SYNC:rep:9f8a1234');
 		expect(chapterNameForKind('rep-telemetry', REP_ID)).toBe('COBRA-SYNC:rep-telemetry:9f8a1234');
 		expect(chapterNameForKind('global')).toBe('COBRA-SYNC:global');
+		// rep/rep-core collapse to one name; telemetry is the only distinct rep name.
 		const names = new Set([
 			chapterNameForKind('rep', REP_ID),
 			chapterNameForKind('rep-core', REP_ID),
 			chapterNameForKind('rep-telemetry', REP_ID)
 		]);
-		expect(names.size).toBe(3);
+		expect(names.size).toBe(2);
 	});
 
 	it('chapterNameForKind requires a repId for rep-scoped kinds', () => {

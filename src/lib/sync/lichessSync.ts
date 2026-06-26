@@ -44,6 +44,7 @@ import {
 	SYNC_EVENT_PREFIX,
 	chapterNameForKind,
 	extractRawBlobString,
+	isRepScopeKind,
 	isSyncChapterName,
 	parseBlobFromPgn,
 	parseEventFromPgn,
@@ -211,12 +212,15 @@ export async function inspectStudy(
 	return { syncChapters, totalChapters };
 }
 
-/** Map a sync chapter's `[Event]` name back to its kind discriminator. The
- *  tier prefixes are checked before the legacy `rep:` so the longer match
- *  wins (`rep-core:` would otherwise never be reached). */
+/**
+ * Map a sync chapter's `[Event]` name back to its kind discriminator. This is
+ * a NAME-level classification only — `rep-core` shares the `:rep:` name with
+ * the legacy combined scope, so a `:rep:` chapter is reported as `'rep'` here;
+ * the true tier kind comes from the in-comment meta (`parseMetaFromPgn`). The
+ * telemetry prefix is checked first so the longer match wins.
+ */
 function nameToKind(name: string): SyncKind | null {
 	if (name === `${SYNC_EVENT_PREFIX}:global`) return 'global';
-	if (name.startsWith(`${SYNC_EVENT_PREFIX}:rep-core:`)) return 'rep-core';
 	if (name.startsWith(`${SYNC_EVENT_PREFIX}:rep-telemetry:`)) return 'rep-telemetry';
 	if (name.startsWith(`${SYNC_EVENT_PREFIX}:rep:`)) return 'rep';
 	return null;
@@ -247,7 +251,7 @@ export async function pullBlob(
 		const parsed = parseBlobFromPgn(block);
 		if (parsed) {
 			if (parsed.kind !== kind) continue;
-			if (kind === 'rep' && parsed.repId !== repId) continue;
+			if (isRepScopeKind(kind) && parsed.repId !== repId) continue;
 			return parsed;
 		}
 		// parseBlobFromPgn failed — could be a non-sync chapter, or a sync
@@ -265,7 +269,8 @@ export async function pullBlob(
 			continue;
 		}
 		if (bundle.kind !== kind) continue;
-		if (kind === 'rep' && (bundle as { repertoireId?: string }).repertoireId !== repId) continue;
+		if (isRepScopeKind(kind) && (bundle as { repertoireId?: string }).repertoireId !== repId)
+			continue;
 		// Prefer an exact match, but keep the first legacy candidate as a
 		// backstop — the loop continues so a later block with full meta can
 		// still win.
@@ -276,8 +281,9 @@ export async function pullBlob(
 		// `bundle.kind === kind` was guaranteed by the filter above; use the
 		// narrowed `kind` so the wider AnyBundle union (which now includes the
 		// tier scopes) doesn't leak past this legacy header-stripped path.
-		const recoveredRepId =
-			kind === 'rep' ? (bundle as { repertoireId?: string }).repertoireId : undefined;
+		const recoveredRepId = isRepScopeKind(kind)
+			? (bundle as { repertoireId?: string }).repertoireId
+			: undefined;
 		return {
 			kind,
 			repId: recoveredRepId,
