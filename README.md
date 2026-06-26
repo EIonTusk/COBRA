@@ -599,6 +599,34 @@ scopes. A personal API token alone isn't enough.
 The link between a repertoire and its study is remembered, so
 subsequent pushes / pulls are one click.
 
+### Keep your devices in sync (multi-device)
+
+**Settings → Sync** mirrors your whole setup — repertoires, FSRS card
+progress, idea cards, baselines and settings — across every device
+signed in with the same Lichess account. It's opt-in and off by
+default. Your data still lives in the browser; sync is only a
+transport, so the app keeps working offline and needs no account
+beyond Lichess.
+
+Two backends to choose from:
+
+- **Lichess study** — zero setup; your data rides inside a private
+  Lichess study under your account. Great for smaller repertoires, but
+  Lichess caps each study chapter's size, so very large repertoires
+  can outgrow it.
+- **Cloudflare (hosted)** — a small hosted backend with no size limit.
+  It authenticates with a _scopeless_ Lichess token (identity only —
+  it can't touch your Lichess account) and keeps each user's data
+  isolated. If the build ships a default backend you just connect and
+  enable; self-hosters can run their own (see `worker/`).
+
+Pulls merge per-record — the more recent review wins per card, edges
+union — so drilling on two devices the same day doesn't lose progress;
+genuine conflicts surface a prompt. The bulky **scan history**
+(mistakes, gaps, spar games, position stats) is a separate opt-in
+toggle: it's regenerable, so it stays off by default to keep syncs
+small.
+
 ---
 
 ## Settings & shortcuts
