@@ -6,7 +6,7 @@ compatibility_date = "2026-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "cobra-sync"
-database_id = "PASTE_D1_DATABASE_ID_HERE"
+database_id = "39deb012-b0b6-4747-8c08-61165f37bc3a"
 
 # R2 bucket for large payloads (optional). Create with
 # `wrangler r2 bucket create cobra-sync-blobs`. Without it, blobs over the

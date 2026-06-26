@@ -7,7 +7,7 @@
 CREATE TABLE IF NOT EXISTS users (
   user_id    TEXT PRIMARY KEY,
   username   TEXT,
-  created_at INTEGER NOT NULL,        -- epoch ms
+  created_at INTEGER NOT NULL,
   last_seen  INTEGER NOT NULL,
   bytes_used INTEGER NOT NULL DEFAULT 0
 ) STRICT;
@@ -22,24 +22,19 @@ CREATE TABLE IF NOT EXISTS blobs (
   kind         TEXT    NOT NULL,
   rep_id       TEXT    NOT NULL DEFAULT '',
 
-  revision     INTEGER NOT NULL,      -- monotonic per scope; drives CAS + conflict
-  device_id    TEXT    NOT NULL,      -- last writer, for conflict messaging
-  pushed_at    INTEGER NOT NULL,      -- client clock, informational
+  revision     INTEGER NOT NULL,
+  device_id    TEXT    NOT NULL,
+  pushed_at    INTEGER NOT NULL,
 
-  -- Payload: inline for small, R2 for large. Exactly one of (blob, r2_key) is
-  -- set while live; both null when deleted.
-  blob         TEXT,                  -- gzip+base64url, identical to the app wire form
-  r2_key       TEXT,                  -- object key when payload lives in R2
+  blob         TEXT,
+  r2_key       TEXT,
   byte_len     INTEGER NOT NULL DEFAULT 0,
-  content_hash TEXT,                  -- sha-256; lets push/pull short-circuit no-ops
+  content_hash TEXT,
 
-  -- DB-native tombstone: a delete is a push with deleted_at set + revision
-  -- bumped; peers pull, observe it, purge locally. A cron can hard-delete rows
-  -- whose deleted_at is older than the retention window.
   deleted_at   INTEGER,
 
   created_at   INTEGER NOT NULL,
-  updated_at   INTEGER NOT NULL,      -- SERVER clock; the pull cursor
+  updated_at   INTEGER NOT NULL,
 
   PRIMARY KEY (user_id, kind, rep_id),
   CHECK (kind IN ('global','rep-core','rep-telemetry')),
