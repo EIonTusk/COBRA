@@ -74,6 +74,42 @@ export interface RepBundle {
 	positionWdl: PositionWdlRow[];
 }
 
+/**
+ * Tier-split rep bundles (issue #68). A repertoire syncs as two independently
+ * revisioned scopes instead of one combined `RepBundle`:
+ *
+ *   - `RepCoreBundle` — the authored tree: rep meta, nodes, cards, idea cards.
+ *     Small, interactive, must stay consistent. Always synced.
+ *   - `RepTelemetryBundle` — derived/append-mostly scan data: mistakes,
+ *     empirical gaps, spar games, position WDL. Bulky and regenerable, so it
+ *     syncs opt-in. Splitting it off is what keeps a large repertoire's core
+ *     under transport size limits.
+ *
+ * The combined `RepBundle` above is retained for reading scopes written by
+ * pre-split devices; new pushes emit the two tiers.
+ */
+export interface RepCoreBundle {
+	version: BundleVersion;
+	kind: 'rep-core';
+	repertoireId: string;
+	exportedAt: number;
+	repertoire: Repertoire;
+	nodes: RepertoireNode[];
+	cards: Card[];
+	ideaCards: IdeaCard[];
+}
+
+export interface RepTelemetryBundle {
+	version: BundleVersion;
+	kind: 'rep-telemetry';
+	repertoireId: string;
+	exportedAt: number;
+	mistakes: StoredMistake[];
+	empiricalGaps: EmpiricalGap[];
+	sparGames: SparGame[];
+	positionWdl: PositionWdlRow[];
+}
+
 export interface GlobalBundle {
 	version: BundleVersion;
 	kind: 'global';
@@ -90,7 +126,7 @@ export interface GlobalBundle {
 	} | null;
 }
 
-export type AnyBundle = RepBundle | GlobalBundle;
+export type AnyBundle = RepBundle | RepCoreBundle | RepTelemetryBundle | GlobalBundle;
 
 // --- Build -----------------------------------------------------------------
 
@@ -115,6 +151,51 @@ export async function buildRepBundle(repertoireId: string): Promise<RepBundle | 
 		nodes: clone(nodes),
 		cards: clone(cards),
 		ideaCards: clone(ideaCards),
+		mistakes: clone(mistakes),
+		empiricalGaps: clone(gaps),
+		sparGames: clone(sparGames),
+		positionWdl: clone(wdl)
+	};
+}
+
+/** Build the authored-tree tier for a rep. Null when the rep is gone. */
+export async function buildRepCoreBundle(repertoireId: string): Promise<RepCoreBundle | null> {
+	const rep = await getRepertoire(repertoireId);
+	if (!rep) return null;
+	const [nodes, cards, ideaCards] = await Promise.all([
+		listNodes(repertoireId),
+		listCards(repertoireId),
+		listIdeaCards(repertoireId)
+	]);
+	return {
+		version: BUNDLE_VERSION,
+		kind: 'rep-core',
+		repertoireId,
+		exportedAt: Date.now(),
+		repertoire: clone(rep),
+		nodes: clone(nodes),
+		cards: clone(cards),
+		ideaCards: clone(ideaCards)
+	};
+}
+
+/** Build the derived-telemetry tier for a rep. Null when the rep is gone. */
+export async function buildRepTelemetryBundle(
+	repertoireId: string
+): Promise<RepTelemetryBundle | null> {
+	const rep = await getRepertoire(repertoireId);
+	if (!rep) return null;
+	const [mistakes, gaps, sparGames, wdl] = await Promise.all([
+		listMistakes({ repertoireId }),
+		listGapsForRepertoire(repertoireId),
+		listSparGames(repertoireId),
+		listPositionWdlForRepertoire(repertoireId)
+	]);
+	return {
+		version: BUNDLE_VERSION,
+		kind: 'rep-telemetry',
+		repertoireId,
+		exportedAt: Date.now(),
 		mistakes: clone(mistakes),
 		empiricalGaps: clone(gaps),
 		sparGames: clone(sparGames),
@@ -156,6 +237,10 @@ const REP_STORES = [
 	'spar_games',
 	'position_wdl'
 ] as const;
+
+// Tier-split store groupings — the union equals REP_STORES.
+const REP_CORE_STORES = ['repertoires', 'nodes', 'cards', 'idea_cards'] as const;
+const REP_TELEMETRY_STORES = ['mistakes', 'empirical_gaps', 'spar_games', 'position_wdl'] as const;
 
 const GLOBAL_STORES = ['settings', 'baselines', 'style_reports', 'masters_baseline'] as const;
 
@@ -400,6 +485,104 @@ export async function applyRepBundleMerge(bundle: RepBundle): Promise<MergeStats
 }
 
 /**
+ * Merge a rep-core bundle (authored tree) into the local IDB slice. Same
+ * per-record merge semantics as `applyRepBundleMerge`, but scoped to the
+ * core stores only — telemetry is a separate tier.
+ */
+export async function applyRepCoreBundleMerge(bundle: RepCoreBundle): Promise<MergeStats> {
+	if (bundle.version !== BUNDLE_VERSION) {
+		throw new Error(`Unsupported rep-core-bundle version: ${bundle.version}`);
+	}
+	const stats = emptyMergeStats();
+	const ctx: MergeContext = { remoteExportedAt: bundle.exportedAt, mergedAt: Date.now() };
+	const db = await getDB();
+	const tx = db.transaction(REP_CORE_STORES, 'readwrite');
+	const repId = bundle.repertoireId;
+
+	{
+		const store = tx.objectStore('repertoires');
+		const local = await store.get(repId);
+		if (!local) {
+			await store.put(clone(bundle.repertoire));
+			stats.repertoireUpdated = 1;
+		} else {
+			const merged = mergeRepertoire(local, bundle.repertoire);
+			if (merged !== local) {
+				await store.put(clone(merged));
+				stats.repertoireUpdated = 1;
+			}
+		}
+	}
+
+	stats.cards = await mergeStorePerKey(
+		tx.objectStore('cards') as unknown as SyncMergeStore<Card>,
+		repId,
+		bundle.cards,
+		(l, r) => mergeCard(l, r, ctx)
+	);
+	stats.ideaCards = await mergeStorePerKey(
+		tx.objectStore('idea_cards') as unknown as SyncMergeStore<IdeaCard>,
+		repId,
+		bundle.ideaCards,
+		(l, r) => mergeIdeaCard(l, r, ctx)
+	);
+
+	await mergeNodesForRep(
+		tx.objectStore('nodes') as unknown as SyncMergeStore<RepertoireNode>,
+		repId,
+		bundle.nodes,
+		stats
+	);
+
+	await tx.done;
+	return stats;
+}
+
+/**
+ * Merge a rep-telemetry bundle (derived scan data) into the local IDB slice.
+ * All four stores are per-key sum/LWW merges — no node/edge structure here.
+ */
+export async function applyRepTelemetryBundleMerge(
+	bundle: RepTelemetryBundle
+): Promise<MergeStats> {
+	if (bundle.version !== BUNDLE_VERSION) {
+		throw new Error(`Unsupported rep-telemetry-bundle version: ${bundle.version}`);
+	}
+	const stats = emptyMergeStats();
+	const db = await getDB();
+	const tx = db.transaction(REP_TELEMETRY_STORES, 'readwrite');
+	const repId = bundle.repertoireId;
+
+	stats.mistakes = await mergeStorePerKey(
+		tx.objectStore('mistakes') as unknown as SyncMergeStore<StoredMistake>,
+		repId,
+		bundle.mistakes,
+		(l, r) => mergeMistake(l, r)
+	);
+	stats.empiricalGaps = await mergeStorePerKey(
+		tx.objectStore('empirical_gaps') as unknown as SyncMergeStore<EmpiricalGap>,
+		repId,
+		bundle.empiricalGaps,
+		(l, r) => mergeEmpiricalGap(l, r)
+	);
+	stats.positionWdl = await mergeStorePerKey(
+		tx.objectStore('position_wdl') as unknown as SyncMergeStore<PositionWdlRow>,
+		repId,
+		bundle.positionWdl,
+		(l, r) => mergePositionWdl(l, r)
+	);
+	stats.sparGames = await mergeStorePerKey(
+		tx.objectStore('spar_games') as unknown as SyncMergeStore<SparGame>,
+		repId,
+		bundle.sparGames,
+		(l, r) => mergeSparGame(l, r)
+	);
+
+	await tx.done;
+	return stats;
+}
+
+/**
  * Merge a v2 global bundle. Same shape: each store is read locally,
  * paired with the remote, run through the merge fn, and written back.
  */
@@ -523,7 +706,12 @@ export async function decodeBundle(encoded: string): Promise<AnyBundle> {
 	if (parsed.version !== 1 && parsed.version !== 2) {
 		throw new Error(`Unsupported bundle version: ${parsed.version}`);
 	}
-	if (parsed.kind !== 'rep' && parsed.kind !== 'global') {
+	if (
+		parsed.kind !== 'rep' &&
+		parsed.kind !== 'rep-core' &&
+		parsed.kind !== 'rep-telemetry' &&
+		parsed.kind !== 'global'
+	) {
 		throw new Error(`Unknown bundle kind: ${(parsed as { kind?: string }).kind}`);
 	}
 	return parsed;
@@ -563,6 +751,47 @@ type SyncMergeStore<T> = {
 	get: (key: unknown) => Promise<T | undefined>;
 	put: (row: T) => Promise<unknown>;
 };
+
+/**
+ * Merge a rep's nodes (and their inner edges) into a nodes store. Shared by
+ * the legacy combined apply and the tier-split core apply — the node/edge
+ * merge is structural and identical between them. Local-only nodes flow
+ * through unchanged (adds-win-against-deletes).
+ */
+async function mergeNodesForRep(
+	store: SyncMergeStore<RepertoireNode>,
+	repId: string,
+	remoteNodes: RepertoireNode[],
+	stats: MergeStats
+): Promise<void> {
+	const localKeys = await store.index('by-repertoire').getAllKeys(repId);
+	const localByKey = new Map<string, RepertoireNode>();
+	for (const key of localKeys) {
+		const row = await store.get(key);
+		if (row) localByKey.set(row.fenKey, row);
+	}
+	const remoteByKey = new Map(remoteNodes.map((n) => [n.fenKey, n]));
+	for (const [fenKey, remote] of remoteByKey) {
+		const local = localByKey.get(fenKey);
+		if (!local) {
+			await store.put(clone(remote));
+			stats.nodes += 1;
+			stats.edges += remote.children.length;
+			continue;
+		}
+		const { merged, edgeChanges } = mergeNode(local, remote);
+		if (
+			edgeChanges > 0 ||
+			merged.comment !== local.comment ||
+			JSON.stringify(merged.nags ?? null) !== JSON.stringify(local.nags ?? null) ||
+			merged.children.length !== local.children.length
+		) {
+			await store.put(clone(merged));
+			stats.nodes += 1;
+			stats.edges += edgeChanges;
+		}
+	}
+}
 
 async function mergeStorePerKey<T extends { repertoireId?: string }>(
 	store: SyncMergeStore<T>,

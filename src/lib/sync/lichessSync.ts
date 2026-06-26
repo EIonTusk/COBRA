@@ -270,10 +270,13 @@ export async function pullBlob(
 	}
 	if (legacyCandidate) {
 		const { blob, bundle } = legacyCandidate;
+		// `bundle.kind === kind` was guaranteed by the filter above; use the
+		// narrowed `kind` so the wider AnyBundle union (which now includes the
+		// tier scopes) doesn't leak past this legacy header-stripped path.
 		const recoveredRepId =
-			bundle.kind === 'rep' ? (bundle as { repertoireId?: string }).repertoireId : undefined;
+			kind === 'rep' ? (bundle as { repertoireId?: string }).repertoireId : undefined;
 		return {
-			kind: bundle.kind,
+			kind,
 			repId: recoveredRepId,
 			revision: 0,
 			deviceId: '',
@@ -324,6 +327,10 @@ export async function pullAllBlobs(
 		} catch {
 			continue;
 		}
+		// Legacy header-stripped recovery only resolves the pre-split scopes;
+		// tier scopes (rep-core/rep-telemetry) always carry v2 in-comment meta
+		// and never fall through to here.
+		if (bundle.kind !== 'rep' && bundle.kind !== 'global') continue;
 		const kind: SyncKind = bundle.kind;
 		const repId = kind === 'rep' ? (bundle as { repertoireId?: string }).repertoireId : undefined;
 		out.push({
