@@ -759,7 +759,8 @@
 							<Button
 								variant="primary"
 								size="sm"
-								onclick={() => startOAuth([...ALL_SCOPES], lichessReturnTo)}
+								onclick={() =>
+									startOAuth([...ALL_SCOPES], lichessReturnTo ?? `${base}/settings#lichess`)}
 							>
 								Reconnect
 							</Button>
@@ -1227,14 +1228,17 @@
 								<input
 									type="radio"
 									name="sync-backend"
-									checked={syncBackend === 'lichess'}
-									onchange={() => sync.configureBackend('lichess')}
+									checked={syncBackend === 'cloudflare'}
+									onchange={() =>
+										sync.configureBackend('cloudflare', syncHasDefaultUrl ? undefined : cfUrl)}
 									class="mt-0.5 accent-[var(--color-brass-300)]"
 								/>
 								<span
-									>Lichess study
+									>COBRA DB (via Cloudflare)
 									<span class="text-[var(--color-parchment-500)] italic"
-										>— zero setup; best for smaller repertoires.</span
+										>{syncHasDefaultUrl
+											? '— recommended; no size limit, synced via COBRA’s hosted database.'
+											: '— no size limit; needs your own Worker URL (self-host).'}</span
 									></span
 								>
 							</label>
@@ -1242,17 +1246,14 @@
 								<input
 									type="radio"
 									name="sync-backend"
-									checked={syncBackend === 'cloudflare'}
-									onchange={() =>
-										sync.configureBackend('cloudflare', syncHasDefaultUrl ? undefined : cfUrl)}
+									checked={syncBackend === 'lichess'}
+									onchange={() => sync.configureBackend('lichess')}
 									class="mt-0.5 accent-[var(--color-brass-300)]"
 								/>
 								<span
-									>Cloudflare (hosted)
-									<span class="text-[var(--color-parchment-500)] italic">
-										{syncHasDefaultUrl
-											? '— no per-chapter size limit; uses the hosted sync server.'
-											: '— no per-chapter size limit; needs your own Worker URL.'}</span
+									>Lichess study
+									<span class="text-[var(--color-parchment-500)] italic"
+										>— zero setup; stored in a private Lichess study (best for smaller repertoires).</span
 									></span
 								>
 							</label>
@@ -1301,7 +1302,7 @@
 							<div class="eyebrow mb-1">Status</div>
 							<p class="font-serif text-sm text-[var(--color-parchment-400)] italic">
 								{syncBackend === 'cloudflare'
-									? 'Disabled. Enabling will connect to your Cloudflare sync backend.'
+									? 'Disabled. Enabling will sync via the COBRA DB (Cloudflare).'
 									: 'Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA Sync".'}
 							</p>
 						</div>

@@ -84,6 +84,19 @@ const DEFAULT_SYNC_URL =
 		? __COBRA_SYNC_URL__.trim()
 		: null;
 
+/**
+ * Effective backend when the user hasn't explicitly chosen one. Fresh installs
+ * default to the hosted COBRA DB (Cloudflare) when a backend URL is baked in;
+ * users who already set up Lichess-study sync (it's enabled, or they have a
+ * studyId) stay on Lichess so they're never silently switched to another
+ * remote. An explicit stored choice always wins.
+ */
+function defaultBackend(sync: SyncSettings | undefined): SyncBackend {
+	if (sync?.backend) return sync.backend;
+	if (DEFAULT_SYNC_URL && !sync?.enabled && !sync?.studyId) return 'cloudflare';
+	return 'lichess';
+}
+
 class SyncStore {
 	status = $state<SyncStatus>('disabled');
 	enabled = $state<boolean>(false);
@@ -122,7 +135,7 @@ class SyncStore {
 		this.#deviceId = sync.deviceId ?? null;
 		this.#revisionCache = { ...(sync.lastKnownRevisions ?? {}) };
 		this.telemetry = sync.syncTelemetry === true;
-		this.backend = sync.backend ?? 'lichess';
+		this.backend = defaultBackend(sync);
 		this.cloudflareUrl = sync.cloudflareUrl ?? DEFAULT_SYNC_URL;
 		this.status = this.enabled ? 'idle' : 'disabled';
 		// Register the dirty-mark handler so storage modules' calls land here
@@ -213,7 +226,7 @@ class SyncStore {
 		mode: 'push-local' | 'pull-remote' | 'fresh';
 	}): Promise<{ remoteHasData: boolean }> {
 		const s = await getSettings();
-		const backend: SyncBackend = s.sync?.backend ?? 'lichess';
+		const backend: SyncBackend = defaultBackend(s.sync);
 		this.#deviceId = this.#deviceId ?? s.sync?.deviceId ?? crypto.randomUUID();
 
 		let remoteHasData: boolean;
@@ -676,7 +689,7 @@ class SyncStore {
 	 */
 	async #transport(): Promise<SyncTransport> {
 		const settings = await getSettings();
-		const backend: SyncBackend = settings.sync?.backend ?? 'lichess';
+		const backend: SyncBackend = defaultBackend(settings.sync);
 		const token = effectiveLichessToken(settings);
 		this.#deviceId = this.#deviceId ?? settings.sync?.deviceId ?? crypto.randomUUID();
 
