@@ -1274,7 +1274,8 @@
 										<Button
 											variant="ghost"
 											size="sm"
-											onclick={() => startOAuth([], lichessReturnTo, 'identity')}
+											onclick={() =>
+												startOAuth([], lichessReturnTo ?? `${base}/settings#sync`, 'identity')}
 										>
 											Reconnect
 										</Button>
@@ -1282,7 +1283,8 @@
 										<Button
 											variant="secondary"
 											size="sm"
-											onclick={() => startOAuth([], lichessReturnTo, 'identity')}
+											onclick={() =>
+												startOAuth([], lichessReturnTo ?? `${base}/settings#sync`, 'identity')}
 										>
 											Connect sync identity
 										</Button>
