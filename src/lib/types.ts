@@ -419,6 +419,12 @@ export interface AppSettings {
 	explorerRatings: number[];
 	lichessApiToken: string;
 	lichessOAuth: LichessOAuthToken | null;
+	/**
+	 * Scopeless Lichess token used ONLY to prove identity to the Cloudflare
+	 * sync backend. Kept separate from `lichessOAuth` so the powerful
+	 * study/challenge token never leaves the client; device-local, never synced.
+	 */
+	syncIdentityToken?: LichessOAuthToken | null;
 	lastMistakeScanAt?: number;
 	/**
 	 * Created-at timestamp of the most recent Lichess game already scanned

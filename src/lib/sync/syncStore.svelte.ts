@@ -203,8 +203,6 @@ class SyncStore {
 	}): Promise<{ remoteHasData: boolean }> {
 		const s = await getSettings();
 		const backend: SyncBackend = s.sync?.backend ?? 'lichess';
-		const token = effectiveLichessToken(s);
-		if (!token) throw new Error('Connect Lichess in Settings before enabling sync.');
 		this.#deviceId = this.#deviceId ?? s.sync?.deviceId ?? crypto.randomUUID();
 
 		let remoteHasData: boolean;
@@ -212,13 +210,19 @@ class SyncStore {
 		if (backend === 'cloudflare') {
 			const baseUrl = s.sync?.cloudflareUrl;
 			if (!baseUrl) throw new Error('Set the Cloudflare sync URL in Settings before enabling.');
+			const idToken = s.syncIdentityToken?.accessToken;
+			if (!idToken) {
+				throw new Error('Connect a sync identity (Settings) before enabling Cloudflare sync.');
+			}
 			const transport = new CloudflareTransport({
 				baseUrl,
-				lichessToken: token,
+				lichessToken: idToken,
 				deviceId: this.#deviceId
 			});
 			({ remoteHasData } = await transport.connect());
 		} else {
+			const token = effectiveLichessToken(s);
+			if (!token) throw new Error('Connect Lichess in Settings before enabling sync.');
 			if (!tokenHasStudyScopes(s.lichessOAuth)) {
 				throw new Error('Lichess token is missing study:read/study:write scopes. Reconnect.');
 			}
@@ -668,12 +672,13 @@ class SyncStore {
 		if (backend === 'cloudflare') {
 			const baseUrl = settings.sync?.cloudflareUrl ?? this.cloudflareUrl;
 			if (!baseUrl) throw new Error('Cloudflare sync URL is not configured. Set it in Settings.');
-			if (!token) throw new Error('Connect Lichess (for sync identity) in Settings.');
-			const key = `${baseUrl} ${token} ${this.#deviceId}`;
+			const idToken = settings.syncIdentityToken?.accessToken;
+			if (!idToken) throw new Error('Connect a sync identity (Settings) for Cloudflare sync.');
+			const key = `${baseUrl} ${idToken} ${this.#deviceId}`;
 			if (!this.#cfTransport || this.#cfKey !== key) {
 				this.#cfTransport = new CloudflareTransport({
 					baseUrl,
-					lichessToken: token,
+					lichessToken: idToken,
 					deviceId: this.#deviceId
 				});
 				this.#cfKey = key;

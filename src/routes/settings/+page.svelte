@@ -396,6 +396,8 @@
 	const syncError = $derived(sync.error);
 	const syncTelemetry = $derived(sync.telemetry);
 	const syncBackend = $derived(sync.backend);
+	const syncIdentityUser = $derived(settings?.syncIdentityToken?.username ?? null);
+	const syncIdentityConnected = $derived(!!settings?.syncIdentityToken?.accessToken);
 	let cfUrl = $state(sync.cloudflareUrl ?? '');
 	let syncBusyLocal = $state(false);
 
@@ -1258,6 +1260,31 @@
 									onblur={() => sync.configureBackend('cloudflare', cfUrl)}
 									class="mt-1 w-full rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-xs text-[var(--color-parchment-100)]"
 								/>
+								<div class="mt-1 flex flex-wrap items-center gap-2">
+									{#if syncIdentityConnected}
+										<span class="font-serif text-xs text-[var(--color-parchment-400)] italic">
+											Sync identity connected{syncIdentityUser ? ` as ${syncIdentityUser}` : ''}.
+										</span>
+										<Button
+											variant="ghost"
+											size="sm"
+											onclick={() => startOAuth([], lichessReturnTo, 'identity')}
+										>
+											Reconnect
+										</Button>
+									{:else}
+										<Button
+											variant="secondary"
+											size="sm"
+											onclick={() => startOAuth([], lichessReturnTo, 'identity')}
+										>
+											Connect sync identity
+										</Button>
+										<span class="font-serif text-xs text-[var(--color-parchment-500)] italic">
+											A scopeless Lichess token — the backend can't act on your Lichess account.
+										</span>
+									{/if}
+								</div>
 							{/if}
 						</div>
 					</div>
@@ -1274,7 +1301,9 @@
 							variant="primary"
 							size="sm"
 							onclick={enableSync}
-							disabled={syncBusyLocal || syncBusy || (syncBackend === 'cloudflare' && !cfUrl)}
+							disabled={syncBusyLocal ||
+								syncBusy ||
+								(syncBackend === 'cloudflare' && (!cfUrl || !syncIdentityConnected))}
 						>
 							{syncBusyLocal ? 'Working…' : 'Enable Sync'}
 						</Button>

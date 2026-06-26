@@ -51,6 +51,11 @@ const STATE_KEY = 'ot:lichess:pkce-state';
 // handleCallback. Lichess grants all-or-nothing: if the callback arrives
 // without an `error` param, the user accepted every scope we requested.
 const SCOPES_KEY = 'ot:lichess:pkce-scopes';
+// Which token this flow is for: the main app token (`lichessOAuth`) or the
+// scopeless `syncIdentityToken` used only for the Cloudflare backend. Lets the
+// shared callback route the resulting token to the right settings field.
+const PURPOSE_KEY = 'ot:lichess:pkce-purpose';
+export type OAuthPurpose = 'main' | 'identity';
 // Path-and-hash to navigate to after a successful callback. Set by
 // `startOAuth` when the caller knows where the user started (e.g. clicking
 // "Sign in with Lichess" from the explorer in /repertoire/.../edit), and
@@ -170,7 +175,11 @@ async function generatePkce(): Promise<{ verifier: string; challenge: string }> 
  * layout for the return path. `scopes` defaults to none — the Lichess
  * explorer and public game history don't require any special scope.
  */
-export async function startOAuth(scopes: string[] = [], returnTo?: string): Promise<void> {
+export async function startOAuth(
+	scopes: string[] = [],
+	returnTo?: string,
+	purpose: OAuthPurpose = 'main'
+): Promise<void> {
 	const { verifier, challenge } = await generatePkce();
 	const state = base64url(crypto.getRandomValues(new Uint8Array(16)));
 	// localStorage (not sessionStorage) so the verifier survives the OS
@@ -179,6 +188,7 @@ export async function startOAuth(scopes: string[] = [], returnTo?: string): Prom
 	localStorage.setItem(VERIFIER_KEY, verifier);
 	localStorage.setItem(STATE_KEY, state);
 	localStorage.setItem(SCOPES_KEY, scopes.join(' '));
+	localStorage.setItem(PURPOSE_KEY, purpose);
 	// Stash the desired post-OAuth landing page if the caller supplied a
 	// safe same-origin path; otherwise clear any stale value so a previous
 	// flow doesn't bleed into this one (e.g. the user kicked off from /edit,
@@ -221,9 +231,11 @@ export async function handleCallback(code: string, state: string): Promise<void>
 	const savedVerifier = localStorage.getItem(VERIFIER_KEY) ?? sessionStorage.getItem(VERIFIER_KEY);
 	const savedState = localStorage.getItem(STATE_KEY) ?? sessionStorage.getItem(STATE_KEY);
 	const savedScopes = localStorage.getItem(SCOPES_KEY) ?? sessionStorage.getItem(SCOPES_KEY) ?? '';
+	const savedPurpose = (localStorage.getItem(PURPOSE_KEY) as OAuthPurpose | null) ?? 'main';
 	localStorage.removeItem(VERIFIER_KEY);
 	localStorage.removeItem(STATE_KEY);
 	localStorage.removeItem(SCOPES_KEY);
+	localStorage.removeItem(PURPOSE_KEY);
 	sessionStorage.removeItem(VERIFIER_KEY);
 	sessionStorage.removeItem(STATE_KEY);
 	sessionStorage.removeItem(SCOPES_KEY);
@@ -283,7 +295,13 @@ export async function handleCallback(code: string, state: string): Promise<void>
 	}
 
 	const settings = await getSettings();
-	settings.lichessOAuth = token;
+	if (savedPurpose === 'identity') {
+		// Scopeless identity token for the Cloudflare backend — kept apart from
+		// the main token so the powerful study/challenge token stays client-side.
+		settings.syncIdentityToken = token;
+	} else {
+		settings.lichessOAuth = token;
+	}
 	await saveSettings(JSON.parse(JSON.stringify(settings)));
 }
 
