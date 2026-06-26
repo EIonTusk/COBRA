@@ -38,6 +38,10 @@ jobs:
         env:
           # Matches `https://eiontusk.github.io/COBRA/`.
           COBRA_BASE_PATH: /COBRA
+          # Bakes in the default hosted sync backend (Cloudflare Worker) so users
+          # don't paste a URL. Set repo variable COBRA_SYNC_URL to the Worker
+          # origin (e.g. https://cobra.eiontusk.workers.dev); empty = no default.
+          COBRA_SYNC_URL: ${{ vars.COBRA_SYNC_URL }}
         run: npm run build
 
       # GitHub Pages doesn't let you set custom headers, which means

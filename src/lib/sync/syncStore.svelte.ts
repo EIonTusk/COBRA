@@ -75,6 +75,15 @@ export interface ConflictPrompt {
 const DEBOUNCE_MS = 30_000;
 const MIN_PULL_INTERVAL_MS = 5 * 60_000;
 
+// Operator-provided default Cloudflare sync URL, baked in at build time (Vite
+// `define`, fed from process.env.COBRA_SYNC_URL). When set, users don't paste a
+// URL — they share the one hosted Worker, isolated by Lichess identity. Falls
+// back to null for self-host / dev, where the user supplies their own.
+const DEFAULT_SYNC_URL =
+	typeof __COBRA_SYNC_URL__ === 'string' && __COBRA_SYNC_URL__.trim()
+		? __COBRA_SYNC_URL__.trim()
+		: null;
+
 class SyncStore {
 	status = $state<SyncStatus>('disabled');
 	enabled = $state<boolean>(false);
@@ -112,7 +121,7 @@ class SyncStore {
 		this.#revisionCache = { ...(sync.lastKnownRevisions ?? {}) };
 		this.telemetry = sync.syncTelemetry === true;
 		this.backend = sync.backend ?? 'lichess';
-		this.cloudflareUrl = sync.cloudflareUrl ?? null;
+		this.cloudflareUrl = sync.cloudflareUrl ?? DEFAULT_SYNC_URL;
 		this.status = this.enabled ? 'idle' : 'disabled';
 		// Register the dirty-mark handler so storage modules' calls land here
 		// regardless of whether sync is currently enabled — the markDirty
@@ -208,7 +217,7 @@ class SyncStore {
 		let remoteHasData: boolean;
 		let studyId = s.sync?.studyId;
 		if (backend === 'cloudflare') {
-			const baseUrl = s.sync?.cloudflareUrl;
+			const baseUrl = s.sync?.cloudflareUrl ?? DEFAULT_SYNC_URL;
 			if (!baseUrl) throw new Error('Set the Cloudflare sync URL in Settings before enabling.');
 			const idToken = s.syncIdentityToken?.accessToken;
 			if (!idToken) {
@@ -670,7 +679,7 @@ class SyncStore {
 		this.#deviceId = this.#deviceId ?? settings.sync?.deviceId ?? crypto.randomUUID();
 
 		if (backend === 'cloudflare') {
-			const baseUrl = settings.sync?.cloudflareUrl ?? this.cloudflareUrl;
+			const baseUrl = settings.sync?.cloudflareUrl ?? this.cloudflareUrl ?? DEFAULT_SYNC_URL;
 			if (!baseUrl) throw new Error('Cloudflare sync URL is not configured. Set it in Settings.');
 			const idToken = settings.syncIdentityToken?.accessToken;
 			if (!idToken) throw new Error('Connect a sync identity (Settings) for Cloudflare sync.');

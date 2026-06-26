@@ -88,6 +88,14 @@ export default defineConfig({
 	optimizeDeps: {
 		exclude: ['lila-stockfish-web']
 	},
+	// Build-time default for the hosted (Cloudflare) sync backend URL, read from
+	// process.env.COBRA_SYNC_URL so a deploy can bake in the operator's Worker —
+	// one shared backend for all users, who are isolated by Lichess identity.
+	// Empty when unset (self-host / local dev), in which case users enter their
+	// own URL in Settings.
+	define: {
+		__COBRA_SYNC_URL__: JSON.stringify(process.env.COBRA_SYNC_URL ?? '')
+	},
 	test: {
 		expect: { requireAssertions: true },
 		projects: [
