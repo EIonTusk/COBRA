@@ -94,6 +94,11 @@ class SyncStore {
 	#deviceId: string | null = null;
 	#debounceTimer: ReturnType<typeof setTimeout> | null = null;
 	#flightLock: Promise<void> | null = null;
+	// Memoised Cloudflare transport so its minted JWT survives across operations
+	// instead of re-authenticating (and re-hitting Lichess /api/account) on every
+	// push/pull. Rebuilt when the backend config (url/token/device) changes.
+	#cfTransport: CloudflareTransport | null = null;
+	#cfKey: string | null = null;
 
 	/** Hydrate from settings on app boot. Idempotent. */
 	async init(): Promise<void> {
@@ -260,6 +265,8 @@ class SyncStore {
 		this.dirty.clear();
 		this.conflict = null;
 		this.error = null;
+		this.#cfTransport = null;
+		this.#cfKey = null;
 	}
 
 	/** Disable + delete every remote sync scope (Lichess chapters or Cloudflare
@@ -662,7 +669,16 @@ class SyncStore {
 			const baseUrl = settings.sync?.cloudflareUrl ?? this.cloudflareUrl;
 			if (!baseUrl) throw new Error('Cloudflare sync URL is not configured. Set it in Settings.');
 			if (!token) throw new Error('Connect Lichess (for sync identity) in Settings.');
-			return new CloudflareTransport({ baseUrl, lichessToken: token, deviceId: this.#deviceId });
+			const key = `${baseUrl} ${token} ${this.#deviceId}`;
+			if (!this.#cfTransport || this.#cfKey !== key) {
+				this.#cfTransport = new CloudflareTransport({
+					baseUrl,
+					lichessToken: token,
+					deviceId: this.#deviceId
+				});
+				this.#cfKey = key;
+			}
+			return this.#cfTransport;
 		}
 
 		if (!token) throw new Error('Lichess token is missing — reconnect in Settings.');
