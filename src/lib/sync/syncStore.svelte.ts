@@ -52,10 +52,12 @@ import { emptyMergeStats } from './merge';
 import { toast } from '$lib/ui';
 import { SyncConflictError } from './lichessSync';
 import { LichessStudyTransport } from './lichessTransport';
+import { CloudflareTransport } from './cloudflareTransport';
 import { dedupeScopesByName } from './scopeDedup';
 import type { SyncKind } from './pgnWrap';
+import type { SyncTransport } from './transport';
 import { setDirtyHandler } from './dirtyMark';
-import type { AppSettings, SyncSettings } from '$lib/types';
+import type { AppSettings, SyncBackend, SyncSettings } from '$lib/types';
 
 export type SyncStatus = 'disabled' | 'idle' | 'pulling' | 'pushing' | 'conflict' | 'error';
 
@@ -84,6 +86,10 @@ class SyncStore {
 	studyId = $state<string | null>(null);
 	/** Whether the bulky per-rep telemetry tier syncs. Off by default (#68). */
 	telemetry = $state<boolean>(false);
+	/** Active transport backend. */
+	backend = $state<SyncBackend>('lichess');
+	/** Worker origin when `backend === 'cloudflare'`. */
+	cloudflareUrl = $state<string | null>(null);
 
 	#deviceId: string | null = null;
 	#debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -100,6 +106,8 @@ class SyncStore {
 		this.#deviceId = sync.deviceId ?? null;
 		this.#revisionCache = { ...(sync.lastKnownRevisions ?? {}) };
 		this.telemetry = sync.syncTelemetry === true;
+		this.backend = sync.backend ?? 'lichess';
+		this.cloudflareUrl = sync.cloudflareUrl ?? null;
 		this.status = this.enabled ? 'idle' : 'disabled';
 		// Register the dirty-mark handler so storage modules' calls land here
 		// regardless of whether sync is currently enabled — the markDirty
@@ -145,6 +153,23 @@ class SyncStore {
 		}
 	}
 
+	/**
+	 * Choose the sync backend before enabling. Persisted so `enable()` and the
+	 * `#transport()` factory pick it up. Only meaningful while disabled — switch
+	 * backends by disabling first, since the two remotes are independent.
+	 */
+	async configureBackend(backend: SyncBackend, cloudflareUrl?: string): Promise<void> {
+		this.backend = backend;
+		if (cloudflareUrl !== undefined) this.cloudflareUrl = cloudflareUrl || null;
+		const s = await getSettings();
+		const next: SyncSettings = {
+			...(s.sync ?? { enabled: false }),
+			backend,
+			cloudflareUrl: this.cloudflareUrl ?? undefined
+		};
+		await saveSettings({ ...s, sync: next }, { skipDirtyMark: true });
+	}
+
 	/** Manual "Sync now" — pull everything, then push everything dirty. */
 	async syncNow(): Promise<void> {
 		if (!this.enabled) return;
@@ -163,35 +188,50 @@ class SyncStore {
 	}
 
 	/**
-	 * First-run setup. Locates or creates the COBRA Sync study, and decides
-	 * whether to push local data up or pull remote data down based on what
-	 * `mode` the caller supplies. Caller (Settings UI) is responsible for
-	 * showing a chooser when remote already has chapters.
+	 * First-run setup. Connects the active backend (locating/creating the
+	 * Lichess study, or authenticating with the Cloudflare Worker), and decides
+	 * whether to push local data up or pull remote data down based on `mode`.
+	 * Caller (Settings UI) shows a chooser when the remote already has data.
 	 */
 	async enable(opts: {
 		mode: 'push-local' | 'pull-remote' | 'fresh';
 	}): Promise<{ remoteHasData: boolean }> {
 		const s = await getSettings();
+		const backend: SyncBackend = s.sync?.backend ?? 'lichess';
 		const token = effectiveLichessToken(s);
 		if (!token) throw new Error('Connect Lichess in Settings before enabling sync.');
-		if (!tokenHasStudyScopes(s.lichessOAuth)) {
-			throw new Error('Lichess token is missing study:read/study:write scopes. Reconnect.');
-		}
-		const username = s.lichessOAuth?.username;
-		if (!username) throw new Error('Lichess OAuth account has no username.');
-
-		// Locate/create the remote store and probe whether it already has data.
-		const transport = new LichessStudyTransport({ token, username, studyId: s.sync?.studyId });
-		const { remoteHasData } = await transport.connect();
-		const studyId = transport.studyId as string;
-		this.studyId = studyId;
 		this.#deviceId = this.#deviceId ?? s.sync?.deviceId ?? crypto.randomUUID();
+
+		let remoteHasData: boolean;
+		let studyId = s.sync?.studyId;
+		if (backend === 'cloudflare') {
+			const baseUrl = s.sync?.cloudflareUrl;
+			if (!baseUrl) throw new Error('Set the Cloudflare sync URL in Settings before enabling.');
+			const transport = new CloudflareTransport({
+				baseUrl,
+				lichessToken: token,
+				deviceId: this.#deviceId
+			});
+			({ remoteHasData } = await transport.connect());
+		} else {
+			if (!tokenHasStudyScopes(s.lichessOAuth)) {
+				throw new Error('Lichess token is missing study:read/study:write scopes. Reconnect.');
+			}
+			const username = s.lichessOAuth?.username;
+			if (!username) throw new Error('Lichess OAuth account has no username.');
+			const transport = new LichessStudyTransport({ token, username, studyId: s.sync?.studyId });
+			({ remoteHasData } = await transport.connect());
+			studyId = transport.studyId as string;
+			this.studyId = studyId;
+		}
+
 		this.enabled = true;
 		this.status = 'idle';
 
 		const next: SyncSettings = {
 			...(s.sync ?? { enabled: false }),
 			enabled: true,
+			backend,
 			studyId,
 			deviceId: this.#deviceId
 		};
@@ -222,19 +262,14 @@ class SyncStore {
 		this.error = null;
 	}
 
-	/** Disable + delete every COBRA-SYNC chapter on Lichess + clear local
-	 *  revision tracking. Leaves the (now empty) study itself in place — the
-	 *  user can delete it on Lichess if they care. */
+	/** Disable + delete every remote sync scope (Lichess chapters or Cloudflare
+	 *  rows) + clear local revision tracking. For Lichess, leaves the (now
+	 *  empty) study in place — the user can delete it themselves. */
 	async disconnectAndForget(): Promise<void> {
-		const s = await getSettings();
-		const token = effectiveLichessToken(s);
-		const studyId = s.sync?.studyId;
-		if (token && studyId) {
-			try {
-				await new LichessStudyTransport({ token, studyId }).purgeAll();
-			} catch (e) {
-				console.warn('[sync] purge failed:', e);
-			}
+		try {
+			await (await this.#transport()).purgeAll();
+		} catch (e) {
+			console.warn('[sync] purge failed:', e);
 		}
 		await this.disable();
 		const fresh = await getSettings();
@@ -613,20 +648,27 @@ class SyncStore {
 	}
 
 	/**
-	 * Build the active sync transport from current settings. Resolves the
-	 * Lichess token + study id (the connection context) and backfills the
-	 * device id, mirroring the pre-seam `#requireSyncContext`. When a hosted
-	 * backend lands, this is the one place that picks which transport to
-	 * instantiate.
+	 * Build the active sync transport from current settings. This is the one
+	 * place that picks which backend to instantiate — Lichess study or
+	 * Cloudflare Worker — so every push/pull/delete path is backend-agnostic.
 	 */
-	async #transport(): Promise<LichessStudyTransport> {
+	async #transport(): Promise<SyncTransport> {
 		const settings = await getSettings();
+		const backend: SyncBackend = settings.sync?.backend ?? 'lichess';
 		const token = effectiveLichessToken(settings);
+		this.#deviceId = this.#deviceId ?? settings.sync?.deviceId ?? crypto.randomUUID();
+
+		if (backend === 'cloudflare') {
+			const baseUrl = settings.sync?.cloudflareUrl ?? this.cloudflareUrl;
+			if (!baseUrl) throw new Error('Cloudflare sync URL is not configured. Set it in Settings.');
+			if (!token) throw new Error('Connect Lichess (for sync identity) in Settings.');
+			return new CloudflareTransport({ baseUrl, lichessToken: token, deviceId: this.#deviceId });
+		}
+
 		if (!token) throw new Error('Lichess token is missing — reconnect in Settings.');
 		const studyId = settings.sync?.studyId ?? this.studyId;
 		if (!studyId) throw new Error('Sync study is not configured. Re-enable sync in Settings.');
 		this.studyId = studyId;
-		this.#deviceId = this.#deviceId ?? settings.sync?.deviceId ?? crypto.randomUUID();
 		return new LichessStudyTransport({ token, studyId });
 	}
 

@@ -395,6 +395,8 @@
 	const syncDirtyCount = $derived(sync.dirty.size);
 	const syncError = $derived(sync.error);
 	const syncTelemetry = $derived(sync.telemetry);
+	const syncBackend = $derived(sync.backend);
+	let cfUrl = $state(sync.cloudflareUrl ?? '');
 	let syncBusyLocal = $state(false);
 
 	const lichessReadyForSync = $derived.by(() => {
@@ -1215,19 +1217,64 @@
 						COBRA server.
 					</div>
 				{:else if !syncEnabled}
+					<div class="ink-panel mb-4 p-4">
+						<div class="eyebrow mb-2">Backend</div>
+						<div class="flex flex-col gap-2 font-serif text-sm text-[var(--color-parchment-200)]">
+							<label class="flex cursor-pointer items-start gap-2">
+								<input
+									type="radio"
+									name="sync-backend"
+									checked={syncBackend === 'lichess'}
+									onchange={() => sync.configureBackend('lichess')}
+									class="mt-0.5 accent-[var(--color-brass-300)]"
+								/>
+								<span
+									>Lichess study
+									<span class="text-[var(--color-parchment-500)] italic"
+										>— zero setup; best for smaller repertoires.</span
+									></span
+								>
+							</label>
+							<label class="flex cursor-pointer items-start gap-2">
+								<input
+									type="radio"
+									name="sync-backend"
+									checked={syncBackend === 'cloudflare'}
+									onchange={() => sync.configureBackend('cloudflare', cfUrl)}
+									class="mt-0.5 accent-[var(--color-brass-300)]"
+								/>
+								<span
+									>Cloudflare (hosted)
+									<span class="text-[var(--color-parchment-500)] italic"
+										>— no per-chapter size limit; needs your own Worker URL.</span
+									></span
+								>
+							</label>
+							{#if syncBackend === 'cloudflare'}
+								<input
+									type="url"
+									placeholder="https://cobra-sync.<account>.workers.dev"
+									bind:value={cfUrl}
+									onblur={() => sync.configureBackend('cloudflare', cfUrl)}
+									class="mt-1 w-full rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-xs text-[var(--color-parchment-100)]"
+								/>
+							{/if}
+						</div>
+					</div>
 					<div class="ink-panel mb-4 flex flex-wrap items-center justify-between gap-3 p-4">
 						<div class="flex-1">
 							<div class="eyebrow mb-1">Status</div>
 							<p class="font-serif text-sm text-[var(--color-parchment-400)] italic">
-								Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA
-								Sync".
+								{syncBackend === 'cloudflare'
+									? 'Disabled. Enabling will connect to your Cloudflare sync backend.'
+									: 'Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA Sync".'}
 							</p>
 						</div>
 						<Button
 							variant="primary"
 							size="sm"
 							onclick={enableSync}
-							disabled={syncBusyLocal || syncBusy}
+							disabled={syncBusyLocal || syncBusy || (syncBackend === 'cloudflare' && !cfUrl)}
 						>
 							{syncBusyLocal ? 'Working…' : 'Enable Sync'}
 						</Button>

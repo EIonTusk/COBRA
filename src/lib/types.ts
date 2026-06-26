@@ -357,8 +357,18 @@ export interface ScanAccount {
  * higher remote revision triggers the conflict prompt instead of a
  * silent overwrite.
  */
+export type SyncBackend = 'lichess' | 'cloudflare';
+
 export interface SyncSettings {
 	enabled: boolean;
+	/**
+	 * Which sync transport is active. `'lichess'` (default) stores blobs in a
+	 * private Lichess study; `'cloudflare'` uses a hosted Worker + D1 backend
+	 * (issue #68 — no per-chapter size ceiling). Chosen before enabling.
+	 */
+	backend?: SyncBackend;
+	/** Worker origin when `backend === 'cloudflare'`. */
+	cloudflareUrl?: string;
 	studyId?: string;
 	deviceId?: string;
 	lastPushAt?: number;
