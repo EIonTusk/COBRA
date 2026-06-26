@@ -1,0 +1,24 @@
+name = "cobra-sync"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+# D1 database — create with `wrangler d1 create cobra-sync`, then paste the id.
+[[d1_databases]]
+binding = "DB"
+database_name = "cobra-sync"
+database_id = "PASTE_D1_DATABASE_ID_HERE"
+
+# R2 bucket for large payloads (optional). Create with
+# `wrangler r2 bucket create cobra-sync-blobs`. Without it, blobs over the
+# ~700 KB threshold are stored inline in D1 (which has its own size limits).
+# [[r2_buckets]]
+# binding = "BLOBS"
+# bucket_name = "cobra-sync-blobs"
+
+[vars]
+# CORS allow-origin for the app. Set to your deployed origin in production
+# (e.g. "https://cobra.pages.dev"); '*' is acceptable since auth is bearer-only.
+ALLOWED_ORIGIN = "*"
+
+# Secrets (do NOT put these here) — set with:
+#   wrangler secret put JWT_SECRET      # random 32+ byte string for signing app JWTs
