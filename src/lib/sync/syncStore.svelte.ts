@@ -99,6 +99,8 @@ class SyncStore {
 	backend = $state<SyncBackend>('lichess');
 	/** Worker origin when `backend === 'cloudflare'`. */
 	cloudflareUrl = $state<string | null>(null);
+	/** Operator-baked default Worker URL (build-time); null for self-host/dev. */
+	readonly defaultCloudflareUrl = DEFAULT_SYNC_URL;
 
 	#deviceId: string | null = null;
 	#debounceTimer: ReturnType<typeof setTimeout> | null = null;

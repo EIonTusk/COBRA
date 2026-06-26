@@ -396,6 +396,7 @@
 	const syncError = $derived(sync.error);
 	const syncTelemetry = $derived(sync.telemetry);
 	const syncBackend = $derived(sync.backend);
+	const syncHasDefaultUrl = $derived(sync.defaultCloudflareUrl != null);
 	const syncIdentityUser = $derived(settings?.syncIdentityToken?.username ?? null);
 	const syncIdentityConnected = $derived(!!settings?.syncIdentityToken?.accessToken);
 	let cfUrl = $state(sync.cloudflareUrl ?? '');
@@ -1242,24 +1243,29 @@
 									type="radio"
 									name="sync-backend"
 									checked={syncBackend === 'cloudflare'}
-									onchange={() => sync.configureBackend('cloudflare', cfUrl)}
+									onchange={() =>
+										sync.configureBackend('cloudflare', syncHasDefaultUrl ? undefined : cfUrl)}
 									class="mt-0.5 accent-[var(--color-brass-300)]"
 								/>
 								<span
 									>Cloudflare (hosted)
-									<span class="text-[var(--color-parchment-500)] italic"
-										>— no per-chapter size limit; needs your own Worker URL.</span
+									<span class="text-[var(--color-parchment-500)] italic">
+										{syncHasDefaultUrl
+											? '— no per-chapter size limit; uses the hosted sync server.'
+											: '— no per-chapter size limit; needs your own Worker URL.'}</span
 									></span
 								>
 							</label>
 							{#if syncBackend === 'cloudflare'}
-								<input
-									type="url"
-									placeholder="https://cobra-sync.<account>.workers.dev"
-									bind:value={cfUrl}
-									onblur={() => sync.configureBackend('cloudflare', cfUrl)}
-									class="mt-1 w-full rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-xs text-[var(--color-parchment-100)]"
-								/>
+								{#if !syncHasDefaultUrl}
+									<input
+										type="url"
+										placeholder="https://cobra-sync.<account>.workers.dev"
+										bind:value={cfUrl}
+										onblur={() => sync.configureBackend('cloudflare', cfUrl)}
+										class="mt-1 w-full rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-xs text-[var(--color-parchment-100)]"
+									/>
+								{/if}
 								<div class="mt-1 flex flex-wrap items-center gap-2">
 									{#if syncIdentityConnected}
 										<span class="font-serif text-xs text-[var(--color-parchment-400)] italic">
@@ -1303,7 +1309,8 @@
 							onclick={enableSync}
 							disabled={syncBusyLocal ||
 								syncBusy ||
-								(syncBackend === 'cloudflare' && (!cfUrl || !syncIdentityConnected))}
+								(syncBackend === 'cloudflare' &&
+									((!cfUrl && !syncHasDefaultUrl) || !syncIdentityConnected))}
 						>
 							{syncBusyLocal ? 'Working…' : 'Enable Sync'}
 						</Button>
