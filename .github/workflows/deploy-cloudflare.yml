@@ -1,0 +1,54 @@
+name: Deploy COBRA to Cloudflare Pages
+
+# Option B: GitHub builds, then pushes the artifact to Cloudflare Pages with
+# wrangler (Cloudflare does NOT pull/build the repo itself). Mirrors the
+# existing GitHub Pages deploy but builds at the root base path for the
+# Cloudflare origin, and runs alongside it during the dual-run cutover.
+#
+# DORMANT until you opt in: set repo variable CLOUDFLARE_DEPLOY=true and add the
+# secrets CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID. Until then this is a
+# no-op and won't fail your tagged releases. Once Cloudflare is canonical,
+# delete deploy.yml (GitHub Pages).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: ${{ vars.CLOUDFLARE_DEPLOY == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Prep Stockfish assets
+        run: npm run prep:stockfish
+
+      - name: Build (root base path for the Cloudflare origin)
+        env:
+          COBRA_BASE_PATH: ''
+        run: npm run build
+
+      # SPA deep-link fallback for Cloudflare Pages: the static adapter emits
+      # index.html, and this routes any unmatched path to it with a 200 so
+      # client-side routing survives direct links.
+      - name: SPA fallback
+        run: echo "/* /index.html 200" > build/_redirects
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Create the Pages project named `cobra` first (or rename here).
+          command: pages deploy build --project-name=cobra --branch=main
