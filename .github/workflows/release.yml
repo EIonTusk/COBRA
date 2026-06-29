@@ -497,3 +497,25 @@ jobs:
         run: |
           TAG="${{ steps.tag.outputs.value }}"
           gh release upload "$TAG" dist/*.apk --clobber
+
+  # All platform jobs upload to the same draft release. Once they've finished,
+  # flip the draft to published so users never see a half-populated release and
+  # the Tauri auto-updater never reads a release missing a platform binary.
+  publish:
+    needs: [desktop, ios, android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ steps.tag.outputs.value }}" --draft=false --latest
