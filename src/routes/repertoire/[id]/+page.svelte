@@ -22,6 +22,7 @@
 		Trash2,
 		Type,
 		Settings,
+		Upload,
 		UserCheck
 	} from 'lucide-svelte';
 
@@ -511,6 +512,15 @@
 							<Type class="size-3.5 text-[var(--color-parchment-400)]" />
 							<span>Rename</span>
 						</button>
+						<a
+							role="menuitem"
+							href={resolve(`/repertoire/${rep.id}/import`)}
+							class="flex items-center gap-2.5 px-3 py-2 text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)]"
+							onclick={() => (gearMenuOpen = false)}
+						>
+							<Upload class="size-3.5 text-[var(--color-parchment-400)]" />
+							<span>Import PGN</span>
+						</a>
 						<a
 							role="menuitem"
 							href={resolve(`/repertoire/${rep.id}/export`)}
