@@ -1,7 +1,9 @@
 name: Deploy COBRA sync Worker
 
-# Deploys the hosted sync backend (worker/) to Cloudflare on pushes that touch
-# it. Independent of the frontend deploy — the Worker changes rarely.
+# Deploys the hosted sync backend (worker/) to Cloudflare on version-tag pushes
+# (v*) only — never on PRs or ordinary merges to main. Independent of the
+# frontend deploy — the Worker changes rarely, so it ships with each release.
+# Use the manual workflow_dispatch for out-of-band Worker-only deploys.
 #
 # DORMANT until you opt in: set repo variable CLOUDFLARE_DEPLOY=true and add the
 # secrets CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID. First-time setup (D1
@@ -10,9 +12,8 @@ name: Deploy COBRA sync Worker
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'worker/**'
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
