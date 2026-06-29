@@ -5,8 +5,6 @@
 	import { ArrowRight, BookOpen, Link as LinkIcon, RefreshCw } from 'lucide-svelte';
 
 	import { parseRepertoirePgn } from '$lib/chess/pgn';
-	import { colorToMove } from '$lib/chess/fen';
-	import { createFreshCard } from '$lib/fsrs/scheduler';
 	import { startOAuth, tokenIsFresh, tokenHasStudyScopes, STUDY_SCOPES } from '$lib/lichess/oauth';
 	import {
 		fetchStudyPgn,
@@ -14,8 +12,7 @@
 		parseStudyIdInput,
 		type LichessStudyMeta
 	} from '$lib/lichess/studies';
-	import { getCard, upsertCard } from '$lib/storage/cards';
-	import { addEdge, applyImportedNote } from '$lib/storage/nodes';
+	import { mergeLinesIntoRepertoire } from '$lib/storage/importPgn';
 	import { createRepertoire, listRepertoires, setLichessStudyLink } from '$lib/storage/repertoires';
 	import { getSettings } from '$lib/storage/settings';
 	import { Button, DashboardBacklink, Input, Label, Separator } from '$lib/ui';
@@ -120,7 +117,6 @@
 			if (lines.length === 0) throw new Error('No valid games found in the study PGN.');
 
 			const first = lines[0];
-			const matching = lines.filter((l) => l.rootFenKey === first.rootFenKey);
 
 			// De-dup guard: if a repertoire is already linked to this study
 			// (same id + colour), re-import into it instead of minting a fresh
@@ -139,18 +135,7 @@
 				rep = await createRepertoire(name, color, first.rootFen);
 			}
 
-			for (const line of matching) {
-				for (const { fromFenKey, edge, comment, nags } of line.edges) {
-					await addEdge(rep.id, fromFenKey, edge);
-					await applyImportedNote(rep.id, edge.toFenKey, { comment, nags });
-					if (colorToMove(fromFenKey) === color) {
-						const existing = await getCard(rep.id, fromFenKey);
-						if (!existing) {
-							await upsertCard(createFreshCard(rep.id, fromFenKey, edge.san));
-						}
-					}
-				}
-			}
+			await mergeLinesIntoRepertoire(rep.id, color, rep.rootFenKey, lines);
 
 			if (linkForSync) {
 				const link: LichessStudyLink = {
