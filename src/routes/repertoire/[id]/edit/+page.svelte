@@ -26,6 +26,7 @@
 		Star,
 		Target,
 		Trash2,
+		Upload,
 		WifiOff,
 		X as XIcon
 	} from 'lucide-svelte';
@@ -38,6 +39,8 @@
 	import { listPositionWdlAtFenKey, type PositionWdlRow } from '$lib/storage/positionWdl';
 	import { getRepertoire, touchRepertoire, setStartingPosition } from '$lib/storage/repertoires';
 	import { nodesMap, addEdge, removeEdgeAndPrune, setNodeComment } from '$lib/storage/nodes';
+	import { parseRepertoirePgn } from '$lib/chess/pgn';
+	import { mergeLinesIntoRepertoire, type MergeLinesResult } from '$lib/storage/importPgn';
 	import {
 		deleteIdeaCard,
 		freshIdeaCard,
@@ -1588,6 +1591,11 @@
 			findMissingOpen = false;
 			return;
 		}
+		if (e.key === 'Escape' && importPgnOpen) {
+			e.preventDefault();
+			closeImportPgn();
+			return;
+		}
 		if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 		if (e.key === 'ArrowLeft') {
 			e.preventDefault();
@@ -1729,6 +1737,67 @@
 		botError = null;
 		botMissingScope = false;
 	}
+
+	// Bulk "add lines via PGN" from inside the builder (issue #70). Parses
+	// pasted/uploaded PGN and merges it additively into THIS repertoire via
+	// the shared `mergeLinesIntoRepertoire` helper — existing moves dedupe by
+	// FEN and drill progress is preserved. Lines must start from the rep's
+	// opening position, mirroring the standalone import page; off-root lines
+	// are skipped and reported. After a successful merge the node map is
+	// refreshed so the new branches show up in the tree immediately.
+	let importPgnOpen = $state(false);
+	let importPgnText = $state('');
+	let importPgnFileName = $state<string | null>(null);
+	let importPgnBusy = $state(false);
+	let importPgnError = $state<string | null>(null);
+	let importPgnResult = $state<MergeLinesResult | null>(null);
+
+	function openImportPgn() {
+		if (!rep) return;
+		importPgnText = '';
+		importPgnFileName = null;
+		importPgnError = null;
+		importPgnResult = null;
+		importPgnOpen = true;
+	}
+	function closeImportPgn() {
+		if (importPgnBusy) return;
+		importPgnOpen = false;
+	}
+	async function onImportPgnFile(e: Event) {
+		const file = (e.target as HTMLInputElement).files?.[0];
+		if (!file) return;
+		importPgnText = await file.text();
+		importPgnFileName = file.name;
+	}
+	async function runImportPgn() {
+		if (!rep || importPgnBusy || !importPgnText.trim()) return;
+		importPgnBusy = true;
+		importPgnError = null;
+		importPgnResult = null;
+		try {
+			const lines = parseRepertoirePgn(importPgnText);
+			if (lines.length === 0) throw new Error('No valid games found in the PGN.');
+			const merged = await mergeLinesIntoRepertoire(rep.id, rep.color, rep.rootFenKey, lines);
+			if (merged.importedLines === 0) {
+				throw new Error(
+					`None of the ${merged.skippedLines} line(s) start from this repertoire's opening position, so nothing was imported.`
+				);
+			}
+			// Refresh the tree + missing-move cache so the merged branches are
+			// visible and the probes account for them. Mark the rep touched so
+			// the auto-push on exit picks the change up.
+			nodes = await nodesMap(rep.id);
+			await touchRepertoire(rep.id);
+			void refreshMissingCache();
+			importPgnResult = merged;
+		} catch (err) {
+			importPgnError = err instanceof Error ? err.message : 'Import failed';
+		} finally {
+			importPgnBusy = false;
+		}
+	}
+
 	async function launchBotChallenge() {
 		if (!rep || !settings || botLaunching) return;
 		const token = effectiveLichessToken(settings);
@@ -2336,6 +2405,25 @@
 								 empirical-gaps store), so this stays
 								 enabled even when offline. Sits with the
 								 other "find a place to work on" entries. -->
+							<!-- Import PGN — no Lichess needed; merges pasted/uploaded
+								 lines into this rep. Mobile twin of the toolbar button. -->
+							<button
+								type="button"
+								role="menuitem"
+								onclick={() => {
+									findMissingOpen = false;
+									openImportPgn();
+								}}
+								style:--i="7"
+								class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)]"
+							>
+								<Upload class="size-3.5 text-[var(--color-parchment-400)]" />
+								<span
+									>Import PGN <span class="text-[var(--color-parchment-500)]"
+										>· paste or upload</span
+									></span
+								>
+							</button>
 							<button
 								type="button"
 								role="menuitem"
@@ -2629,6 +2717,19 @@
 					{:else if !mgActive && mgSavedExists}
 						<Star class="ml-1 size-3 text-[var(--color-brass-300)]" fill="currentColor" />
 					{/if}
+				</Button>
+				<!-- Bulk import: paste/upload PGN lines straight into this rep.
+					 No Lichess token required, so it stays enabled regardless of
+					 connection state. -->
+				<Button
+					class="hidden lg:inline-flex"
+					variant="secondary"
+					size="sm"
+					onclick={openImportPgn}
+					title="Add lines to this repertoire by pasting or uploading PGN"
+				>
+					<Upload class="size-3.5" />
+					<span>Import PGN</span>
 				</Button>
 				{#if mgActive && !mgFromSaved}
 					<Button
@@ -3308,6 +3409,125 @@
 					{botLaunching ? 'Launching…' : 'Challenge'}
 				</Button>
 			</div>
+		</div>
+	</div>
+{/if}
+
+{#if importPgnOpen && rep}
+	<!-- Backdrop + modal for bulk PGN import into the open repertoire. Paste
+	     or upload PGN, merge additively into the tree (existing moves dedupe
+	     by FEN, drill progress kept), then report what changed. -->
+	<div
+		role="presentation"
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+		onclick={(e) => {
+			if (e.target === e.currentTarget) closeImportPgn();
+		}}
+	>
+		<div
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="import-pgn-title"
+			class="ink-panel w-full max-w-lg rounded-[6px] border border-[var(--color-ink-700)] p-5 shadow-lg"
+		>
+			<div class="mb-3 flex items-center gap-2">
+				<Upload class="size-4 text-[var(--color-brass-300)]" />
+				<h2 id="import-pgn-title" class="font-serif text-lg">Import PGN into this repertoire</h2>
+			</div>
+
+			{#if importPgnResult}
+				<!-- Post-import summary. Mirrors the standalone import page so the
+				     two flows report the same numbers. -->
+				<dl class="grid grid-cols-3 gap-3">
+					<div>
+						<dt class="eyebrow text-[var(--color-parchment-500)]">New moves</dt>
+						<dd class="mt-1 font-serif text-2xl text-[var(--color-parchment-50)] tabular-nums">
+							{importPgnResult.addedEdges}
+						</dd>
+					</div>
+					<div>
+						<dt class="eyebrow text-[var(--color-parchment-500)]">New cards</dt>
+						<dd class="mt-1 font-serif text-2xl text-[var(--color-parchment-50)] tabular-nums">
+							{importPgnResult.addedCards}
+						</dd>
+					</div>
+					<div>
+						<dt class="eyebrow text-[var(--color-parchment-500)]">Lines merged</dt>
+						<dd class="mt-1 font-serif text-2xl text-[var(--color-parchment-50)] tabular-nums">
+							{importPgnResult.importedLines}
+						</dd>
+					</div>
+				</dl>
+				{#if importPgnResult.skippedLines > 0}
+					<p class="mt-3 font-serif text-sm text-[var(--color-brass-200)] italic">
+						{importPgnResult.skippedLines} line(s) skipped — they start from a different position than
+						this repertoire's opening.
+					</p>
+				{/if}
+				<div class="mt-5 flex items-center justify-end gap-2">
+					<Button
+						variant="ghost"
+						size="sm"
+						onclick={() => {
+							importPgnResult = null;
+							importPgnText = '';
+							importPgnFileName = null;
+						}}>Import more</Button
+					>
+					<Button size="sm" onclick={closeImportPgn}>Done</Button>
+				</div>
+			{:else}
+				<p class="mb-4 font-serif text-xs text-[var(--color-parchment-400)] italic">
+					Merge variations from a study, book, or <span class="font-mono not-italic">.pgn</span>
+					file. Existing moves and your drill progress are kept — only new lines are added. Lines must
+					start from this repertoire's opening position.
+				</p>
+
+				<label
+					for="import-pgn-file"
+					class="mb-3 flex cursor-pointer items-center gap-3 rounded-[6px] border border-dashed border-[var(--color-ink-700)] p-3 transition-colors hover:border-[var(--color-brass-300)]/60 hover:bg-[var(--color-ink-900)]/50"
+				>
+					<Upload
+						class="size-4 {importPgnFileName
+							? 'text-[var(--color-brass-300)]'
+							: 'text-[var(--color-parchment-400)]'}"
+					/>
+					<div class="min-w-0 flex-1 truncate text-sm text-[var(--color-parchment-100)]">
+						{importPgnFileName ?? 'Choose a .pgn file — or paste below'}
+					</div>
+					<input
+						id="import-pgn-file"
+						type="file"
+						accept=".pgn,text/plain"
+						onchange={onImportPgnFile}
+						class="sr-only"
+					/>
+				</label>
+
+				<Textarea
+					bind:value={importPgnText}
+					rows={9}
+					placeholder="1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. d3 Bc5 ..."
+					class="font-mono text-[13px] leading-6"
+				/>
+
+				{#if importPgnError}
+					<p class="mt-2 text-xs text-[var(--color-oxblood-300)]">{importPgnError}</p>
+				{/if}
+
+				<div class="mt-4 flex items-center justify-end gap-2">
+					<Button variant="ghost" size="sm" onclick={closeImportPgn} disabled={importPgnBusy}>
+						Cancel
+					</Button>
+					<Button
+						size="sm"
+						onclick={runImportPgn}
+						disabled={importPgnBusy || !importPgnText.trim()}
+					>
+						{importPgnBusy ? 'Importing…' : 'Import'}
+					</Button>
+				</div>
+			{/if}
 		</div>
 	</div>
 {/if}

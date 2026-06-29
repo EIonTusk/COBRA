@@ -5,10 +5,7 @@
 
 	import { parseRepertoirePgn } from '$lib/chess/pgn';
 	import { createRepertoire } from '$lib/storage/repertoires';
-	import { addEdge, applyImportedNote } from '$lib/storage/nodes';
-	import { upsertCard, getCard } from '$lib/storage/cards';
-	import { createFreshCard } from '$lib/fsrs/scheduler';
-	import { colorToMove } from '$lib/chess/fen';
+	import { mergeLinesIntoRepertoire } from '$lib/storage/importPgn';
 	import { Button, DashboardBacklink, Input, Label, Textarea } from '$lib/ui';
 	import type { Color } from '$lib/types';
 
@@ -39,18 +36,7 @@
 			if (lines.length === 0) throw new Error('No valid games found in the PGN.');
 			const first = lines[0];
 			const rep = await createRepertoire(name, color, first.rootFen);
-			for (const line of lines) {
-				for (const { fromFenKey, edge, comment, nags } of line.edges) {
-					await addEdge(rep.id, fromFenKey, edge);
-					await applyImportedNote(rep.id, edge.toFenKey, { comment, nags });
-					if (colorToMove(fromFenKey) === color) {
-						const existing = await getCard(rep.id, fromFenKey);
-						if (!existing) {
-							await upsertCard(createFreshCard(rep.id, fromFenKey, edge.san));
-						}
-					}
-				}
-			}
+			await mergeLinesIntoRepertoire(rep.id, color, first.rootFenKey, lines);
 			await goto(resolve(`/repertoire/${rep.id}`));
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Import failed';
