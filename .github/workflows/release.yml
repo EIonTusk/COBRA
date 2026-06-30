@@ -186,7 +186,11 @@ jobs:
 
   ios:
     needs: icons
-    runs-on: macos-latest
+    # Pinned to macos-15 (Xcode 16.4) deliberately. macos-latest rolled to
+    # macos-26, whose Xcode 26 toolchain ships the Metal toolchain that shadows
+    # the swiftCompatibility* libs Tauri's Swift glue force-loads, breaking the
+    # link step. Revert to macos-latest once tauri-apps/tauri#15066 ships a fix.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
 
