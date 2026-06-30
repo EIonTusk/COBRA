@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createEmptyCard, generatorParameters } from 'ts-fsrs';
 import {
+	EDGE_TOMBSTONE_TTL_MS,
 	emptyMergeStats,
 	mergeBaseline,
 	mergeCard,
@@ -316,6 +317,94 @@ describe('mergeNode', () => {
 		};
 		expect(mergeNode(a, b).merged.comment).toBe('new');
 		expect(mergeNode(b, a).merged.comment).toBe('new');
+	});
+
+	it('a tombstone suppresses an edge the other side still has', () => {
+		// Local deleted the edge to A (stamped t=300); remote still carries it
+		// (edge stamped t=100). The deletion is newer, so A stays gone. Local
+		// already lacked the edge, so there's no net edge change — but the
+		// tombstone survives to keep suppressing it.
+		const local: RepertoireNode = {
+			...baseNode([]),
+			deletedChildren: [{ toFenKey: 'A', deletedAt: 300 }]
+		};
+		const remote = baseNode([{ san: 'e4', uci: 'e2e4', toFenKey: 'A', updatedAt: 100 }]);
+		const { merged, edgeChanges, tombstoneDrops } = mergeNode(local, remote);
+		expect(merged.children.map((e) => e.toFenKey)).toEqual([]);
+		expect(edgeChanges).toBe(0);
+		expect(tombstoneDrops).toBe(1);
+		expect(merged.deletedChildren).toEqual([{ toFenKey: 'A', deletedAt: 300 }]);
+	});
+
+	it('is symmetric — a remote tombstone removes a live local edge', () => {
+		// The cross-device case: this device still has the edge, the deletion
+		// arrives from the other device.
+		const local = baseNode([{ san: 'e4', uci: 'e2e4', toFenKey: 'A', updatedAt: 100 }]);
+		const remote: RepertoireNode = {
+			...baseNode([]),
+			deletedChildren: [{ toFenKey: 'A', deletedAt: 300 }]
+		};
+		const { merged, edgeChanges, tombstoneDrops } = mergeNode(local, remote);
+		expect(merged.children).toEqual([]);
+		expect(edgeChanges).toBe(1);
+		expect(tombstoneDrops).toBe(1);
+	});
+
+	it('a re-add stamped after the deletion wins and clears the tombstone', () => {
+		// Remote deleted A at t=200; local re-added the edge at t=300.
+		const local = baseNode([{ san: 'e4', uci: 'e2e4', toFenKey: 'A', updatedAt: 300 }]);
+		const remote: RepertoireNode = {
+			...baseNode([]),
+			deletedChildren: [{ toFenKey: 'A', deletedAt: 200 }]
+		};
+		const { merged } = mergeNode(local, remote);
+		expect(merged.children.map((e) => e.toFenKey)).toEqual(['A']);
+		expect(merged.deletedChildren).toBeUndefined();
+	});
+
+	it('keeps the newest deletedAt when both sides have a tombstone', () => {
+		const local: RepertoireNode = {
+			...baseNode([]),
+			deletedChildren: [{ toFenKey: 'A', deletedAt: 200 }]
+		};
+		const remote: RepertoireNode = {
+			...baseNode([]),
+			deletedChildren: [{ toFenKey: 'A', deletedAt: 500 }]
+		};
+		expect(mergeNode(local, remote).merged.deletedChildren).toEqual([
+			{ toFenKey: 'A', deletedAt: 500 }
+		]);
+	});
+
+	it('keeps a tombstone for an edge that exists on neither side, dropping nothing', () => {
+		const local: RepertoireNode = {
+			...baseNode([{ san: 'd4', uci: 'd2d4', toFenKey: 'B', updatedAt: 100 }]),
+			deletedChildren: [{ toFenKey: 'A', deletedAt: 300 }]
+		};
+		const remote = baseNode([{ san: 'd4', uci: 'd2d4', toFenKey: 'B', updatedAt: 100 }]);
+		const { merged, tombstoneDrops } = mergeNode(local, remote);
+		expect(merged.children.map((e) => e.toFenKey)).toEqual(['B']);
+		expect(tombstoneDrops).toBe(0);
+		expect(merged.deletedChildren).toEqual([{ toFenKey: 'A', deletedAt: 300 }]);
+	});
+
+	it('drops the edge when the deletion ties the edge timestamp (deletedAt === updatedAt)', () => {
+		const local = baseNode([{ san: 'e4', uci: 'e2e4', toFenKey: 'A', updatedAt: 300 }]);
+		const remote: RepertoireNode = {
+			...baseNode([]),
+			deletedChildren: [{ toFenKey: 'A', deletedAt: 300 }]
+		};
+		expect(mergeNode(local, remote).merged.children).toEqual([]);
+	});
+
+	it('garbage-collects tombstones older than the TTL when mergedAt is given', () => {
+		const local: RepertoireNode = {
+			...baseNode([]),
+			deletedChildren: [{ toFenKey: 'A', deletedAt: 1000 }]
+		};
+		const remote = baseNode([]);
+		const mergedAt = 1000 + EDGE_TOMBSTONE_TTL_MS + 1;
+		expect(mergeNode(local, remote, mergedAt).merged.deletedChildren).toBeUndefined();
 	});
 });
 

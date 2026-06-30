@@ -111,6 +111,19 @@ export interface Edge {
 	updatedAt?: number;
 }
 
+/**
+ * Tombstone for an edge that was deleted from a node. Sync v2 carries these
+ * on the parent node so a variation deletion propagates across devices
+ * instead of being resurrected by the adds-win-against-deletes edge union.
+ * Mirrors the repertoire-level `repTombstones` mechanism, one level down.
+ */
+export interface EdgeTombstone {
+	/** Target position of the edge that was removed. */
+	toFenKey: string;
+	/** Wall-clock ms-since-epoch of the deletion. */
+	deletedAt: number;
+}
+
 export interface RepertoireNode {
 	repertoireId: string;
 	fenKey: string;
@@ -124,6 +137,14 @@ export interface RepertoireNode {
 	 * yields to whichever side has an explicit one.
 	 */
 	updatedAt?: number;
+	/**
+	 * Edges deleted from this node, with the time they were deleted. The
+	 * sync v2 merge drops an edge whose `updatedAt` is at or before a
+	 * tombstone's `deletedAt`; a newer re-add wins and clears the tombstone.
+	 * Garbage-collected past `EDGE_TOMBSTONE_TTL_MS`. Optional/back-compat —
+	 * absent on every node written before this field existed.
+	 */
+	deletedChildren?: EdgeTombstone[];
 }
 
 export interface Card {

@@ -4,6 +4,31 @@ import { markRepDirty } from '$lib/sync/dirtyMark';
 import { reachableFenKeys } from '$lib/tree/traversal';
 
 /**
+ * Record (or refresh) a tombstone for the `node → toFenKey` edge, mutating
+ * `node.deletedChildren` in place. Sync reads these so an edge deleted on one
+ * device is dropped on the others instead of being resurrected by the
+ * adds-win edge union — see `mergeNode`.
+ */
+function recordEdgeTombstone(node: RepertoireNode, toFenKey: string, at: number): void {
+	const list = node.deletedChildren ?? [];
+	const existing = list.find((t) => t.toFenKey === toFenKey);
+	if (existing) existing.deletedAt = at;
+	else list.push({ toFenKey, deletedAt: at });
+	node.deletedChildren = list;
+}
+
+/**
+ * Drop any tombstone for the `node → toFenKey` edge. Called when the edge is
+ * (re-)added so a stale deletion can't suppress the fresh add on the next
+ * sync. Leaves `deletedChildren` undefined once it empties.
+ */
+function clearEdgeTombstone(node: RepertoireNode, toFenKey: string): void {
+	if (!node.deletedChildren?.length) return;
+	const remaining = node.deletedChildren.filter((t) => t.toFenKey !== toFenKey);
+	node.deletedChildren = remaining.length > 0 ? remaining : undefined;
+}
+
+/**
  * Bulk-replace every node of `repertoireId` with the supplied parsed edges.
  * `rootFenKey` seeds an empty root so a repertoire with no edges still has
  * its starting position. Used by the Lichess study pull to overwrite the
@@ -132,6 +157,9 @@ export async function addEdge(
 		parent.children.push(JSON.parse(JSON.stringify(stamped)) as Edge);
 		created = true;
 	}
+	// A live edge must not carry a deletion tombstone, or the re-add would be
+	// suppressed on the next sync.
+	clearEdgeTombstone(parent, edge.toFenKey);
 	await store.put(JSON.parse(JSON.stringify(parent)) as RepertoireNode);
 	const child = await store.get([repertoireId, edge.toFenKey]);
 	if (!child) {
@@ -150,8 +178,10 @@ export async function removeEdge(
 	const db = await getDB();
 	const node = await db.get('nodes', [repertoireId, fromFenKey]);
 	if (!node) return;
+	const now = Date.now();
 	node.children = node.children.filter((e) => e.toFenKey !== toFenKey);
-	node.updatedAt = Date.now();
+	node.updatedAt = now;
+	recordEdgeTombstone(node, toFenKey, now);
 	await db.put('nodes', node);
 	markRepDirty(repertoireId);
 }
@@ -189,8 +219,10 @@ export async function removeEdgeAndPrune(
 		await tx.done;
 		return;
 	}
+	const now = Date.now();
 	parent.children = parent.children.filter((e) => e.toFenKey !== toFenKey);
-	parent.updatedAt = Date.now();
+	parent.updatedAt = now;
+	recordEdgeTombstone(parent, toFenKey, now);
 	await nodes.put(parent);
 
 	// Recompute reachability from the root over the post-cut graph.
