@@ -23,6 +23,7 @@
 import type {
 	Card,
 	Edge,
+	EdgeTombstone,
 	EmpiricalGap,
 	IdeaCard,
 	Repertoire,
@@ -256,8 +257,27 @@ export function mergeRepertoire(local: Repertoire, remote: Repertoire): Repertoi
 // --- Tree (nodes + their edges) --------------------------------------------
 
 /**
- * Per-edge union with field-LWW on `annotation` / `weight`. Adds win against
- * deletes — an edge that exists on either side is in the merged result.
+ * Edge tombstones older than this (relative to the merge clock) are dropped
+ * during a merge. Matches the 90-day window used for repertoire tombstones
+ * (`REP_TOMBSTONE_TTL_MS` in `settings.ts`) — long enough that a device that
+ * was offline for months still sees the deletion, short enough that the
+ * tombstone list can't grow without bound.
+ */
+export const EDGE_TOMBSTONE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * Per-edge union with field-LWW on `annotation` / `weight`, reconciled against
+ * each side's edge tombstones so a deleted variation stays deleted.
+ *
+ * Adds still win against *implicit* deletes — an edge that exists on either
+ * side and carries no opposing tombstone is in the merged result. But an
+ * *explicit* deletion (a `deletedChildren` tombstone) drops the edge when the
+ * tombstone is at least as new as the edge's last write; a re-add stamped
+ * after the deletion wins and the now-stale tombstone is cleared.
+ *
+ * `mergedAt` is the merge wall-clock, used only to garbage-collect tombstones
+ * past `EDGE_TOMBSTONE_TTL_MS`. Omit it (e.g. in unit tests) to keep every
+ * tombstone regardless of age.
  *
  * Returned object exposes both the merged node and a count of edges that
  * the merge changed (added, dropped, or had a field overwritten) so the
@@ -265,8 +285,9 @@ export function mergeRepertoire(local: Repertoire, remote: Repertoire): Repertoi
  */
 export function mergeNode(
 	local: RepertoireNode,
-	remote: RepertoireNode
-): { merged: RepertoireNode; edgeChanges: number } {
+	remote: RepertoireNode,
+	mergedAt?: number
+): { merged: RepertoireNode; edgeChanges: number; tombstoneDrops: number } {
 	const localUpdated = local.updatedAt ?? 0;
 	const remoteUpdated = remote.updatedAt ?? 0;
 	// Per-node fields (`comment`, `nags`) field-LWW.
@@ -280,37 +301,64 @@ export function mergeNode(
 		children: []
 	};
 
+	const localByTo = new Map<string, Edge>(local.children.map((e) => [e.toFenKey, e]));
 	const byTo = new Map<string, Edge>();
-	let changes = 0;
 	for (const e of local.children) byTo.set(e.toFenKey, { ...e });
 	for (const re of remote.children) {
 		const existing = byTo.get(re.toFenKey);
 		if (!existing) {
 			byTo.set(re.toFenKey, { ...re });
-			changes += 1;
 			continue;
 		}
 		const ls = existing.updatedAt ?? 0;
 		const rs = re.updatedAt ?? 0;
 		if (rs > ls) {
 			byTo.set(re.toFenKey, { ...re });
-			changes += 1;
 		} else if (ls === rs && ls === 0) {
 			// Two unstamped edges to the same target — pick remote arbitrarily
-			// for stability; only count as a change if the fields differ.
-			if (
-				existing.annotation !== re.annotation ||
-				existing.weight !== re.weight ||
-				existing.san !== re.san ||
-				existing.uci !== re.uci
-			) {
-				byTo.set(re.toFenKey, { ...re });
-				changes += 1;
-			}
+			// for stability.
+			byTo.set(re.toFenKey, { ...re });
 		}
 	}
+
+	// Union both sides' tombstones, keeping the newest deletion per target,
+	// then reconcile against the unioned edge set.
+	const tombstones = new Map<string, number>();
+	for (const t of local.deletedChildren ?? []) tombstones.set(t.toFenKey, t.deletedAt);
+	for (const t of remote.deletedChildren ?? []) {
+		const prev = tombstones.get(t.toFenKey);
+		if (prev === undefined || t.deletedAt > prev) tombstones.set(t.toFenKey, t.deletedAt);
+	}
+	const floor = mergedAt === undefined ? -Infinity : mergedAt - EDGE_TOMBSTONE_TTL_MS;
+	const survivingTombstones: EdgeTombstone[] = [];
+	let tombstoneDrops = 0;
+	for (const [toFenKey, deletedAt] of tombstones) {
+		const edge = byTo.get(toFenKey);
+		if (edge && (edge.updatedAt ?? 0) > deletedAt) {
+			// Edge was re-added after this deletion — the tombstone is stale, drop it.
+			continue;
+		}
+		if (edge) {
+			// Deletion is at least as new as the edge: drop the edge.
+			byTo.delete(toFenKey);
+			tombstoneDrops += 1;
+		}
+		if (deletedAt > floor) survivingTombstones.push({ toFenKey, deletedAt });
+	}
+
 	merged.children = [...byTo.values()];
-	return { merged, edgeChanges: changes };
+	if (survivingTombstones.length > 0) merged.deletedChildren = survivingTombstones;
+
+	// Edge changes = the net difference from the local node: edges added or
+	// whose fields were overwritten, plus edges that ended up removed.
+	let edgeChanges = 0;
+	for (const [toFenKey, edge] of byTo) {
+		const localEdge = localByTo.get(toFenKey);
+		if (!localEdge || JSON.stringify(localEdge) !== JSON.stringify(edge)) edgeChanges += 1;
+	}
+	for (const e of local.children) if (!byTo.has(e.toFenKey)) edgeChanges += 1;
+
+	return { merged, edgeChanges, tombstoneDrops };
 }
 
 // --- Baselines -------------------------------------------------------------

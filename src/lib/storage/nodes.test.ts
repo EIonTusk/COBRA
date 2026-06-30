@@ -9,7 +9,12 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Card, IdeaCard, RepertoireNode } from '$lib/types';
 import { getDB } from './db';
-import { removeEdgeAndPrune } from './nodes';
+import { addEdge, removeEdge, removeEdgeAndPrune } from './nodes';
+
+async function getNode(fenKey: string): Promise<RepertoireNode | undefined> {
+	const db = await getDB();
+	return db.get('nodes', [REP, fenKey]);
+}
 
 const REP = 'rep-1';
 const ROOT = 'root';
@@ -137,5 +142,52 @@ describe('removeEdgeAndPrune', () => {
 		await seed([node(ROOT, [])], [], []);
 		await expect(removeEdgeAndPrune(REP, ROOT, 'ghost', 'a')).resolves.toBeUndefined();
 		expect(await liveKeys('nodes')).toEqual(['root']);
+	});
+
+	it('records an edge tombstone on the parent so the deletion can sync', async () => {
+		await seed([node(ROOT, [{ toFenKey: 'a', san: 'e4' }]), node('a', [])], [], []);
+		const before = Date.now();
+		await removeEdgeAndPrune(REP, ROOT, ROOT, 'a');
+
+		const root = await getNode(ROOT);
+		expect(root?.deletedChildren).toHaveLength(1);
+		expect(root?.deletedChildren?.[0].toFenKey).toBe('a');
+		expect(root?.deletedChildren?.[0].deletedAt).toBeGreaterThanOrEqual(before);
+	});
+});
+
+describe('edge tombstone producer wiring', () => {
+	beforeEach(wipe);
+
+	it('removeEdge records a tombstone without pruning', async () => {
+		await seed([node(ROOT, [{ toFenKey: 'a', san: 'e4' }]), node('a', [])], [], []);
+		await removeEdge(REP, ROOT, 'a');
+
+		const root = await getNode(ROOT);
+		expect(root?.children).toEqual([]);
+		expect(root?.deletedChildren?.map((t) => t.toFenKey)).toEqual(['a']);
+		// removeEdge intentionally does not prune — 'a' stays as an orphan node.
+		expect(await getNode('a')).toBeDefined();
+	});
+
+	it('re-adding a deleted edge clears its tombstone', async () => {
+		await seed([node(ROOT, [{ toFenKey: 'a', san: 'e4' }]), node('a', [])], [], []);
+		await removeEdge(REP, ROOT, 'a');
+		expect((await getNode(ROOT))?.deletedChildren).toHaveLength(1);
+
+		await addEdge(REP, ROOT, { san: 'e4', uci: 'e2e4', toFenKey: 'a' });
+		const root = await getNode(ROOT);
+		expect(root?.children.map((e) => e.toFenKey)).toEqual(['a']);
+		expect(root?.deletedChildren).toBeUndefined();
+	});
+
+	it('refreshes an existing tombstone rather than duplicating it', async () => {
+		await seed([node(ROOT, [{ toFenKey: 'a', san: 'e4' }]), node('a', [])], [], []);
+		await removeEdge(REP, ROOT, 'a');
+		// Re-add then delete again — the tombstone list must not grow.
+		await addEdge(REP, ROOT, { san: 'e4', uci: 'e2e4', toFenKey: 'a' });
+		await removeEdge(REP, ROOT, 'a');
+
+		expect((await getNode(ROOT))?.deletedChildren).toHaveLength(1);
 	});
 });

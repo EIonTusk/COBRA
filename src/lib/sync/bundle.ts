@@ -22,6 +22,7 @@ import { getDB } from '$lib/storage/db';
 import { defaultSettings, sanitizeSettingsForSync } from '$lib/storage/settings';
 import { getRepertoire, purgeRepertoireLocal } from '$lib/storage/repertoires';
 import { listNodes } from '$lib/storage/nodes';
+import { reachableFenKeys } from '$lib/tree/traversal';
 import { listCards } from '$lib/storage/cards';
 import { listIdeaCards } from '$lib/storage/ideaCards';
 import { listMistakes } from '$lib/storage/mistakes';
@@ -446,38 +447,20 @@ export async function applyRepBundleMerge(bundle: RepBundle): Promise<MergeStats
 		(l, r) => mergeSparGame(l, r)
 	);
 
-	// Nodes (and their inner edges).
-	{
-		const store = tx.objectStore('nodes');
-		const localKeys = await store.index('by-repertoire').getAllKeys(repId);
-		const localByKey = new Map<string, RepertoireNode>();
-		for (const key of localKeys) {
-			const row = await store.get(key);
-			if (row) localByKey.set(row.fenKey, row);
-		}
-		const remoteByKey = new Map(bundle.nodes.map((n) => [n.fenKey, n]));
-
-		for (const [fenKey, remote] of remoteByKey) {
-			const local = localByKey.get(fenKey);
-			if (!local) {
-				await store.put(clone(remote));
-				stats.nodes += 1;
-				stats.edges += remote.children.length;
-				continue;
-			}
-			const { merged, edgeChanges } = mergeNode(local, remote);
-			if (
-				edgeChanges > 0 ||
-				merged.comment !== local.comment ||
-				JSON.stringify(merged.nags ?? null) !== JSON.stringify(local.nags ?? null) ||
-				merged.children.length !== local.children.length
-			) {
-				await store.put(clone(merged));
-				stats.nodes += 1;
-				stats.edges += edgeChanges;
-			}
-		}
-		// Local-only nodes flow through unchanged — nothing to do.
+	// Nodes (and their inner edges). Local-only nodes flow through unchanged.
+	const nodeMerge = await mergeNodesForRep(
+		tx.objectStore('nodes') as unknown as SyncMergeStore<RepertoireNode>,
+		repId,
+		bundle.nodes,
+		stats,
+		ctx.mergedAt
+	);
+	if (nodeMerge.tombstoneDrops > 0) {
+		await pruneOrphansForRep(
+			tx as unknown as Parameters<typeof pruneOrphansForRep>[0],
+			repId,
+			stats
+		);
 	}
 
 	await tx.done;
@@ -527,12 +510,22 @@ export async function applyRepCoreBundleMerge(bundle: RepCoreBundle): Promise<Me
 		(l, r) => mergeIdeaCard(l, r, ctx)
 	);
 
-	await mergeNodesForRep(
+	const nodeMerge = await mergeNodesForRep(
 		tx.objectStore('nodes') as unknown as SyncMergeStore<RepertoireNode>,
 		repId,
 		bundle.nodes,
-		stats
+		stats,
+		ctx.mergedAt
 	);
+	// Only sweep orphans when a synced-in deletion actually cut an edge —
+	// nothing else in a merge can strand a subtree.
+	if (nodeMerge.tombstoneDrops > 0) {
+		await pruneOrphansForRep(
+			tx as unknown as Parameters<typeof pruneOrphansForRep>[0],
+			repId,
+			stats
+		);
+	}
 
 	await tx.done;
 	return stats;
@@ -762,14 +755,16 @@ async function mergeNodesForRep(
 	store: SyncMergeStore<RepertoireNode>,
 	repId: string,
 	remoteNodes: RepertoireNode[],
-	stats: MergeStats
-): Promise<void> {
+	stats: MergeStats,
+	mergedAt: number
+): Promise<{ tombstoneDrops: number }> {
 	const localKeys = await store.index('by-repertoire').getAllKeys(repId);
 	const localByKey = new Map<string, RepertoireNode>();
 	for (const key of localKeys) {
 		const row = await store.get(key);
 		if (row) localByKey.set(row.fenKey, row);
 	}
+	let tombstoneDrops = 0;
 	const remoteByKey = new Map(remoteNodes.map((n) => [n.fenKey, n]));
 	for (const [fenKey, remote] of remoteByKey) {
 		const local = localByKey.get(fenKey);
@@ -779,17 +774,75 @@ async function mergeNodesForRep(
 			stats.edges += remote.children.length;
 			continue;
 		}
-		const { merged, edgeChanges } = mergeNode(local, remote);
+		const merge = mergeNode(local, remote, mergedAt);
+		tombstoneDrops += merge.tombstoneDrops;
+		const merged = merge.merged;
 		if (
-			edgeChanges > 0 ||
+			merge.edgeChanges > 0 ||
 			merged.comment !== local.comment ||
 			JSON.stringify(merged.nags ?? null) !== JSON.stringify(local.nags ?? null) ||
-			merged.children.length !== local.children.length
+			merged.children.length !== local.children.length ||
+			// Persist tombstone-set changes even when no edge was added/dropped
+			// this merge, so the union propagates onward on the next push.
+			JSON.stringify(merged.deletedChildren ?? null) !==
+				JSON.stringify(local.deletedChildren ?? null)
 		) {
 			await store.put(clone(merged));
 			stats.nodes += 1;
-			stats.edges += edgeChanges;
+			stats.edges += merge.edgeChanges;
 		}
+	}
+	return { tombstoneDrops };
+}
+
+/**
+ * After a node merge, drop nodes/cards/idea cards that an edge-tombstone
+ * deletion just orphaned. Recomputes reachability from the repertoire root
+ * over the post-merge tree and removes anything outside it — the same sweep
+ * `removeEdgeAndPrune` runs locally, so a deletion that syncs in cleans up its
+ * stranded subtree (and the drill cards that hang off it) instead of leaving
+ * orphans the drill queue would keep serving. Transposition-safe: a position
+ * still reachable via another path stays.
+ */
+async function pruneOrphansForRep(
+	tx: {
+		objectStore: (name: 'repertoires' | 'nodes' | 'cards' | 'idea_cards') => {
+			get: (key: unknown) => Promise<unknown>;
+			delete: (key: unknown) => Promise<unknown>;
+			index: (name: string) => {
+				getAll: (key: string) => Promise<RepertoireNode[]>;
+				getAllKeys: (key: string) => Promise<unknown[]>;
+			};
+		};
+	},
+	repId: string,
+	stats: MergeStats
+): Promise<void> {
+	const repRow = (await tx.objectStore('repertoires').get(repId)) as
+		| { rootFenKey: string }
+		| undefined;
+	if (!repRow) return;
+
+	const nodesStore = tx.objectStore('nodes');
+	const all = await nodesStore.index('by-repertoire').getAll(repId);
+	const map = new Map<string, RepertoireNode>(all.map((n) => [n.fenKey, n]));
+	const live = reachableFenKeys(map, repRow.rootFenKey);
+
+	for (const n of all) {
+		if (!live.has(n.fenKey)) {
+			await nodesStore.delete([repId, n.fenKey]);
+			stats.nodes += 1;
+		}
+	}
+	const cardsStore = tx.objectStore('cards');
+	for (const key of await cardsStore.index('by-repertoire').getAllKeys(repId)) {
+		const [, fenKey] = key as [string, string];
+		if (!live.has(fenKey)) await cardsStore.delete(key);
+	}
+	const ideasStore = tx.objectStore('idea_cards');
+	for (const key of await ideasStore.index('by-repertoire').getAllKeys(repId)) {
+		const [, fenKey] = key as [string, string];
+		if (!live.has(fenKey)) await ideasStore.delete(key);
 	}
 }
 
