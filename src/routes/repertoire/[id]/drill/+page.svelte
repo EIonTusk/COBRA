@@ -21,6 +21,10 @@
 				: 'due'
 	);
 
+	// Train-from-position: drill only the subtree rooted at this fenKey. Only
+	// meaningful in `due` mode; mistakes/retrain ignore it.
+	const fromKey = $derived(page.url.searchParams.get('from'));
+
 	let rep = $state<Repertoire | null>(null);
 	let settings = $state<AppSettings | null>(null);
 	let segments = $state<DrillSegment[] | null>(null);
@@ -45,25 +49,28 @@
 		settings = await getSettings();
 	});
 
-	// Build segments whenever the mode (querystring) changes — mistakes →
-	// retrain → due each need a fresh queue, and the page is reused across
-	// those modes via in-place navigation.
-	let lastBuiltMode: DrillMode | null = null;
+	// Build segments whenever the mode or train-from-position anchor
+	// (querystring) changes — mistakes → retrain → due each need a fresh queue,
+	// and navigating in from a new position must rebuild the scoped queue. The
+	// page is reused across these via in-place navigation.
+	let lastBuiltKey: string | null = null;
 	$effect(() => {
 		const m = mode;
+		const from = fromKey;
 		if (!rep || !settings) return;
-		if (lastBuiltMode === m) return;
-		lastBuiltMode = m;
+		const key = `${m}|${from ?? ''}`;
+		if (lastBuiltKey === key) return;
+		lastBuiltKey = key;
 		void (async () => {
 			if (!rep || !settings) return;
-			segments = [await buildSegment(rep, m, settings)];
+			segments = [await buildSegment(rep, m, settings, { startFenKey: from })];
 			runnerKey++;
 		})();
 	});
 
 	async function trainFurther() {
 		if (!rep || !settings) return;
-		segments = [await buildSegment(rep, mode, settings)];
+		segments = [await buildSegment(rep, mode, settings, { startFenKey: fromKey })];
 		runnerKey++;
 	}
 
@@ -80,7 +87,7 @@
 		retrainBusy = true;
 		try {
 			await resetAllFsrs(rep.id);
-			segments = [await buildSegment(rep, mode, settings)];
+			segments = [await buildSegment(rep, mode, settings, { startFenKey: fromKey })];
 			runnerKey++;
 		} finally {
 			retrainBusy = false;
@@ -99,6 +106,10 @@
 			>
 				{rep.name}
 			</a>
+		{/if}
+		{#if fromKey}
+			<span class="text-[var(--color-ink-600)]">·</span>
+			<span class="eyebrow text-[var(--color-parchment-400)]">from this position</span>
 		{/if}
 		<a
 			href={rep ? resolve(`/repertoire/${rep.id}`) : resolve('/')}

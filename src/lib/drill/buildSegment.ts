@@ -1,6 +1,6 @@
 import type { AppSettings, Card, IdeaCard, Repertoire, RepertoireNode } from '$lib/types';
 import { colorToMove } from '$lib/chess/fen';
-import { pathToFenKey } from '$lib/tree/traversal';
+import { pathToFenKey, reachableFenKeys } from '$lib/tree/traversal';
 import { buildLineFirstQueue } from '$lib/tree/lineOrder';
 import {
 	dueCards,
@@ -78,9 +78,9 @@ async function pickWithLineWalk(
 	nodes: Map<string, RepertoireNode>,
 	settings: AppSettings,
 	sessionCap: number,
-	newCap: number
+	newCap: number,
+	lineHead: string
 ): Promise<LineWalkResult> {
-	const lineHead = rep.rootFenKey;
 	const wellLearnedDays = settings.drillWellLearnedDays ?? 7;
 
 	const depthByKey = new Map<string, number>();
@@ -240,18 +240,25 @@ export function extractSharedPrefixWalks(
 	return { cards: out, walkStarts, walkFenKeys, dueOriginalKeys };
 }
 
-/** Apply line-first ordering + line-label assignment to a card list. */
+/**
+ * Apply line-first ordering + line-label assignment to a card list. When
+ * `startFenKey` is set (train-from-position mode) the ordering re-anchors to
+ * that sub-position instead of the repertoire root, so labels and line order
+ * begin at the chosen branch rather than move one.
+ */
 function sortByLineOrder(
 	cards: Card[],
 	rep: Repertoire,
 	nodes: Map<string, RepertoireNode>,
-	applyOverdueCap: boolean
+	applyOverdueCap: boolean,
+	startFenKey?: string | null
 ): { cards: Card[]; lineLabelByKey: Map<string, string | null> } {
 	const lineLabelByKey = new Map<string, string | null>();
 	if (cards.length === 0) return { cards, lineLabelByKey };
+	const anchor = startFenKey ?? rep.rootFenKey;
 	const ordered = buildLineFirstQueue(cards, nodes, {
-		rootFenKey: rep.rootFenKey,
-		startingFenKey: rep.startingFenKey ?? null,
+		rootFenKey: anchor,
+		startingFenKey: startFenKey ?? rep.startingFenKey ?? null,
 		overdueCapMs: applyOverdueCap ? OVERDUE_CAP_MS : undefined
 	});
 	for (let i = 0; i < ordered.cards.length; i++) {
@@ -270,9 +277,14 @@ export async function buildSegment(
 	rep: Repertoire,
 	mode: DrillMode,
 	settings: AppSettings,
-	options?: { includeIdeas?: boolean }
+	options?: { includeIdeas?: boolean; startFenKey?: string | null }
 ): Promise<DrillSegment> {
 	const nodes = await nodesMap(rep.id);
+	// Train-from-position: only honour the anchor when it's actually a node in
+	// this repertoire (guards against stale deep-links). An unknown key falls
+	// back to a normal full-repertoire drill.
+	const startFenKey =
+		options?.startFenKey && nodes.has(options.startFenKey) ? options.startFenKey : null;
 	const includeIdeas = options?.includeIdeas ?? mode === 'due';
 	const ideaQueue: IdeaCard[] =
 		includeIdeas && mode === 'due'
@@ -325,7 +337,18 @@ export async function buildSegment(
 	}
 
 	// 'due' mode.
-	const pool = await dueCards(rep.id, Date.now(), settings.drillSessionCap * 5);
+	const lineHead = startFenKey ?? rep.rootFenKey;
+	// Train-from-position drills every prepared move in the chosen subtree
+	// regardless of FSRS due date — an explicit "practice here now" request
+	// would otherwise yield an empty session when nothing below is due.
+	// Grading still updates FSRS as normal; only the selection ignores due.
+	let pool: Card[];
+	if (startFenKey) {
+		const subtree = reachableFenKeys(nodes, startFenKey);
+		pool = (await listCards(rep.id)).filter((c) => subtree.has(c.fenKey));
+	} else {
+		pool = await dueCards(rep.id, Date.now(), settings.drillSessionCap * 5);
+	}
 	const lineWalkOn = (settings.drillIntermediateMoves ?? 'play') === 'play';
 
 	if (lineWalkOn) {
@@ -335,7 +358,8 @@ export async function buildSegment(
 			nodes,
 			settings,
 			settings.drillSessionCap,
-			settings.dailyNewCardCap
+			settings.dailyNewCardCap,
+			lineHead
 		);
 		// Line-walk preserves the candidate-led ordering verbatim — the queue
 		// is already a sequence of full per-line walks. Skip the line-first
@@ -356,7 +380,7 @@ export async function buildSegment(
 
 	const due = pickBalancedDueCards(pool, settings.drillSessionCap, settings.dailyNewCardCap);
 	const dueOriginalKeys = new Set<string>(due.map((c) => c.fenKey));
-	const sorted = sortByLineOrder(due, rep, nodes, true);
+	const sorted = sortByLineOrder(due, rep, nodes, true, startFenKey);
 	return {
 		rep,
 		nodes,
