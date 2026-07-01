@@ -20,6 +20,7 @@
 		Compass,
 		Copy,
 		Flame,
+		GraduationCap,
 		MoveUpRight,
 		Lightbulb,
 		Save,
@@ -1263,6 +1264,16 @@
 		rep = { ...rep, startingFenKey: nextKey };
 	}
 
+	/**
+	 * Open the drill scoped to the current board position — drills every
+	 * prepared move in the subtree rooted here instead of replaying the whole
+	 * line from move one. Only meaningful when the position is a tree node.
+	 */
+	function trainFromCurrent() {
+		if (!rep || !currentIsPinnable) return;
+		void goto(resolve(`/repertoire/${rep.id}/drill?from=${encodeURIComponent(currentFenKey)}`));
+	}
+
 	function jumpTopEmpiricalGap() {
 		if (!rep || !topGap) return;
 		jumpToFenKey(topGap.fenKey);
@@ -2470,12 +2481,34 @@
 						<button
 							type="button"
 							role="menuitem"
+							disabled={!currentIsPinnable}
+							onclick={() => {
+								findMissingOpen = false;
+								trainFromCurrent();
+							}}
+							style:--i="7"
+							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
+						>
+							<GraduationCap
+								class="size-3.5 text-[var(--color-parchment-400)]"
+								strokeWidth={1.75}
+							/>
+							<span>
+								Train from here
+								<span class="text-[var(--color-parchment-500)]">
+									· {currentIsPinnable ? 'drill this branch' : 'not in tree'}
+								</span>
+							</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
 							disabled={!currentIsPinnedGate && !currentIsPinnable}
 							onclick={() => {
 								findMissingOpen = false;
 								void togglePinAtCurrent();
 							}}
-							style:--i="7"
+							style:--i="8"
 							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
 						>
 							<Bookmark
@@ -2502,7 +2535,7 @@
 								findMissingOpen = false;
 								boardHintsEnabled = !boardHintsEnabled;
 							}}
-							style:--i="8"
+							style:--i="9"
 							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)]"
 						>
 							<!-- MoveUpRight matches the visual shape of board arrows
@@ -2770,6 +2803,19 @@
 						<Trash2 class="size-3.5" />
 					</Button>
 				{/if}
+				<Button
+					class="hidden lg:inline-flex"
+					variant="secondary"
+					size="sm"
+					onclick={trainFromCurrent}
+					disabled={!currentIsPinnable}
+					title={currentIsPinnable
+						? 'Drill from this position — practises every prepared move below it, no due-date gating'
+						: 'Navigate to a tree position to train from it'}
+				>
+					<GraduationCap class="size-3.5" strokeWidth={1.75} />
+					<span>Train from here</span>
+				</Button>
 				<Button
 					class="hidden lg:inline-flex"
 					variant="secondary"
