@@ -24,6 +24,7 @@
 		MoveUpRight,
 		Lightbulb,
 		Save,
+		Shuffle,
 		Star,
 		Target,
 		Trash2,
@@ -501,6 +502,31 @@
 			for (const edge of node.children) set.add(edge.toFenKey);
 		}
 		return set;
+	});
+
+	// How many distinct in-repertoire edges point INTO the current position.
+	// Each such edge is one move order that reaches here, so a count ≥ 2 means
+	// this is a shared/transposition node — the same position arrived at by
+	// different paths. Drives the quiet "Shared position" badge in the Line
+	// header (a persistent indicator, distinct from the transient build-time
+	// popup over the board).
+	const incomingPathCount = $derived.by<number>(() => {
+		if (!currentFenKey) return 0;
+		let n = 0;
+		for (const node of nodes.values()) {
+			for (const edge of node.children) {
+				if (edge.toFenKey === currentFenKey) n += 1;
+			}
+		}
+		// Include just-built moves that haven't been flushed to IDB yet —
+		// `commitMove` queues them in `pendingEdges`, so counting only the
+		// persisted `nodes` would miss a transposition until it's saved.
+		// `pendingEdges` never overlaps `nodes` (it holds only not-yet-persisted
+		// edges), so there's no double-count.
+		for (const p of pendingEdges) {
+			if (p.edge.toFenKey === currentFenKey) n += 1;
+		}
+		return n;
 	});
 
 	const transposesSans = $derived.by<Set<string>>(() => {
@@ -1651,6 +1677,11 @@
 	// gets replaced by a fresh "+N" pill on the next move).
 	let justSaved = $state(false);
 	let justSavedTimer: ReturnType<typeof setTimeout> | null = null;
+	// Transposition popup: which fenKey the user last dismissed the
+	// "you've transposed into existing prep" popup at, via "Continue
+	// anyway". Comparing against the current fenKey keeps it hidden for
+	// that position but lets it reappear at the next distinct transposition.
+	let transposeTipDismissedFor = $state<string | null>(null);
 	// Derived flags for the Save-line pill (shared by the desktop action
 	// bar and the mobile board toolbar). The pill stays mounted always
 	// and just disables when there's nothing new to save, so it doesn't
@@ -2907,7 +2938,7 @@
 
 			<!-- Board. Mobile order 1 (top of the page); desktop col 1 row 3. -->
 			<section class="order-1 lg:order-none lg:col-start-1 lg:row-start-3">
-				<div class="mx-auto max-w-[600px]">
+				<div class="relative mx-auto max-w-[600px]">
 					<Board
 						fen={currentFen}
 						{orientation}
@@ -2918,6 +2949,59 @@
 						shapes={boardShapes}
 						onmove={handleMove}
 					/>
+					<!-- Transposition popup: floats over the board when the moves
+						 just added loop back onto a position already in the tree
+						 (`transposedIntoSaved`). The continuation from here is
+						 shared, so saving is the recommended move — but the user
+						 can dismiss with "Continue anyway" to keep building. The
+						 dismissal is keyed to this fenKey so it stays hidden here
+						 yet reappears at the next distinct transposition.
+						 `pointer-events-none` on the overlay lets board clicks pass
+						 through everywhere except the card itself. -->
+					{#if transposedIntoSaved && !justSaved && transposeTipDismissedFor !== currentFenKey}
+						<div
+							class="pointer-events-none absolute inset-0 z-20 flex items-center justify-center px-4"
+						>
+							<div
+								class="pointer-events-auto flex max-w-full flex-col gap-2 rounded-[6px] border border-[var(--color-brass-400)]/60 bg-[var(--color-ink-950)]/95 px-4 py-3 shadow-2xl backdrop-blur-sm"
+							>
+								<div class="flex max-w-[20rem] items-start gap-2">
+									<Shuffle
+										class="mt-0.5 size-4 shrink-0 text-[var(--color-brass-300)]"
+										strokeWidth={1.75}
+									/>
+									<p class="font-serif text-[13px] leading-snug text-[var(--color-parchment-100)]">
+										<span class="font-medium">Transposition.</span> This position is already in your
+										repertoire, so the two move orders are now
+										<span class="font-medium text-[var(--color-brass-300)]">merged</span>: every
+										position that follows is reachable through both paths, and you only drill it
+										once.
+									</p>
+								</div>
+								<div class="flex items-center justify-end gap-2">
+									<button
+										type="button"
+										onclick={() => (transposeTipDismissedFor = currentFenKey)}
+										class="rounded-full px-3 py-1 font-serif text-[12px] text-[var(--color-parchment-300)] transition-colors hover:text-[var(--color-parchment-100)]"
+									>
+										Continue anyway
+									</button>
+									<button
+										type="button"
+										onclick={() => {
+											if (justSaved || saveNothingToDo) return;
+											void saveLine();
+										}}
+										title="Save this line"
+										class="flex items-center gap-1.5 rounded-full border border-[var(--color-brass-400)] bg-[var(--color-brass-500)] px-3 py-1 font-serif text-[12px] text-[var(--color-ink-950)] transition-colors duration-200 hover:bg-[var(--color-brass-400)]"
+									>
+										<Save class="size-3.5" />
+										<span>Save line</span>
+									</button>
+								</div>
+							</div>
+						</div>
+					{/if}
 				</div>
 			</section>
 
@@ -3103,6 +3187,20 @@
 							<ChevronLast class="size-4" />
 						</button>
 						<div class="eyebrow ml-2">Line</div>
+						<!-- Shared-position badge: persistent, quiet indicator that
+							 the current position is a transposition hub reached by
+							 more than one move order. Unlike the build-time popup it
+							 doesn't require freshly-added moves — it simply reflects
+							 the graph whenever you navigate onto a shared node. -->
+						{#if incomingPathCount >= 2}
+							<span
+								title={`This position is reached by ${incomingPathCount} move orders in your repertoire — they share one continuation from here.`}
+								class="ml-2 inline-flex items-center gap-1 rounded-full border border-[var(--color-brass-400)]/40 bg-[var(--color-brass-500)]/10 px-2 py-0.5 font-serif text-[11px] text-[var(--color-brass-200)]"
+							>
+								<Shuffle class="size-3" strokeWidth={1.75} />
+								Shared · {incomingPathCount} paths
+							</span>
+						{/if}
 						<!-- Desktop save pills: sit at the right of the Line
 								 header so the primary commit actions live next
 								 to the line they're saving, in line with the
