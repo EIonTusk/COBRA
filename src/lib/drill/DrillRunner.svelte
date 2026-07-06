@@ -5,6 +5,7 @@
 	import { autoHeight } from '$lib/ui/autoHeight';
 	import {
 		Keyboard,
+		CalendarClock,
 		Pencil,
 		RotateCcw,
 		Trophy,
@@ -21,7 +22,7 @@
 	import { edgeFromUci, edgeFromSan, fenAfterMove, legalDests } from '$lib/chess/position';
 	import { colorToMove, fenKeyFromFen } from '$lib/chess/fen';
 	import { pathToFenKey, furthestNonBranchingFenKey } from '$lib/tree/traversal';
-	import { upsertCard, getCard } from '$lib/storage/cards';
+	import { upsertCard, getCard, deferSubtree } from '$lib/storage/cards';
 	import { upsertIdeaCard } from '$lib/storage/ideaCards';
 	import { getMiddlegameGuide } from '$lib/storage/middlegameGuides';
 	import { savedArrowsToShapes } from '$lib/middlegame/arrows';
@@ -87,6 +88,16 @@
 	// board to the question position, and the drill is stranded on the post-move
 	// (opponent-to-move) position with `phase` 'pending' — the issue-#60 freeze.
 	let presentGen = $state(0);
+
+	// "Defer this subtree" menu (open/closed) shown in the pending phase. The
+	// options push every card in the current position's subtree out by a fixed
+	// interval and drop them from the rest of this session.
+	let deferMenuOpen = $state(false);
+	const DEFER_OPTIONS = [
+		{ label: 'Tomorrow', ms: 24 * 60 * 60 * 1000 },
+		{ label: 'In 3 days', ms: 3 * 24 * 60 * 60 * 1000 },
+		{ label: 'In 1 week', ms: 7 * 24 * 60 * 60 * 1000 }
+	] as const;
 
 	// Walks flattened across the merged queue. flatWalkSeg[i] tells us which
 	// segment owns walk i — needed so cross-cutting state can disambiguate.
@@ -1242,6 +1253,55 @@
 		return false;
 	}
 
+	/**
+	 * "Defer this subtree" from the pending phase: push every card at the
+	 * current position and below it out by `intervalMs`, then drop those
+	 * entries from the rest of this session and advance. Non-destructive — the
+	 * cards keep their FSRS history; only their next-due date moves. Scoped to
+	 * the current segment's rep so a shared fenKey in another rep is untouched.
+	 */
+	async function deferCurrentSubtree(intervalMs: number) {
+		deferMenuOpen = false;
+		if (!currentEntry || !currentSegment || phase !== 'pending') return;
+		const entry = currentEntry;
+		const seg = segments[entry.segIdx];
+
+		// Collect the position + everything reachable below it in this rep.
+		const subtree = new SvelteSet<string>();
+		const stack: string[] = [entry.card.fenKey];
+		while (stack.length > 0) {
+			const k = stack.pop()!;
+			if (subtree.has(k)) continue;
+			subtree.add(k);
+			const node = seg.nodes.get(k);
+			if (!node) continue;
+			for (const e of node.children) stack.push(e.toFenKey);
+		}
+
+		await deferSubtree(seg.rep.id, subtree, Date.now() + intervalMs);
+
+		// Drop still-queued entries in this segment that fall inside the
+		// subtree, keeping index stability for i <= idx (mirrors the
+		// wrong-answer prune). Then remap the walk arrays.
+		const filtered: DrillEntry[] = [];
+		const oldToNew: (number | null)[] = new Array(entries.length).fill(null);
+		for (let i = 0; i < entries.length; i++) {
+			const e = entries[i];
+			const drop = i > idx && e.segIdx === entry.segIdx && subtree.has(e.card.fenKey);
+			if (drop) continue;
+			oldToNew[i] = filtered.length;
+			filtered.push(e);
+		}
+		if (filtered.length !== entries.length) {
+			entries = filtered;
+			rewriteWalkArraysAfterPrune(oldToNew);
+		}
+
+		// Retire the current card and move on without grading it.
+		drilledKeys.add(ck(entry.segIdx, entry.card.fenKey));
+		advanceQueue(entry.card.fenKey);
+	}
+
 	function advanceQueue(justRatedKey?: string) {
 		const currentWalk = walkOfIdx(idx);
 		const currentSegIdx = currentEntry?.segIdx ?? -1;
@@ -1971,6 +2031,40 @@
 							>H</kbd
 						>
 					</Button>
+					<!-- Defer this subtree: snooze the current position and every
+						 continuation below it for a chosen interval, and drop them
+						 from the rest of this session. -->
+					<div class="relative">
+						<Button variant="ghost" size="sm" onclick={() => (deferMenuOpen = !deferMenuOpen)}>
+							<CalendarClock class="size-3" />
+							<span>Defer</span>
+						</Button>
+						{#if deferMenuOpen}
+							<div
+								role="presentation"
+								class="fixed inset-0 z-40"
+								onclick={() => (deferMenuOpen = false)}
+							></div>
+							<div
+								class="ink-panel absolute right-0 bottom-full z-50 mb-1 flex min-w-[10rem] flex-col overflow-hidden rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] shadow-lg"
+							>
+								<div
+									class="border-b border-[var(--color-ink-800)] px-3 py-1.5 text-[11px] text-[var(--color-parchment-500)]"
+								>
+									Defer this line…
+								</div>
+								{#each DEFER_OPTIONS as opt (opt.label)}
+									<button
+										type="button"
+										onclick={() => deferCurrentSubtree(opt.ms)}
+										class="px-3 py-2 text-left text-[13px] text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)]"
+									>
+										{opt.label}
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</div>
 				</div>
 			{:else if phase === 'correct'}
 				<div class="ot-fade">
