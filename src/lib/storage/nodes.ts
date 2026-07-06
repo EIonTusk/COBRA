@@ -248,6 +248,32 @@ export async function removeEdgeAndPrune(
 	markRepDirty(repertoireId);
 }
 
+/**
+ * Toggle the soft-disable flag on a single edge (the "head" of a line the
+ * user is shelving). Stamps `updatedAt` so the sync-v2 edge LWW carries the
+ * new state across devices. Clears the flag to `undefined` rather than
+ * storing `false`, keeping edges written before the feature byte-identical.
+ * The whole-continuation behaviour is derived at read time from this one
+ * flag (see `liveReachableFenKeys`) — no cascade write over the subtree.
+ */
+export async function setEdgeDisabled(
+	repertoireId: string,
+	fromFenKey: string,
+	toFenKey: string,
+	disabled: boolean
+): Promise<void> {
+	const db = await getDB();
+	const node = await db.get('nodes', [repertoireId, fromFenKey]);
+	if (!node) return;
+	const edge = node.children.find((e) => e.toFenKey === toFenKey);
+	if (!edge) return;
+	edge.disabled = disabled ? true : undefined;
+	edge.updatedAt = Date.now();
+	node.updatedAt = Date.now();
+	await db.put('nodes', node);
+	markRepDirty(repertoireId);
+}
+
 export async function setNodeComment(
 	repertoireId: string,
 	fenKey: string,

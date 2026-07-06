@@ -64,6 +64,39 @@ export function pickBalancedDueCards(cards: Card[], sessionCap: number, newCap: 
 	return [...reviewCards.slice(0, reviewBudget), ...newCards.slice(0, newBudget + extraNew)];
 }
 
+/**
+ * Push every card whose position is in `fenKeys` out to `dueAt` (a "defer this
+ * subtree" snooze from the drill). Only cards currently due sooner than the
+ * target move — a card already scheduled further out keeps its later date, so
+ * deferring can never pull a review forward. FSRS stability/state are left
+ * untouched: this reschedules the *next look*, it doesn't grade the card.
+ * Returns the number of cards actually moved.
+ */
+export async function deferSubtree(
+	repertoireId: string,
+	fenKeys: Set<string>,
+	dueAt: number
+): Promise<number> {
+	const db = await getDB();
+	const tx = db.transaction('cards', 'readwrite');
+	const index = tx.objectStore('cards').index('by-repertoire');
+	let cursor = await index.openCursor(repertoireId);
+	let moved = 0;
+	while (cursor) {
+		const card = cursor.value;
+		if (fenKeys.has(card.fenKey) && card.dueAt < dueAt) {
+			card.dueAt = dueAt;
+			card.fsrs = { ...card.fsrs, due: new Date(dueAt) };
+			await cursor.update(card);
+			moved += 1;
+		}
+		cursor = await cursor.continue();
+	}
+	await tx.done;
+	if (moved > 0) markRepDirty(repertoireId);
+	return moved;
+}
+
 export async function countDue(repertoireId: string, now: number = Date.now()): Promise<number> {
 	const db = await getDB();
 	const range = IDBKeyRange.bound([repertoireId, 0], [repertoireId, now]);

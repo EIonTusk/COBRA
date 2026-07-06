@@ -122,3 +122,57 @@ describe('buildSegment train-from-position', () => {
 		expect(normal.cards).toEqual([]);
 	});
 });
+
+// Soft-disabled lines (issue #80): a disabled edge shelves its move and the
+// continuation reachable only through it from drilling, while keeping the
+// cards in storage. Tree (from seed): root → A → B → { C, D → E }.
+async function disableEdge(fromFenKey: string, toFenKey: string) {
+	const db = await getDB();
+	const node = await db.get('nodes', [REP, fromFenKey]);
+	if (!node) throw new Error(`no node ${fromFenKey}`);
+	const child = node.children.find((e) => e.toFenKey === toFenKey);
+	if (!child) throw new Error(`no edge ${fromFenKey}->${toFenKey}`);
+	child.disabled = true;
+	await db.put('nodes', node);
+}
+
+describe('buildSegment disabled lines', () => {
+	beforeEach(async () => {
+		await wipe();
+		await seed();
+	});
+
+	it('drops a continuation reachable only through a disabled edge', async () => {
+		// Disable B→D: E sits solely under D, so it leaves the trainable pool;
+		// C (via B→C) and A stay.
+		await disableEdge('B', 'D');
+		const seg = await buildSegment(rep, 'due', settings());
+		expect(keys(seg.cards)).toEqual(['A', 'C']);
+	});
+
+	it('drops the move itself when the head edge is disabled', async () => {
+		// Disable A→B: the card at A plays that edge's move, and B/C/E hang off
+		// it, so the whole thing goes — an empty drill.
+		await disableEdge('A', 'B');
+		const seg = await buildSegment(rep, 'due', settings());
+		expect(seg.cards).toEqual([]);
+	});
+
+	it('keeps everything when the disabled flag is cleared again', async () => {
+		await disableEdge('B', 'D');
+		// Re-enable by flipping it back off.
+		const db = await getDB();
+		const node = await db.get('nodes', [REP, 'B']);
+		node!.children.find((e) => e.toFenKey === 'D')!.disabled = undefined;
+		await db.put('nodes', node!);
+		const seg = await buildSegment(rep, 'due', settings());
+		expect(keys(seg.cards)).toEqual(['A', 'C', 'E']);
+	});
+
+	it('honours disabled edges under a train-from-position anchor', async () => {
+		await disableEdge('B', 'D');
+		const seg = await buildSegment(rep, 'due', settings(), { startFenKey: 'B' });
+		// Subtree of B is {C, D, E}; D→E is disabled, so only C remains.
+		expect(keys(seg.cards)).toEqual(['C']);
+	});
+});

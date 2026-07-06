@@ -10,7 +10,9 @@
 		Shuffle,
 		AlertTriangle,
 		UserCheck,
-		HelpCircle
+		HelpCircle,
+		CircleSlash,
+		MoreVertical
 	} from 'lucide-svelte';
 	import type { ComponentType, Snippet } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
@@ -104,6 +106,18 @@
 		 */
 		ondelete?: (san: string, uci: string) => void;
 		/**
+		 * SANs at this position whose edge is soft-disabled (the head of a
+		 * shelved line). Rendered greyed with a "no" glyph; the right-click
+		 * menu offers Enable instead of Disable for these.
+		 */
+		disabledSans?: Set<string>;
+		/**
+		 * Called when the user toggles a saved move's disabled state from the
+		 * right-click menu. `next` is the state to apply. Parent flips the edge
+		 * flag and refreshes. Absent = the disable affordance is hidden.
+		 */
+		ondisable?: (san: string, uci: string, next: boolean) => void;
+		/**
 		 * User's dossier fingerprint, if available. Enables advisory
 		 * style-fit scoring on each candidate row. Purely informational —
 		 * doesn't change move ordering or selection.
@@ -158,7 +172,9 @@
 		headerRight,
 		userWdlBySan,
 		subtreeSizeBySan,
-		savedMoves
+		savedMoves,
+		disabledSans,
+		ondisable
 	}: Props = $props();
 
 	// Right-click context menu for moves already in the tree. Kept as a
@@ -167,13 +183,27 @@
 	let menuUci = $state<string | null>(null);
 	let menuX = $state(0);
 	let menuY = $state(0);
-	function openContextMenu(e: MouseEvent, m: { san: string; uci: string }) {
-		if (!knownSans?.has(m.san) || !ondelete) return;
-		e.preventDefault();
+	function hasRowMenu(san: string): boolean {
+		return !!knownSans?.has(san) && (!!ondelete || !!ondisable);
+	}
+	function openMenuAt(m: { san: string; uci: string }, x: number, y: number) {
 		menuSan = m.san;
 		menuUci = m.uci;
-		menuX = e.clientX;
-		menuY = e.clientY;
+		menuX = x;
+		menuY = y;
+	}
+	function openContextMenu(e: MouseEvent, m: { san: string; uci: string }) {
+		if (!hasRowMenu(m.san)) return;
+		e.preventDefault();
+		openMenuAt(m, e.clientX, e.clientY);
+	}
+	// The visible "⋮" button opens the same menu, anchored under the button and
+	// right-aligned to it so it doesn't spill off the panel's right edge.
+	function openRowMenu(e: MouseEvent, m: { san: string; uci: string }) {
+		e.stopPropagation();
+		if (!hasRowMenu(m.san)) return;
+		const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		openMenuAt(m, Math.max(8, r.right - 176), r.bottom + 4);
 	}
 	function closeContextMenu() {
 		menuSan = null;
@@ -212,6 +242,14 @@
 		const uci = menuUci;
 		closeContextMenu();
 		openConfirm({ san, uci });
+	}
+	// Toggle the soft-disable flag from the right-click menu. No confirm: it's
+	// reversible and non-destructive (the line stays in the tree either way).
+	function disableFromMenu() {
+		if (!menuSan || !menuUci) return;
+		const next = !disabledSans?.has(menuSan);
+		ondisable?.(menuSan, menuUci, next);
+		closeContextMenu();
 	}
 
 	function handleRowKey(e: KeyboardEvent, m: { san: string; uci: string }) {
@@ -701,7 +739,8 @@
 							onclick={onselect ? () => onselect?.(m.san) : undefined}
 							onkeydown={onselect ? (e) => handleRowKey(e, m) : undefined}
 							oncontextmenu={(e) => openContextMenu(e, m)}
-							class="group grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-1.5 pl-1.5 text-left transition-colors lg:gap-2 {onselect
+							class:opacity-50={disabledSans?.has(m.san)}
+							class="group relative grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-7 pl-1.5 text-left transition-colors lg:gap-2 {onselect
 								? 'cursor-pointer hover:bg-[var(--color-ink-800)]'
 								: 'cursor-default'}"
 						>
@@ -710,7 +749,9 @@
 							>
 								<span class="flex items-center gap-1">
 									<span class="relative inline-block leading-none whitespace-nowrap">
-										{#if ondelete}
+										{#if disabledSans?.has(m.san)}
+											{@render disabledGlyph()}
+										{:else if ondelete}
 											<button
 												type="button"
 												onclick={(e) => {
@@ -770,6 +811,7 @@
 									></span>
 								</div>
 							</div>
+							{@render moreButton(m)}
 							<div class="flex flex-col items-end gap-0.5">
 								{#if transposesSans?.has(m.san)}
 									<span
@@ -830,7 +872,8 @@
 								onclick={onselect ? () => onselect?.(r.san) : undefined}
 								onkeydown={onselect ? (e) => handleRowKey(e, r) : undefined}
 								oncontextmenu={(e) => openContextMenu(e, r)}
-								class="group grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-1.5 pl-1.5 text-left transition-colors lg:gap-2 {onselect
+								class:opacity-50={disabledSans?.has(r.san)}
+								class="group relative grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-7 pl-1.5 text-left transition-colors lg:gap-2 {onselect
 									? 'cursor-pointer hover:bg-[var(--color-ink-800)]'
 									: 'cursor-default'}"
 							>
@@ -840,7 +883,9 @@
 									<span class="flex items-center gap-1">
 										<span class="relative inline-block leading-none whitespace-nowrap">
 											{#if knownSans?.has(r.san)}
-												{#if ondelete}
+												{#if disabledSans?.has(r.san)}
+													{@render disabledGlyph()}
+												{:else if ondelete}
 													<button
 														type="button"
 														onclick={(e) => {
@@ -876,6 +921,7 @@
 								<span class="text-[10px] text-[var(--color-parchment-500)] italic">engine only</span
 								>
 								<span></span>
+								{@render moreButton(r)}
 							</div>
 						</li>
 					{/each}
@@ -904,7 +950,8 @@
 							onclick={onselect ? () => onselect?.(m.san) : undefined}
 							onkeydown={onselect ? (e) => handleRowKey(e, m) : undefined}
 							oncontextmenu={(e) => openContextMenu(e, m)}
-							class="group grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-1.5 pl-1.5 text-left transition-colors lg:gap-2 {onselect
+							class:opacity-50={disabledSans?.has(m.san)}
+							class="group relative grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-7 pl-1.5 text-left transition-colors lg:gap-2 {onselect
 								? 'cursor-pointer hover:bg-[var(--color-ink-800)]'
 								: 'cursor-default'}"
 						>
@@ -927,53 +974,57 @@
 										 matter the overall row height. -->
 									<span class="relative inline-block leading-none whitespace-nowrap">
 										{#if knownSans?.has(m.san)}
-											{#if ondelete}
-												<!-- The bookmark is the primary delete entry point.
+											{#if disabledSans?.has(m.san)}
+												{@render disabledGlyph()}
+											{:else}
+												{#if ondelete}
+													<!-- The bookmark is the primary delete entry point.
 													 Clicking it opens a confirm dialog that names
 													 the blast radius (the move + its descendants).
 													 Padded hit area extends well past the 10px
 													 visible icon for touch users. -->
-												<button
-													type="button"
-													onclick={(e) => {
-														e.stopPropagation();
-														openConfirm(m);
-													}}
-													onkeydown={(e) => {
-														if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
-													}}
-													title="Delete {m.san} from your tree"
-													aria-label="Delete {m.san} from your tree"
-													class="group/bookmark absolute right-full bottom-0 -m-2 mr-0.5 cursor-pointer py-2 pr-1 pl-3 leading-none"
-												>
+													<button
+														type="button"
+														onclick={(e) => {
+															e.stopPropagation();
+															openConfirm(m);
+														}}
+														onkeydown={(e) => {
+															if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+														}}
+														title="Delete {m.san} from your tree"
+														aria-label="Delete {m.san} from your tree"
+														class="group/bookmark absolute right-full bottom-0 -m-2 mr-0.5 cursor-pointer py-2 pr-1 pl-3 leading-none"
+													>
+														<Bookmark
+															class="size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)] transition-colors group-hover/bookmark:fill-[var(--color-oxblood-300)] group-hover/bookmark:text-[var(--color-oxblood-300)]"
+															strokeWidth={1.5}
+														/>
+													</button>
+												{:else}
 													<Bookmark
-														class="size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)] transition-colors group-hover/bookmark:fill-[var(--color-oxblood-300)] group-hover/bookmark:text-[var(--color-oxblood-300)]"
+														class="absolute right-full bottom-0 mr-1.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
 														strokeWidth={1.5}
-													/>
-												</button>
-											{:else}
-												<Bookmark
-													class="absolute right-full bottom-0 mr-1.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
-													strokeWidth={1.5}
-													aria-label="Already in your tree"
-												>
-													<title>Already in your tree</title>
-												</Bookmark>
-											{/if}
-											{#if underperform}
-												<!-- Shown only on saved rows per the design: a
+														aria-label="Already in your tree"
+													>
+														<title>Already in your tree</title>
+													</Bookmark>
+												{/if}
+												{#if underperform}
+													<!-- Shown only on saved rows per the design: a
 													 question mark to the left of the bookmark
 													 flagging that this move underperforms the
 													 Lichess DB baseline in the user's own
 													 games. Absolute-positioned to clear the
 													 bookmark's ~10px width + margin. -->
-												<HelpCircle
-													class="absolute right-full bottom-0 mr-3.5 size-2.5 text-[var(--color-oxblood-300)]"
-													strokeWidth={2}
-													aria-label={underperformTitle(underperform)}
-												>
-													<title>{underperformTitle(underperform)}</title>
-												</HelpCircle>
+													<HelpCircle
+														class="absolute right-full bottom-0 mr-3.5 size-2.5 text-[var(--color-oxblood-300)]"
+														strokeWidth={2}
+														aria-label={underperformTitle(underperform)}
+													>
+														<title>{underperformTitle(underperform)}</title>
+													</HelpCircle>
+												{/if}
 											{/if}
 										{/if}
 										{m.san}
@@ -1030,6 +1081,7 @@
 									</span>
 								</div>
 							</div>
+							{@render moreButton(m)}
 							<div class="flex flex-col items-end gap-0.5">
 								{#if ts.length > 0 || transposesSans?.has(m.san) || advice}
 									<span class="flex items-center gap-0.5">
@@ -1091,6 +1143,35 @@
 	{/if}
 </div>
 
+{#snippet moreButton(m: { san: string; uci: string })}
+	{#if hasRowMenu(m.san)}
+		<button
+			type="button"
+			onclick={(e) => openRowMenu(e, m)}
+			onkeydown={(e) => {
+				if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+			}}
+			title="More actions"
+			aria-label="More actions for {m.san}"
+			class="absolute top-1/2 right-1 flex size-5 -translate-y-1/2 items-center justify-center rounded-[3px] text-[var(--color-parchment-500)]/70 transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-200)]"
+		>
+			<MoreVertical class="size-3.5" strokeWidth={2} />
+		</button>
+	{/if}
+{/snippet}
+
+{#snippet disabledGlyph()}
+	<!-- Stands in for the brass bookmark on disabled rows, in the same left
+		 gutter slot, so a shelved move reads as "off" at a glance. -->
+	<CircleSlash
+		class="absolute right-full bottom-0 mr-1.5 size-2.5 text-[var(--color-parchment-500)]"
+		strokeWidth={2}
+		aria-label="Disabled — excluded from drilling"
+	>
+		<title>Disabled — excluded from drilling</title>
+	</CircleSlash>
+{/snippet}
+
 {#if menuSan}
 	<!-- Context menu for right-click-delete. Backdrop closes on click;
 		 menu is fixed-positioned at the cursor. The "Delete" entry now
@@ -1115,13 +1196,31 @@
 		>
 			{menuSan}
 		</div>
-		<button
-			type="button"
-			onclick={confirmFromMenu}
-			class="flex items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--color-oxblood-300)] transition-colors hover:bg-[var(--color-ink-800)]"
-		>
-			Delete from tree…
-		</button>
+		{#if ondisable}
+			{@const isDisabled = disabledSans?.has(menuSan)}
+			{@const below = subtreeSizeBySan?.get(menuSan) ?? 0}
+			<button
+				type="button"
+				onclick={disableFromMenu}
+				class="flex items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)]"
+			>
+				<CircleSlash class="size-3.5 shrink-0 text-[var(--color-parchment-400)]" strokeWidth={2} />
+				{#if isDisabled}
+					Enable from here
+				{:else}
+					Disable from here{below > 0 ? ` (${below})` : ''}
+				{/if}
+			</button>
+		{/if}
+		{#if ondelete}
+			<button
+				type="button"
+				onclick={confirmFromMenu}
+				class="flex items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--color-oxblood-300)] transition-colors hover:bg-[var(--color-ink-800)]"
+			>
+				Delete from tree…
+			</button>
+		{/if}
 	</div>
 {/if}
 

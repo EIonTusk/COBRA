@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import 'fake-indexeddb/auto';
+import { describe, expect, it, beforeEach } from 'vitest';
 import type { Card } from '$lib/types';
-import { pickBalancedDueCards } from './cards';
+import { pickBalancedDueCards, deferSubtree, listCards, upsertCard } from './cards';
+import { getDB } from './db';
 
 function card(fenKey: string, reviewed: boolean, dueAt = 0): Card {
 	return {
@@ -80,5 +82,50 @@ describe('pickBalancedDueCards', () => {
 
 	it('handles empty input', () => {
 		expect(pickBalancedDueCards([], 10, 3)).toEqual([]);
+	});
+});
+
+describe('deferSubtree', () => {
+	const REP = 'defer-rep';
+	function due(fenKey: string, dueAt: number): Card {
+		return { repertoireId: REP, fenKey, expectedSan: 'x', fsrs: {} as Card['fsrs'], dueAt };
+	}
+
+	beforeEach(async () => {
+		const db = await getDB();
+		const tx = db.transaction('cards', 'readwrite');
+		const store = tx.objectStore('cards');
+		const keys = await store.index('by-repertoire').getAllKeys(REP);
+		for (const k of keys) await store.delete(k);
+		await tx.done;
+	});
+
+	it('pushes only cards in the subtree out to the target date', async () => {
+		await upsertCard(due('in', 0));
+		await upsertCard(due('out', 0));
+		const target = 5_000_000;
+		const moved = await deferSubtree(REP, new Set(['in']), target);
+		expect(moved).toBe(1);
+		const cards = await listCards(REP);
+		expect(cards.find((c) => c.fenKey === 'in')!.dueAt).toBe(target);
+		expect(cards.find((c) => c.fenKey === 'out')!.dueAt).toBe(0);
+	});
+
+	it('never pulls a card that is already scheduled further out', async () => {
+		await upsertCard(due('far', 9_000_000));
+		const moved = await deferSubtree(REP, new Set(['far']), 5_000_000);
+		expect(moved).toBe(0);
+		const cards = await listCards(REP);
+		expect(cards.find((c) => c.fenKey === 'far')!.dueAt).toBe(9_000_000);
+	});
+
+	it('keeps the fsrs due mirror in sync with dueAt', async () => {
+		await upsertCard(due('c', 0));
+		const target = 7_777_000;
+		await deferSubtree(REP, new Set(['c']), target);
+		const cards = await listCards(REP);
+		const moved = cards.find((c) => c.fenKey === 'c')!;
+		expect(moved.dueAt).toBe(target);
+		expect(new Date(moved.fsrs.due).getTime()).toBe(target);
 	});
 });

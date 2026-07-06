@@ -40,7 +40,13 @@
 	import { listGapsForRepertoire } from '$lib/storage/empiricalGaps';
 	import { listPositionWdlAtFenKey, type PositionWdlRow } from '$lib/storage/positionWdl';
 	import { getRepertoire, touchRepertoire, setStartingPosition } from '$lib/storage/repertoires';
-	import { nodesMap, addEdge, removeEdgeAndPrune, setNodeComment } from '$lib/storage/nodes';
+	import {
+		nodesMap,
+		addEdge,
+		removeEdgeAndPrune,
+		setNodeComment,
+		setEdgeDisabled
+	} from '$lib/storage/nodes';
 	import { parseRepertoirePgn } from '$lib/chess/pgn';
 	import { mergeLinesIntoRepertoire, type MergeLinesResult } from '$lib/storage/importPgn';
 	import {
@@ -256,6 +262,17 @@
 		if (!currentNode) return out;
 		for (const e of currentNode.children) {
 			out.set(e.san, countDescendantEdges(nodes, e.toFenKey));
+		}
+		return out;
+	});
+
+	// SANs at the current position whose edge is soft-disabled (a shelved
+	// line's head). Drives the greyed rendering + Enable/Disable menu label
+	// in the Explorer.
+	const disabledSans = $derived.by<Set<string>>(() => {
+		const out = new SvelteSet<string>();
+		for (const e of currentNode?.children ?? []) {
+			if (e.disabled) out.add(e.san);
 		}
 		return out;
 	});
@@ -1077,6 +1094,19 @@
 		void san;
 	}
 
+	// Toggle a saved move's soft-disable flag. Non-destructive: the line stays
+	// in the tree (and its FSRS cards keep their history) — drilling just skips
+	// the move and everything reachable only through it until re-enabled.
+	async function disableFromExplorer(san: string, uci: string, next: boolean) {
+		if (!rep) return;
+		const child = (currentNode?.children ?? []).find((c) => c.uci === uci);
+		if (!child) return;
+		await setEdgeDisabled(rep.id, currentFenKey, child.toFenKey, next);
+		nodes = await nodesMap(rep.id);
+		await touchRepertoire(rep.id);
+		void san;
+	}
+
 	/**
 	 * Reconcile state when walking the line backwards: any pending edge that
 	 * led into a step we're dropping is "undone" — it's removed from the
@@ -1588,6 +1618,18 @@
 			out.push(edge);
 		}
 		return out;
+	}
+
+	/**
+	 * Whether the move played into ply `i` is soft-disabled. Reads the flag
+	 * off the persisted edge into that step; pending (unsaved) moves are never
+	 * disabled. Used to grey the move in the Line strip.
+	 */
+	function stepDisabled(i: number): boolean {
+		if (!rep) return false;
+		const parentKey = i === 0 ? rep.rootFenKey : history[i - 1].fenKey;
+		const edge = nodes.get(parentKey)?.children.find((c) => c.toFenKey === history[i].fenKey);
+		return !!edge?.disabled;
 	}
 
 	/**
@@ -3128,7 +3170,9 @@
 					fen={currentFen}
 					onselect={addFromExplorer}
 					ondelete={deleteFromExplorer}
+					ondisable={disableFromExplorer}
 					knownSans={knownChildSans}
+					{disabledSans}
 					{subtreeSizeBySan}
 					{engineEvalByUci}
 					{engineRows}
@@ -3278,8 +3322,11 @@
 									<button
 										type="button"
 										onclick={() => goToPly(i)}
+										title={stepDisabled(i) ? 'Disabled — excluded from drilling' : undefined}
 										class="text-[var(--color-parchment-100)] transition-colors hover:text-[var(--color-brass-300)]"
 										class:!text-[var(--color-brass-300)]={i === history.length - 1}
+										class:line-through={stepDisabled(i)}
+										class:opacity-50={stepDisabled(i)}
 									>
 										{step.san}
 									</button>
@@ -3291,8 +3338,12 @@
 										<button
 											type="button"
 											onclick={() => jumpToSibling(i, sib)}
-											title="Switch to sideline {sib.san}"
+											title={sib.disabled
+												? 'Disabled — excluded from drilling'
+												: `Switch to sideline ${sib.san}`}
 											class="text-[var(--color-parchment-500)] italic transition-colors hover:text-[var(--color-brass-300)]"
+											class:line-through={sib.disabled}
+											class:opacity-60={sib.disabled}
 										>
 											{sib.san}
 										</button>

@@ -4,15 +4,16 @@ import {
 	pathToFenKey,
 	furthestNonBranchingFenKey,
 	countDescendantEdges,
-	reachableFenKeys
+	reachableFenKeys,
+	liveReachableFenKeys
 } from './traversal';
 
 function node(fenKey: string, children: Edge[]): RepertoireNode {
 	return { repertoireId: 'r', fenKey, children };
 }
 
-function edge(san: string, toFenKey: string): Edge {
-	return { san, uci: 'xxxx', toFenKey };
+function edge(san: string, toFenKey: string, disabled = false): Edge {
+	return { san, uci: 'xxxx', toFenKey, ...(disabled ? { disabled: true } : {}) };
 }
 
 describe('pathToFenKey', () => {
@@ -211,5 +212,41 @@ describe('reachableFenKeys', () => {
 		m.set('r', node('r', [edge('m1', 'a')]));
 		m.set('a', node('a', [edge('back', 'r')]));
 		expect([...reachableFenKeys(m, 'r')].sort()).toEqual(['a', 'r']);
+	});
+});
+
+describe('liveReachableFenKeys', () => {
+	it('excludes a continuation reachable only through a disabled edge', () => {
+		// r → a → b → { c, d(disabled) → e }
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a')]));
+		m.set('a', node('a', [edge('e5', 'b')]));
+		m.set('b', node('b', [edge('Nc6', 'c'), edge('d6', 'd', true)]));
+		m.set('c', node('c', []));
+		m.set('d', node('d', [edge('Nf3', 'e')]));
+		m.set('e', node('e', []));
+		const live = liveReachableFenKeys(m, 'r');
+		expect(live.has('c')).toBe(true);
+		expect(live.has('d')).toBe(false);
+		expect(live.has('e')).toBe(false);
+	});
+
+	it('keeps a position that also transposes in via a non-disabled edge', () => {
+		// b→shared is disabled, but a→shared is live, so 'shared' survives.
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a'), edge('d4', 'b')]));
+		m.set('a', node('a', [edge('x', 'shared')]));
+		m.set('b', node('b', [edge('y', 'shared', true)]));
+		m.set('shared', node('shared', []));
+		const live = liveReachableFenKeys(m, 'r');
+		expect(live.has('shared')).toBe(true);
+	});
+
+	it('matches reachableFenKeys when nothing is disabled', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a')]));
+		m.set('a', node('a', [edge('e5', 'b')]));
+		m.set('b', node('b', []));
+		expect([...liveReachableFenKeys(m, 'r')].sort()).toEqual([...reachableFenKeys(m, 'r')].sort());
 	});
 });
