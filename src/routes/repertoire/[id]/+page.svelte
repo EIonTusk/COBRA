@@ -23,7 +23,8 @@
 		Type,
 		Settings,
 		Upload,
-		UserCheck
+		UserCheck,
+		Waypoints
 	} from 'lucide-svelte';
 
 	import {
@@ -591,10 +592,10 @@
 			row isn't needed. Drill tints brass when due; Edit and Browse
 			stay ink-neutral so the eye still lands on Drill first when
 			there's work to do. On mobile all three stack (Drill first).
-			`md:grid-cols-3` avoids cramming three tiles into <640px
-			viewports where the subtitles would wrap ugly.
+			On mobile all tiles stack (Drill first); 2×2 on small; a single
+			row of four on large.
 		-->
-		<div class="mt-8 grid gap-3 md:grid-cols-3" style:--i="2">
+		<div class="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4" style:--i="2">
 			<!-- Drill hero: primary CTA. Brass-tinted when there are cards
 				 due now, subdued when the queue is empty. Stat line folds
 				 `due` + `total` into one descriptor so the separate stats
@@ -697,6 +698,34 @@
 							class="mt-1.5 font-mono text-[11px] tracking-wider text-[var(--color-parchment-400)] uppercase"
 						>
 							Read-only · autoplay & notes
+						</span>
+					</div>
+				</div>
+				<span class="eyebrow transition-colors group-hover:text-[var(--color-parchment-200)]">
+					Open →
+				</span>
+			</a>
+
+			<!-- Graph hero: the whole repertoire drawn as connected boards.
+				 Waypoints icon signals a node-link map; read-only like Browse. -->
+			<a
+				href={resolve(`/repertoire/${rep.id}/graph`)}
+				class="ink-panel group flex min-h-[7rem] items-center justify-between gap-4 rounded-[4px] bg-[var(--color-ink-900)] px-5 py-5 transition-colors hover:bg-[var(--color-ink-850)]"
+			>
+				<div class="flex min-w-0 items-center gap-4">
+					<span
+						class="flex size-12 shrink-0 items-center justify-center rounded-full bg-[var(--color-ink-800)] text-[var(--color-parchment-200)]"
+					>
+						<Waypoints class="size-5" strokeWidth={2} />
+					</span>
+					<div class="flex min-w-0 flex-col">
+						<span class="font-serif text-2xl leading-none text-[var(--color-parchment-50)]">
+							Graph
+						</span>
+						<span
+							class="mt-1.5 font-mono text-[11px] tracking-wider text-[var(--color-parchment-400)] uppercase"
+						>
+							Whole tree · positions as boards
 						</span>
 					</div>
 				</div>
