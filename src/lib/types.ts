@@ -101,11 +101,23 @@ export interface Edge {
 	annotation?: string;
 	weight?: number;
 	/**
+	 * When true, this move is shelved: it stays in the repertoire and is
+	 * visible (greyed) in the builder, but drilling skips it and everything
+	 * in the continuation reachable only through it. Flagged on the *head*
+	 * edge the user disabled — the "whole continuation" behaviour is derived
+	 * at read time by walking non-disabled edges (see `liveReachableFenKeys`),
+	 * so a position that still transposes into a live line stays trainable.
+	 * Optional/back-compat: absent means "not disabled". Carried across
+	 * devices by the sync-v2 edge LWW (the whole edge is swapped by
+	 * `updatedAt`, so no separate merge handling is needed).
+	 */
+	disabled?: boolean;
+	/**
 	 * Wall-clock ms-since-epoch of the most recent write to this edge.
 	 * Populated by the storage layer on every mutation; used by the
-	 * sync v2 merge to break ties on `annotation`/`weight` collisions
-	 * across devices. Optional for back-compat with edges written before
-	 * the field existed — sync v2 treats missing values as "older than
+	 * sync v2 merge to break ties on `annotation`/`weight`/`disabled`
+	 * collisions across devices. Optional for back-compat with edges written
+	 * before the field existed — sync v2 treats missing values as "older than
 	 * any explicit timestamp" and lets a stamped row win.
 	 */
 	updatedAt?: number;

@@ -92,6 +92,38 @@ export function reachableFenKeys(nodes: Map<string, RepertoireNode>, rootKey: st
 }
 
 /**
+ * Set of fenKeys reachable from `rootKey` while refusing to traverse any
+ * edge flagged `disabled`. This is the "still trainable" position set: a
+ * disabled move (and any continuation reachable only through it) drops out,
+ * but a position that also transposes into a live line via a non-disabled
+ * edge stays in — exactly the semantics we want for a soft "disable line".
+ *
+ * Note this is about *reaching* a position. A position P can be live here
+ * while its own prepared move is disabled (the head edge that shelved the
+ * line). Callers deciding whether to drill the card at P must therefore also
+ * check that P's own edge isn't `disabled` — see `buildSegment`.
+ */
+export function liveReachableFenKeys(
+	nodes: Map<string, RepertoireNode>,
+	rootKey: string
+): Set<string> {
+	const reachable = new Set<string>([rootKey]);
+	const queue: string[] = [rootKey];
+	while (queue.length > 0) {
+		const key = queue.shift()!;
+		const node = nodes.get(key);
+		if (!node) continue;
+		for (const edge of node.children) {
+			if (edge.disabled) continue;
+			if (reachable.has(edge.toFenKey)) continue;
+			reachable.add(edge.toFenKey);
+			queue.push(edge.toFenKey);
+		}
+	}
+	return reachable;
+}
+
+/**
  * Auto-detected starting position for game analysis: walk the trunk
  * down from the root while each node has exactly one child, stopping
  * at the first node that branches (2+ children) or dead-ends (leaf).

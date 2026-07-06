@@ -1,6 +1,6 @@
 import type { AppSettings, Card, IdeaCard, Repertoire, RepertoireNode } from '$lib/types';
 import { colorToMove } from '$lib/chess/fen';
-import { pathToFenKey, reachableFenKeys } from '$lib/tree/traversal';
+import { pathToFenKey, reachableFenKeys, liveReachableFenKeys } from '$lib/tree/traversal';
 import { buildLineFirstQueue } from '$lib/tree/lineOrder';
 import {
 	dueCards,
@@ -342,12 +342,23 @@ export async function buildSegment(
 	// regardless of FSRS due date — an explicit "practice here now" request
 	// would otherwise yield an empty session when nothing below is due.
 	// Grading still updates FSRS as normal; only the selection ignores due.
+	// Soft-disabled lines drop out of the trainable set. A card at position P
+	// is trainable only when P is still reachable through non-disabled edges
+	// AND P's own prepared move isn't the disabled head — the card lives at the
+	// parent, so live-reachability alone wouldn't skip a move disabled directly
+	// at P (P stays reachable from above).
+	const live = liveReachableFenKeys(nodes, rep.rootFenKey);
+	const isTrainable = (c: Card): boolean => {
+		if (!live.has(c.fenKey)) return false;
+		const edge = nodes.get(c.fenKey)?.children.find((e) => e.san === c.expectedSan);
+		return !edge?.disabled;
+	};
 	let pool: Card[];
 	if (startFenKey) {
 		const subtree = reachableFenKeys(nodes, startFenKey);
-		pool = (await listCards(rep.id)).filter((c) => subtree.has(c.fenKey));
+		pool = (await listCards(rep.id)).filter((c) => subtree.has(c.fenKey) && isTrainable(c));
 	} else {
-		pool = await dueCards(rep.id, Date.now(), settings.drillSessionCap * 5);
+		pool = (await dueCards(rep.id, Date.now(), settings.drillSessionCap * 5)).filter(isTrainable);
 	}
 	const lineWalkOn = (settings.drillIntermediateMoves ?? 'play') === 'play';
 
