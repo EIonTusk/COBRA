@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { SvelteSet, SvelteMap } from 'svelte/reactivity';
 	import { onMount } from 'svelte';
+	import { fly, fade } from 'svelte/transition';
 	import { resolve } from '$app/paths';
 	import { goto, beforeNavigate } from '$app/navigation';
 	import { page } from '$app/state';
@@ -21,11 +22,13 @@
 		Copy,
 		Flame,
 		GraduationCap,
+		ListTree,
 		MoveUpRight,
 		Lightbulb,
 		Save,
 		Shuffle,
 		Star,
+		Waypoints,
 		Target,
 		Trash2,
 		Upload,
@@ -76,6 +79,8 @@
 		firstMissingOnLine,
 		type MissingMove
 	} from '$lib/tree/missing';
+	import { buildTreeRows } from '$lib/tree/treeView';
+	import MoveTree from '$lib/tree/MoveTree.svelte';
 	import { fetchExplorer } from '$lib/explorer/client';
 	import { generateMiddlegameGuide, type GenerateProgress } from '$lib/middlegame/generate';
 	import {
@@ -242,6 +247,23 @@
 	);
 	const isOurTurn = $derived(rep ? sideToMove === rep.color : false);
 	const orientation = $derived<'white' | 'black'>(rep?.color ?? 'white');
+	// Positions the user has folded in the tree sidebar (ephemeral view state).
+	const collapsedTree = new SvelteSet<string>();
+	function toggleTreeCollapse(fenKey: string) {
+		if (collapsedTree.has(fenKey)) collapsedTree.delete(fenKey);
+		else collapsedTree.add(fenKey);
+	}
+	// Full variation outline for the tree sidebar. Recomputes whenever the
+	// graph (`nodes`) changes — cheap relative to an edit, and keeps the tree
+	// in step with moves added/removed on the board.
+	const treeRows = $derived(
+		rep ? buildTreeRows(nodes, rep.rootFenKey, { collapsed: collapsedTree }) : []
+	);
+	const rootWhiteToMove = $derived(rep ? colorToMove(rep.rootFenKey) === 'white' : true);
+	// Mobile-only: the tree lives in an off-canvas drawer that flies in from
+	// the left. Desktop shows it as a fixed left rail instead, so this stays
+	// false there.
+	let treeOpen = $state(false);
 	// SANs of moves already recorded as children at this position, passed
 	// to the Explorer so it can bookmark them inline instead of us
 	// maintaining a separate "Continuations in your tree" panel.
@@ -1665,6 +1687,11 @@
 	}
 
 	function handleKey(e: KeyboardEvent) {
+		if (e.key === 'Escape' && treeOpen) {
+			e.preventDefault();
+			treeOpen = false;
+			return;
+		}
 		if (e.key === 'Escape' && findMissingOpen) {
 			e.preventDefault();
 			findMissingOpen = false;
@@ -2692,14 +2719,14 @@
 			arrangement via `lg:col-start` / `lg:row-start`; `order-N` is
 			ignored because we reset each item with `lg:order-none`.
 		-->
-		<div class="flex flex-col gap-5 lg:grid lg:grid-cols-[minmax(0,1fr)_420px]">
+		<div class="flex flex-col gap-5 lg:grid lg:grid-cols-[260px_minmax(0,1fr)_420px]">
 			<!-- Action bar: mobile order 6 (under the board toolbar + candidates
 				 + line + engine); desktop row 1 spanning both columns.
 				 On mobile it holds secondary actions only (Spar, Gap, status);
 				 the primary "Find missing" dropdown + save pill live in the
 				 board toolbar right under the board for tap-reach. -->
 			<div
-				class="order-6 flex flex-wrap items-center gap-2 lg:order-none lg:col-span-2 lg:row-start-1"
+				class="order-6 flex flex-wrap items-center gap-2 lg:order-none lg:col-span-3 lg:row-start-1"
 			>
 				{#if !tokenConfigured}
 					<!-- Inline notice: sits next to the disabled toolbar
@@ -2946,7 +2973,7 @@
 				suggestions are painted on the board.
 			-->
 			<div
-				class="order-5 hidden items-baseline gap-2 text-[13px] lg:order-none lg:col-start-2 lg:row-start-2 lg:flex"
+				class="order-5 hidden items-baseline gap-2 text-[13px] lg:order-none lg:col-start-3 lg:row-start-2 lg:flex"
 			>
 				<Lightbulb class="size-3.5 shrink-0 self-center text-[var(--color-brass-300)]" />
 				<span class="font-mono tabular-nums {engineScoreTone}">{engineScore}</span>
@@ -2979,7 +3006,7 @@
 			</div>
 
 			<!-- Board. Mobile order 1 (top of the page); desktop col 1 row 3. -->
-			<section class="order-1 lg:order-none lg:col-start-1 lg:row-start-3">
+			<section class="order-1 lg:order-none lg:col-start-2 lg:row-start-3">
 				<div class="relative mx-auto max-w-[600px]">
 					<Board
 						fen={currentFen}
@@ -3055,6 +3082,14 @@
 				top action bar and the line panel.
 			-->
 			<div class="order-2 flex items-center gap-1 lg:hidden">
+				<button
+					type="button"
+					onclick={() => (treeOpen = true)}
+					title="Show repertoire tree"
+					class="mr-1 flex size-8 items-center justify-center rounded-[3px] text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]"
+				>
+					<ListTree class="size-4" />
+				</button>
 				<button
 					type="button"
 					onclick={goStart}
@@ -3145,7 +3180,7 @@
 				 desktop col 2 row 3. `self-start`: without it the grid row
 				 stretches this cell to match the board column, leaving a
 				 giant empty bottom. -->
-			<div class="ink-panel order-3 p-4 lg:order-none lg:col-start-2 lg:row-start-3 lg:self-start">
+			<div class="ink-panel order-3 p-4 lg:order-none lg:col-start-3 lg:row-start-3 lg:self-start">
 				{#snippet engineInline()}
 					<!-- Mobile-only Stockfish readout inlined into the Candidates
 						 header; the standalone engine row is hidden on mobile
@@ -3191,7 +3226,7 @@
 				 Nav buttons (⏮ / ◀) are hidden on mobile because the board
 				 toolbar carries them; on desktop they stay here next to the
 				 line, where they've always lived. -->
-			<section class="order-4 lg:order-none lg:col-start-1 lg:row-start-4">
+			<section class="order-4 lg:order-none lg:col-start-2 lg:row-start-4">
 				<div class="mx-auto max-w-[600px]">
 					<div class="mb-2 flex items-center gap-1">
 						<button
@@ -3369,11 +3404,93 @@
 			</section>
 
 			<!--
+				Tree sidebar — the full variation outline. Every move jumps the
+				board (via jumpToFenKey's shortest-path replay), so it's the fast
+				way to hop between lines instead of stepping ply-by-ply. Desktop:
+				a fixed left rail (col 1, row 3), mirroring the Explorer picker on
+				the right. Mobile: an off-canvas drawer that flies in from the
+				left, opened from the board toolbar.
+			-->
+			{#snippet treeBody(inDrawer: boolean)}
+				<div class="mb-2 flex items-center justify-between">
+					<div class="eyebrow">Tree</div>
+					<div class="flex items-center gap-2">
+						{#if treeRows.length > 0}
+							<span class="font-mono text-[11px] text-[var(--color-parchment-600)] tabular-nums">
+								{nodes.size} positions
+							</span>
+						{/if}
+						<!-- Whole-repertoire graph view: positions as boards. -->
+						{#if rep}
+							<a
+								href={resolve(`/repertoire/${rep.id}/graph?from=edit`)}
+								title="View the whole repertoire as a graph"
+								class="flex size-7 items-center justify-center rounded-[3px] text-[var(--color-parchment-500)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-brass-300)]"
+							>
+								<Waypoints class="size-4" />
+							</a>
+						{/if}
+						{#if inDrawer}
+							<button
+								type="button"
+								onclick={() => (treeOpen = false)}
+								title="Close"
+								class="flex size-7 items-center justify-center rounded-[3px] text-[var(--color-parchment-500)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]"
+							>
+								<XIcon class="size-4" />
+							</button>
+						{/if}
+					</div>
+				</div>
+				<MoveTree
+					rows={treeRows}
+					{currentFenKey}
+					{rootWhiteToMove}
+					heightClass={inDrawer ? 'flex-1 min-h-0' : 'max-h-[min(560px,70vh)]'}
+					onJump={(fenKey) => {
+						void jumpToFenKey(fenKey);
+						if (inDrawer) treeOpen = false;
+					}}
+					onToggleCollapse={toggleTreeCollapse}
+				/>
+			{/snippet}
+
+			<!-- Desktop left rail -->
+			<div class="ink-panel hidden p-4 lg:col-start-1 lg:row-start-3 lg:block lg:self-start">
+				{@render treeBody(false)}
+			</div>
+
+			<!-- Mobile drawer: flies in from the left over a dimmed backdrop.
+				 Sits below the sticky app header (which owns the top strip and
+				 traps `fixed` children in `<main>`'s stacking context), so the
+				 nav stays usable and the drawer's own close button is reachable.
+				 Dismiss by tapping the backdrop, the close button, or Escape. -->
+			{#if treeOpen}
+				<div
+					class="fixed inset-x-0 top-[calc(3.5rem+env(safe-area-inset-top))] bottom-0 z-50 lg:hidden"
+				>
+					<button
+						type="button"
+						aria-label="Close tree"
+						onclick={() => (treeOpen = false)}
+						transition:fade={{ duration: 150 }}
+						class="absolute inset-0 bg-black/50"
+					></button>
+					<div
+						transition:fly={{ x: -320, duration: 200 }}
+						class="ink-panel absolute inset-y-0 left-0 flex w-[86%] max-w-[360px] flex-col rounded-none border-l-0 p-4 shadow-2xl"
+					>
+						{@render treeBody(true)}
+					</div>
+				</div>
+			{/if}
+
+			<!--
 				Notes — mobile order 7 (below the action bar); desktop col 1
 				row 5 (below the line). Engine lives inline with the action
 				row now; the old big Engine panel in the right rail is gone.
 			-->
-			<div class="ink-panel order-7 p-4 lg:order-none lg:col-start-1 lg:row-start-5">
+			<div class="ink-panel order-7 p-4 lg:order-none lg:col-start-2 lg:row-start-5">
 				<label for="note" class="eyebrow mb-2 block">Notes on this position</label>
 				<Textarea
 					id="note"
@@ -3389,7 +3506,7 @@
 				</p>
 			</div>
 
-			<div class="ink-panel order-8 p-4 lg:order-none lg:col-start-1 lg:row-start-6">
+			<div class="ink-panel order-8 p-4 lg:order-none lg:col-start-2 lg:row-start-6">
 				<div class="mb-2 flex items-baseline justify-between">
 					<label for="idea-prompt" class="eyebrow block">
 						Idea card {ideaCard ? '· scheduled' : ''}
