@@ -2,7 +2,7 @@
 	import './layout.css';
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { goto } from '$app/navigation';
+	import { goto, afterNavigate } from '$app/navigation';
 	import { base, resolve } from '$app/paths';
 	import { Menu, X, Moon, Sun } from 'lucide-svelte';
 	import { ModeWatcher, mode, toggleMode } from 'mode-watcher';
@@ -59,6 +59,21 @@
 	// (e.g. '/COBRA/library'). Strip it so our nav-match checks stay
 	// base-agnostic.
 	const path = $derived(page.url.pathname.slice(base.length) || '/');
+	// GoatCounter SPA pageviews (web + Tauri). The count.js snippet in app.html
+	// records one hit on initial load; SvelteKit client navigations don't reload
+	// the page, so we count them manually here. Skip the first `enter` navigation
+	// to avoid double-counting that initial load, and guard on `window.goatcounter`
+	// since the CDN script is async and may not have loaded yet.
+	afterNavigate((nav) => {
+		if (nav.type === 'enter') return;
+		const gc = (
+			window as unknown as {
+				goatcounter?: { count?: (opts: { path: string }) => void };
+			}
+		).goatcounter;
+		gc?.count?.({ path: location.pathname + location.search });
+	});
+
 	// Mobile hamburger menu. Open drawer closes on route change.
 	let menuOpen = $state(false);
 	$effect(() => {
