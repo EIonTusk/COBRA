@@ -235,6 +235,32 @@
 				add('trace', 'overlay armed (UA=' + navigator.userAgent.slice(0, 120) + ')');
 			})();
 		</script>
+		<!--
+			GoatCounter analytics. Counts on the web build and inside the Tauri
+			(desktop/mobile) shell.
+
+			- Explicit https:// src, not the protocol-relative //gc.zgo.at form:
+			  on desktop the app is served from the custom `tauri://localhost`
+			  scheme, where `//gc.zgo.at` would resolve to `tauri://gc.zgo.at`
+			  and fail to load.
+			- `allow_local` is turned on ONLY inside Tauri. count.js skips any
+			  host ending in `localhost` (`tauri://localhost`,
+			  `https://tauri.localhost`), so without this the packaged app is
+			  never counted. We keep it off on the web so `npm run dev` / preview
+			  on localhost don't pollute the stats. Tauri injects
+			  `__TAURI_INTERNALS__` before page scripts run, so this check is
+			  reliable here.
+		-->
+		<script>
+			window.goatcounter = {
+				allow_local: '__TAURI_INTERNALS__' in window || '__TAURI_METADATA__' in window
+			};
+		</script>
+		<script
+			data-goatcounter="https://eiontusk.goatcounter.com/count"
+			async
+			src="https://gc.zgo.at/count.js"
+		></script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">
