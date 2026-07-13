@@ -141,6 +141,9 @@
 	// prefix card shouldn't stack several reviews minutes apart off one sitting.
 	const prefixRatedKeys = new SvelteSet<string>();
 	const failedWalkIndices = new SvelteSet<number>();
+	// Walks whose Learn pass introduced a new card and therefore still owe a
+	// Train pass. Drained at the segment tail rather than replayed on the spot.
+	const pendingTrainWalks = new SvelteSet<number>();
 	const failedKeysByWalk = new SvelteMap<number, SvelteSet<string>>();
 	// Composite keys actually drilled BY each walk (Learn pass). Distinct
 	// from `flatWalkFenKeys`, which contains every fenKey scheduled into
@@ -159,7 +162,7 @@
 	let segTailState = $state<{
 		segIdx: number;
 		resumeWalk: number;
-		stage: 'failedDrain' | 'ideas';
+		stage: 'trainDrain' | 'failedDrain' | 'ideas';
 	} | null>(null);
 	// Marks segments whose tail (failed drain + ideas) has already been
 	// fully processed via the per-segment-tail flow. Stops the end-of-session
@@ -1102,6 +1105,14 @@
 		failedWalkIndices.clear();
 		for (const nw of remappedFailed) failedWalkIndices.add(nw);
 
+		const remappedTrain: number[] = [];
+		for (const w of pendingTrainWalks) {
+			const nw = oldWalkToNewWalk.get(w);
+			if (nw !== undefined) remappedTrain.push(nw);
+		}
+		pendingTrainWalks.clear();
+		for (const nw of remappedTrain) pendingTrainWalks.add(nw);
+
 		const remappedKeys = new SvelteMap<number, SvelteSet<string>>();
 		for (const [w, keys] of failedKeysByWalk) {
 			const nw = oldWalkToNewWalk.get(w);
@@ -1319,28 +1330,14 @@
 			return;
 		}
 
-		// Walk exhausted: Train pass (if it had new cards) or transition.
+		// Walk exhausted. A walk that introduced a new card still owes a Train
+		// pass, but running it inline re-anchored to the walk start — which on a
+		// short walk is the very card the user had just answered, so the drill
+		// asked the same move twice in a row. Defer it to the segment tail so the
+		// repetition lands after the rest of the session's material, which is
+		// also where the spacing does any good.
 		if (walkPhase === 'learn' && walkNeedsTrain(currentWalk)) {
-			setTimeout(() => {
-				walkPhase = 'train';
-				// Only clear drilled-keys this walk actually drilled. Shared
-				// trunks now live in their own walk (see buildSegment); for
-				// transposed fenKeys that show up in multiple walks, we
-				// still avoid unwinding the prior walk's progress.
-				const drilledHere = drilledByWalk.get(currentWalk);
-				if (drilledHere) {
-					for (const ck_ of drilledHere) drilledKeys.delete(ck_);
-					drilledByWalk.delete(currentWalk);
-				}
-				failedWalkIndices.delete(currentWalk);
-				failedKeysByWalk.delete(currentWalk);
-				chainedEntry = null;
-				idx = flatWalkStarts[currentWalk];
-				// Re-anchors to the walk start, which may be the same entry the
-				// user just answered — bump presentGen so startCard re-runs.
-				presentGen++;
-			}, DONE_HOLD_MS);
-			return;
+			pendingTrainWalks.add(currentWalk);
 		}
 
 		// If we're in a segment-tail drain (currentWalk is a failed-walk
@@ -1393,13 +1390,63 @@
 	}
 
 	function enterSegmentTail(segIdx: number, resumeWalk: number) {
-		segTailState = { segIdx, resumeWalk, stage: 'failedDrain' };
+		segTailState = { segIdx, resumeWalk, stage: 'trainDrain' };
 		progressSegmentTail();
 	}
 
 	function progressSegmentTail() {
 		if (!segTailState) return;
 		const { segIdx, resumeWalk } = segTailState;
+
+		// Train pass for every walk in this segment that introduced a new card,
+		// deferred here from `advanceQueue` so a freshly-learned move is re-asked
+		// after the rest of the segment rather than immediately after itself.
+		if (segTailState.stage === 'trainDrain') {
+			const pendingInSeg: number[] = [];
+			for (const w of pendingTrainWalks) {
+				if (flatWalkSeg[w] === segIdx) pendingInSeg.push(w);
+			}
+			if (pendingInSeg.length > 0) {
+				const next = Math.min(...pendingInSeg);
+				pendingTrainWalks.delete(next);
+
+				// Only un-drill what this walk actually drilled. Shared trunks live
+				// in their own walk (see buildSegment); for transposed fenKeys that
+				// appear in several walks this avoids unwinding another walk's
+				// progress.
+				const drilledHere = drilledByWalk.get(next);
+				if (drilledHere) {
+					for (const ck_ of drilledHere) drilledKeys.delete(ck_);
+					drilledByWalk.delete(next);
+				}
+				// The Train pass replays the whole walk, so a failed-drain entry for
+				// the same walk would just run it twice back to back.
+				failedWalkIndices.delete(next);
+				failedKeysByWalk.delete(next);
+
+				const walkStart = flatWalkStarts[next];
+				const walkEnd = walkEndOf(next);
+				let first = walkStart;
+				while (
+					first < walkEnd &&
+					drilledKeys.has(ck(entries[first].segIdx, entries[first].card.fenKey))
+				) {
+					first++;
+				}
+				if (first >= walkEnd) {
+					progressSegmentTail();
+					return;
+				}
+				// No `sessionPlannedTotal` bump: `snapshotPlannedSet` already
+				// pre-counts a Train pass for every walk holding a new card.
+				walkPhase = 'train';
+				chainedEntry = null;
+				idx = first;
+				presentGen++;
+				return;
+			}
+			segTailState = { segIdx, resumeWalk, stage: 'failedDrain' };
+		}
 
 		if (segTailState.stage === 'failedDrain') {
 			// Find next failed walk in this segment. Walk-index granularity
