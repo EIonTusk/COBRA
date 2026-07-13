@@ -7,7 +7,14 @@
 	import { page } from '$app/state';
 	import { ExternalLink, AlertTriangle, Check } from 'lucide-svelte';
 
-	import { getSettings, saveSettings, defaultSettings } from '$lib/storage/settings';
+	import {
+		getSettings,
+		saveSettings,
+		defaultSettings,
+		MIN_REQUEST_RETENTION,
+		MAX_REQUEST_RETENTION,
+		DEFAULT_REQUEST_RETENTION
+	} from '$lib/storage/settings';
 	import { applySoundSettings, playMove, playCorrect, playIncorrect } from '$lib/ui/sounds';
 	import { wipeAllData } from '$lib/storage/db';
 	import { exportAll, importAll, type LibraryExport } from '$lib/storage/bulk';
@@ -80,6 +87,20 @@
 
 	let settings = $state<AppSettings | null>(null);
 	let savedSnapshot = $state<string>('');
+
+	// FSRS stores retention as a probability; the control speaks percent.
+	const retentionPct = $derived(
+		Math.round((settings?.fsrsParams?.request_retention ?? DEFAULT_REQUEST_RETENTION) * 100)
+	);
+
+	function onRetentionChange(e: Event) {
+		if (!settings) return;
+		const pct = Number((e.currentTarget as HTMLInputElement).value);
+		const next = Number.isFinite(pct)
+			? Math.min(MAX_REQUEST_RETENTION, Math.max(MIN_REQUEST_RETENTION, pct / 100))
+			: DEFAULT_REQUEST_RETENTION;
+		settings.fsrsParams = { ...settings.fsrsParams, request_retention: next };
+	}
 	let saving = $state(false);
 	let justSaved = $state(false);
 	let showToken = $state(false);
@@ -556,6 +577,38 @@
 					</div>
 				</div>
 
+				<div
+					class="mt-5 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3"
+				>
+					<div class="flex items-baseline justify-between gap-3">
+						<Label for="retention" class="!mb-0">Target retention</Label>
+						<div class="flex items-baseline gap-1.5">
+							<Input
+								id="retention"
+								name="retention"
+								type="number"
+								min={Math.round(MIN_REQUEST_RETENTION * 100)}
+								max={Math.round(MAX_REQUEST_RETENTION * 100)}
+								step="1"
+								autocomplete="off"
+								value={retentionPct}
+								onchange={onRetentionChange}
+								class="w-20 font-mono"
+							/>
+							<span class="font-mono text-xs text-[var(--color-parchment-500)]">%</span>
+						</div>
+					</div>
+					<p
+						class="mt-2 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+					>
+						The recall probability the schedule aims for. Lower stretches every interval and shrinks
+						the daily queue, at the cost of forgetting more moves at the board; higher drills more
+						often to hold more. 90% is the standard setting — drop toward 85% if a large repertoire
+						is producing more due cards each day than you can clear. Takes effect on the next review
+						of each card; it does not reschedule cards that are already waiting.
+					</p>
+				</div>
+
 				<div class="mt-5">
 					<Label>Position intro animation</Label>
 					<div
@@ -635,8 +688,9 @@
 							class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
 						>
 							When a card from late in a line is due, the drill walks each earlier user move first
-							instead of jumping past them. Prefix moves don't count towards FSRS — getting them
-							right is a free pass, getting them wrong replays without a lapse. Disable to drill the
+							instead of jumping past them. Those earlier moves are graded like any other review —
+							recalling one credits it and pushes its next due date out, so moves you keep getting
+							right drop out of the walk instead of coming back every session. Disable to drill the
 							due card directly.
 						</p>
 					</div>

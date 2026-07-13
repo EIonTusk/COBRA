@@ -433,10 +433,10 @@ export interface AppSettings {
 	/**
 	 * Controls how the drill handles user-side positions in a line that
 	 * aren't strictly due today. 'play' walks the line from the head and
-	 * asks the user for every user move along the way (no FSRS penalty for
-	 * prefix positions — they're a free pass when answered correctly, and
-	 * the lapse is suppressed when wrong). 'auto' animates straight to the
-	 * due card without stopping at prior positions. Defaults to 'play'.
+	 * asks the user for every user move along the way; those prefix moves
+	 * are graded like any other review (correct credits the card, wrong
+	 * lapses it), once per session. 'auto' animates straight to the due card
+	 * without stopping at prior positions. Defaults to 'play'.
 	 */
 	drillIntermediateMoves?: 'auto' | 'play';
 	/**
