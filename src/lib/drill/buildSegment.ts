@@ -26,12 +26,21 @@ const OVERDUE_CAP_MS = 24 * 60 * 60 * 1000;
  * "Well-learned" = the user has demonstrated reliable recall and the FSRS
  * schedule reflects it. Used by line-walk to decide whether a prefix card
  * gets drilled (reinforce recall) or animated past (already known). Card
- * must be in FSRS Review state and meet the configured stability threshold.
+ * must be graduated (past its introduction) and meet the configured
+ * stability threshold.
+ *
+ * Relearning (state 3) counts as graduated. It didn't used to, which meant a
+ * single slip on a trunk move pinned it into the recall pool of every walk
+ * passing through it, indefinitely — the lapse drops its stability, and a
+ * prefix step earns no FSRS credit to build that stability back. The lapsed
+ * card is still drilled on its own merits whenever it comes up due; it just
+ * no longer conscripts every other line into re-drilling it.
  */
 function isWellLearned(card: Card, threshold: number): boolean {
 	const state = card.fsrs.state;
+	const graduated = state === 2 || state === 3;
 	const stability = typeof card.fsrs.stability === 'number' ? card.fsrs.stability : 0;
-	return state === 2 && stability >= threshold;
+	return graduated && stability >= threshold;
 }
 
 interface LineWalkResult {
@@ -111,7 +120,10 @@ async function pickWithLineWalk(
 
 	for (const candidate of sortedPool) {
 		if (totalRemaining <= 0) break;
-		if (newRemaining <= 0) break;
+		// Note: an exhausted new-card budget must NOT end the loop — it only
+		// disqualifies walks that introduce new cards. Breaking here starved
+		// review cards out of the session entirely, and made a `newCap` of 0
+		// (the natural way to grind down a large backlog) build an empty one.
 		if (ledBy.has(candidate.fenKey)) continue;
 		if (admittedFenKeys.has(candidate.fenKey)) continue;
 
@@ -132,15 +144,21 @@ async function pickWithLineWalk(
 		}
 		walk.push(candidate);
 
-		// Budget the walk as if it were emitted whole. Trunk extraction
-		// can only reduce the actual cost (shared cards become one walk
-		// instead of N), so this is a conservative upper bound.
-		const newInWalk = walk.reduce(
+		// Budget the walk at its INCREMENTAL cost — the cards it adds that no
+		// already-admitted walk covers. Trunk extraction emits a shared run
+		// once, as its own walk, so charging each candidate for the full path
+		// back to the head billed the same trunk moves once per descendant:
+		// five lines sharing a six-move trunk were charged 30 events for the
+		// six the user actually plays. On a large repertoire (deep lines, heavy
+		// sharing) that over-charge consumed the whole session cap on moves
+		// that were never emitted, which is why a big due queue barely moved.
+		const incremental = walk.filter((c) => !admittedFenKeys.has(c.fenKey));
+		const newInWalk = incremental.reduce(
 			(sum, c) => sum + (!c.lastReview && !uniqueNewSeen.has(c.fenKey) ? 1 : 0),
 			0
 		);
-		const walkHasNew = walk.some((c) => !c.lastReview);
-		const eventCost = walk.length * (walkHasNew ? 2 : 1);
+		const walkHasNew = incremental.some((c) => !c.lastReview);
+		const eventCost = incremental.length * (walkHasNew ? 2 : 1);
 		if (eventCost > totalRemaining) continue;
 		if (newInWalk > newRemaining) continue;
 
