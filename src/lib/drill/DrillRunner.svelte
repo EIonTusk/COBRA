@@ -136,6 +136,10 @@
 	// ─────────────────────────────────────────────────────────────────────────
 	const drilledKeys = new SvelteSet<string>();
 	const introducedKeys = new SvelteSet<string>();
+	// Line-walk prefix steps that have already banked an FSRS review this
+	// session. The Train pass and the failed-walk drain re-run entries, and a
+	// prefix card shouldn't stack several reviews minutes apart off one sitting.
+	const prefixRatedKeys = new SvelteSet<string>();
 	const failedWalkIndices = new SvelteSet<number>();
 	const failedKeysByWalk = new SvelteMap<number, SvelteSet<string>>();
 	// Composite keys actually drilled BY each walk (Learn pass). Distinct
@@ -379,6 +383,7 @@
 	function snapshotPlannedSet() {
 		plannedKeys.clear();
 		pendingLapses.clear();
+		prefixRatedKeys.clear();
 		plannedSlotsDone = 0;
 		walkPhase = 'learn';
 		for (const e of entries) plannedKeys.add(ck(e.segIdx, e.card.fenKey));
@@ -828,14 +833,27 @@
 		// Drilling a missed-in-game position shouldn't shorten the next due
 		// date or count as a Good rating against a card the user may not have
 		// seen in normal review yet.
-		if (!isLineWalkStep && !isMistakeReviewMode) {
+		//
+		// A line-walk prefix step DOES count, symmetrically — a correct recall
+		// credits the card, a wrong one lapses it. It used to be a free pass in
+		// both directions, which closed a loop that issue #84 ran straight into:
+		// a trunk move below the well-learned threshold is re-walked every
+		// session, but earned no credit for being recalled, so it could never
+		// build the stability that would graduate it out of the walk pool. The
+		// user answered it correctly forever and kept being asked. Crediting it
+		// without also lapsing it would be worse than either — stability could
+		// only ever go up, inflating trunk intervals on recalls the user may
+		// have pattern-matched from the lead-in. Once per session, either way.
+		const alreadyRatedPrefix = isLineWalkStep && prefixRatedKeys.has(compositeKey);
+		if (!isMistakeReviewMode && !alreadyRatedPrefix) {
+			if (isLineWalkStep) prefixRatedKeys.add(compositeKey);
 			const updated = reviewCard(ratedCard, outcomeToRating(outcome), settings.fsrsParams);
 			await upsertCard(updated);
 		}
 		sessionDone += 1;
 
 		if (plannedKeys.has(compositeKey)) {
-			if (outcome === 'wrong' && !isIntroductionPass && !isLineWalkStep) {
+			if (outcome === 'wrong' && !isIntroductionPass) {
 				pendingLapses.add(compositeKey);
 			} else if (outcome !== 'wrong') {
 				pendingLapses.delete(compositeKey);
