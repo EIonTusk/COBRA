@@ -98,10 +98,18 @@ async function pickWithLineWalk(
 		const path = pathToFenKey(nodes, lineHead, c.fenKey);
 		depthByKey.set(c.fenKey, path ? path.length : -1);
 	}
-	// Depth-ASC: shallower candidates first so the trunk-extraction step
-	// emits shallow shared segments before deep tails, mirroring how a
-	// human builds a repertoire.
+	// Reviews claim the budget before new cards (as in pickBalancedDueCards),
+	// then depth-ASC within each: shallower candidates first so the
+	// trunk-extraction step emits shallow shared segments before deep tails,
+	// mirroring how a human builds a repertoire. Without the review-first
+	// split, breadth-first new cards — always the shallowest — outbid deeper
+	// due reviews every session and let them pile up overdue. Admission
+	// order only decides what fits the budget; emission order comes from the
+	// trie below.
 	const sortedPool = pool.slice().sort((a, b) => {
+		const nA = a.lastReview ? 0 : 1;
+		const nB = b.lastReview ? 0 : 1;
+		if (nA !== nB) return nA - nB;
 		const dA = depthByKey.get(a.fenKey) ?? -1;
 		const dB = depthByKey.get(b.fenKey) ?? -1;
 		if (dA !== dB) return dA - dB;
