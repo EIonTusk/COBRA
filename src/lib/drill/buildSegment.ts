@@ -1,6 +1,11 @@
 import type { AppSettings, Card, IdeaCard, Repertoire, RepertoireNode } from '$lib/types';
 import { colorToMove } from '$lib/chess/fen';
-import { pathToFenKey, reachableFenKeys, liveReachableFenKeys } from '$lib/tree/traversal';
+import {
+	pathToFenKey,
+	plyDepths,
+	reachableFenKeys,
+	liveReachableFenKeys
+} from '$lib/tree/traversal';
 import { buildLineFirstQueue } from '$lib/tree/lineOrder';
 import {
 	dueCards,
@@ -286,6 +291,31 @@ function sortByLineOrder(
 }
 
 /**
+ * Training-depth predicate (issue #86): keep only cards whose move falls
+ * within the first `maxMoves` full moves of its line, numbered from the
+ * repertoire's root position (the root's own move is move 1; if black is to
+ * move at the root, black's first reply is still move 1). A transposed
+ * position uses its shallowest route. Unreachable cards are dropped. Falsy /
+ * non-positive `maxMoves` = no limit.
+ *
+ * Exported for unit testing.
+ */
+export function depthFilter(
+	rep: Repertoire,
+	nodes: Map<string, RepertoireNode>,
+	maxMoves: number | undefined
+): (c: Card) => boolean {
+	if (!maxMoves || !Number.isFinite(maxMoves) || maxMoves <= 0) return () => true;
+	const depths = plyDepths(nodes, rep.rootFenKey);
+	const offset = colorToMove(rep.rootFenKey) === 'white' ? 0 : 1;
+	return (c) => {
+		const ply = depths.get(c.fenKey);
+		if (ply === undefined) return false;
+		return Math.floor((ply + offset) / 2) + 1 <= maxMoves;
+	};
+}
+
+/**
  * Build a single-repertoire drill segment for the given mode. Honours the
  * line-walk setting in `due` mode; falls back to balanced FSRS picking
  * otherwise. Mistake/retrain modes skip line-walk and just emit the
@@ -371,10 +401,21 @@ export async function buildSegment(
 		const edge = nodes.get(c.fenKey)?.children.find((e) => e.san === c.expectedSan);
 		return !edge?.disabled;
 	};
+	const withinDepth = depthFilter(rep, nodes, settings.drillMaxMoves);
 	let pool: Card[];
 	if (startFenKey) {
 		const subtree = reachableFenKeys(nodes, startFenKey);
-		pool = (await listCards(rep.id)).filter((c) => subtree.has(c.fenKey) && isTrainable(c));
+		pool = (await listCards(rep.id)).filter(
+			(c) => subtree.has(c.fenKey) && isTrainable(c) && withinDepth(c)
+		);
+	} else if (settings.drillMaxMoves) {
+		// Depth-limited: filter the whole due set before capping, otherwise a
+		// backlog of deep due cards could fill the fetch window and starve the
+		// shallow moves the user asked to focus on.
+		const poolCap = settings.drillSessionCap * 5;
+		pool = (await dueCards(rep.id, Date.now(), null))
+			.filter((c) => isTrainable(c) && withinDepth(c))
+			.slice(0, poolCap);
 	} else {
 		pool = (await dueCards(rep.id, Date.now(), settings.drillSessionCap * 5)).filter(isTrainable);
 	}

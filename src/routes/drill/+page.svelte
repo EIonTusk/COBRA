@@ -61,6 +61,16 @@
 <div class="mx-auto max-w-[1000px] px-4 py-4 md:px-6">
 	<div class="mb-5 flex items-center gap-3">
 		<span class="eyebrow text-[var(--color-parchment-300)]">Quick drill</span>
+		{#if settings?.drillMaxMoves && settings.drillMaxMoves > 0}
+			<span class="text-[var(--color-ink-600)]">·</span>
+			<a
+				href={resolve('/settings')}
+				class="eyebrow text-[var(--color-parchment-400)] transition-colors hover:text-[var(--color-parchment-100)]"
+				title="Training depth — change in Settings"
+			>
+				first {settings.drillMaxMoves} moves
+			</a>
+		{/if}
 		<a
 			href={resolve('/')}
 			class="ml-auto flex size-8 items-center justify-center rounded-[3px] text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]"

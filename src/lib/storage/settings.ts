@@ -80,6 +80,7 @@ export function defaultSettings(): AppSettings {
 		drillIntroSpeed: 'normal',
 		drillIntermediateMoves: 'play',
 		drillWellLearnedDays: 7,
+		drillMaxMoves: 0,
 		explorerSpeeds: ['blitz', 'rapid', 'classical'],
 		explorerRatings: [1600, 1800, 2000, 2200, 2500],
 		lichessApiToken: '',
