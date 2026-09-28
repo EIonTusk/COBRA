@@ -162,6 +162,7 @@ export async function resetAllFsrs(repertoireId: string): Promise<void> {
 		card.fsrs = fresh;
 		card.dueAt = now;
 		card.lastReview = undefined;
+		card.lastRating = undefined;
 		await cursor.update(card);
 		cursor = await cursor.continue();
 	}

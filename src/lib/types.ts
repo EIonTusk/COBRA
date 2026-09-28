@@ -183,6 +183,13 @@ export interface Card {
 	fsrs: FsrsCard;
 	lastReview?: number;
 	dueAt: number;
+	/**
+	 * FSRS rating of the last grade (1 Again … 4 Easy). Progressive unlock
+	 * (issue #86) uses it to tell a move whose last recall failed: stability
+	 * alone can't, since a lapse on a mature card can leave it above a day.
+	 * Undefined on cards graded before this field existed.
+	 */
+	lastRating?: number;
 }
 
 /**

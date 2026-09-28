@@ -1,3 +1,4 @@
+import { Rating } from 'ts-fsrs';
 import type { AppSettings, Card, IdeaCard, Repertoire, RepertoireNode } from '$lib/types';
 import { colorToMove } from '$lib/chess/fen';
 import {
@@ -294,6 +295,25 @@ function sortByLineOrder(
 }
 
 /**
+ * Soft-disabled lines drop out of the trainable set (issue #80). A card at
+ * position P is trainable only when P is still reachable through non-disabled
+ * edges AND P's own prepared move isn't the disabled head — the card lives at
+ * the parent, so live-reachability alone wouldn't skip a move disabled
+ * directly at P (P stays reachable from above).
+ */
+function trainableFilter(
+	rep: Repertoire,
+	nodes: Map<string, RepertoireNode>
+): (c: Card) => boolean {
+	const live = liveReachableFenKeys(nodes, rep.rootFenKey);
+	return (c) => {
+		if (!live.has(c.fenKey)) return false;
+		const edge = nodes.get(c.fenKey)?.children.find((e) => e.san === c.expectedSan);
+		return !edge?.disabled;
+	};
+}
+
+/**
  * Training-depth predicate (issue #86): keep only cards whose move falls
  * within the first `maxMoves` full moves of its line, numbered from the
  * repertoire's root position (the root's own move is move 1; if black is to
@@ -319,20 +339,29 @@ export function depthFilter(
 }
 
 /**
- * Stability (days) below which an introduced card counts as "shaky": its
- * last recall failed. With short-term steps off, FSRS never enters the
- * Relearning state, so a miss shows up only as collapsed stability — a
- * failed first answer leaves ~0.2d and a lapsed review ~0.6d, while any
- * pass lands at 2d or more.
+ * Fallback for cards graded before `lastRating` was recorded: stability
+ * (days) below which the last recall is taken to have failed. With
+ * short-term steps off, FSRS never enters the Relearning state, and a miss
+ * on a young card leaves ~0.2–0.6d while any pass lands at 2d or more.
  */
 const SHAKY_STABILITY_DAYS = 1;
+
+/**
+ * An introduced card whose last recall failed. Descendants' new moves wait
+ * until it's recalled again (progressive unlock, issue #86).
+ */
+export function isShaky(card: Card): boolean {
+	if (card.lastRating !== undefined) return card.lastRating === Rating.Again;
+	const stability = typeof card.fsrs.stability === 'number' ? card.fsrs.stability : 0;
+	return stability < SHAKY_STABILITY_DAYS;
+}
 
 /**
  * Order never-introduced cards for the drill pool: shallowest first across
  * the whole tree (ply depth from the root), then import order. With
  * `progressive` on (issue #86), a new card is only offered once every
- * earlier user move on its shortest line is ready — introduced and not
- * shaky, or itself a new card offered ahead of it in this same ordering (so
+ * earlier user move on its shortest line is ready — introduced and its
+ * last recall didn't fail (see isShaky), or itself a new card offered ahead of it in this same ordering (so
  * a fresh line still unlocks move by move within one session, with the
  * line walk teaching the parent first). Forgetting an early move therefore
  * pauses new material beneath it until it's recalled again.
@@ -357,8 +386,7 @@ export function orderNewCards(
 			const anc = cardByKey.get(k);
 			if (!anc) continue;
 			if (anc.lastReview) {
-				const stability = typeof anc.fsrs.stability === 'number' ? anc.fsrs.stability : 0;
-				if (stability < SHAKY_STABILITY_DAYS) return false;
+				if (isShaky(anc)) return false;
 			} else if (freshKeys.has(k) && !unlocked.has(k)) {
 				return false;
 			}
@@ -449,17 +477,7 @@ export async function buildSegment(
 	// regardless of FSRS due date — an explicit "practice here now" request
 	// would otherwise yield an empty session when nothing below is due.
 	// Grading still updates FSRS as normal; only the selection ignores due.
-	// Soft-disabled lines drop out of the trainable set. A card at position P
-	// is trainable only when P is still reachable through non-disabled edges
-	// AND P's own prepared move isn't the disabled head — the card lives at the
-	// parent, so live-reachability alone wouldn't skip a move disabled directly
-	// at P (P stays reachable from above).
-	const live = liveReachableFenKeys(nodes, rep.rootFenKey);
-	const isTrainable = (c: Card): boolean => {
-		if (!live.has(c.fenKey)) return false;
-		const edge = nodes.get(c.fenKey)?.children.find((e) => e.san === c.expectedSan);
-		return !edge?.disabled;
-	};
+	const isTrainable = trainableFilter(rep, nodes);
 	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
 	let pool: Card[];
 	if (startFenKey) {
@@ -536,9 +554,27 @@ export async function buildSegment(
 }
 
 /**
+ * Leaf cards the runner's leaves cycle may replay: already-introduced (a
+ * second pass over moves never taught would ask them unhinted, bypassing the
+ * new-card cap and progressive unlock), in a line that isn't disabled, and
+ * within the rep's training depth — the same limits a `due` drill applies.
+ */
+export async function collectReplayLeafCards(
+	rep: Repertoire,
+	nodes: Map<string, RepertoireNode>
+): Promise<Card[]> {
+	const isTrainable = trainableFilter(rep, nodes);
+	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
+	return (await collectLeafCards(rep, nodes)).filter(
+		(c) => !!c.lastReview && isTrainable(c) && withinDepth(c)
+	);
+}
+
+/**
  * Cards whose user-move position has no deeper user-move card in the
- * repertoire — the "tips" of every prepared line. Used by the runner's
- * leaves cycle to seed an extra second-pass for a segment's deepest moves.
+ * repertoire — the "tips" of every prepared line. The runner's leaves cycle
+ * replays these (via collectReplayLeafCards) as an extra second pass over a
+ * segment's deepest moves.
  */
 export async function collectLeafCards(
 	rep: Repertoire,
