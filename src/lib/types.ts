@@ -62,6 +62,14 @@ export interface Repertoire {
 	 * = full repertoire.
 	 */
 	drillMaxMoves?: number | null;
+	/**
+	 * Progressive unlock (issue #86): only introduce a new move once every
+	 * earlier user move on its line has been introduced and its last recall
+	 * succeeded. Forgetting an early move pauses new material beneath it.
+	 * Defaults to on (`undefined` = on); `false` introduces new moves purely
+	 * shallowest-first without the path check.
+	 */
+	progressiveUnlock?: boolean;
 }
 
 /**

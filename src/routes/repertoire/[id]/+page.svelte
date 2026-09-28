@@ -35,6 +35,7 @@
 		setCoverageGoal,
 		saveCoverageSnapshot,
 		setDrillMaxMoves,
+		setProgressiveUnlock,
 		setStartingPosition
 	} from '$lib/storage/repertoires';
 	import { furthestNonBranchingFenKey, pathToFenKey } from '$lib/tree/traversal';
@@ -238,6 +239,12 @@
 		const next = maxMoves > 0 ? Math.floor(maxMoves) : null;
 		await setDrillMaxMoves(rep.id, next);
 		rep = { ...rep, drillMaxMoves: next };
+	}
+
+	async function onProgressiveUnlockChange(on: boolean) {
+		if (!rep) return;
+		await setProgressiveUnlock(rep.id, on);
+		rep = { ...rep, progressiveUnlock: on };
 	}
 
 	async function onComputeCoverage() {
@@ -1029,6 +1036,29 @@
 					<span class="font-mono text-xs text-[var(--color-parchment-500)]">moves</span>
 				</div>
 			</div>
+			<label
+				class="mt-4 flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
+			>
+				<input
+					type="checkbox"
+					checked={rep.progressiveUnlock !== false}
+					onchange={(e) => onProgressiveUnlockChange((e.currentTarget as HTMLInputElement).checked)}
+					class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
+				/>
+				<div class="min-w-0 flex-1">
+					<span class="font-serif text-sm text-[var(--color-parchment-100)]">
+						Unlock deeper moves only after the path is learned
+					</span>
+					<p
+						class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+					>
+						New moves are always introduced shallowest-first across the whole tree. With this on, a
+						new move also waits until every earlier move on its line has been introduced and your
+						last answer to it was right — forget an early move and new material below it pauses
+						until you recall it again.
+					</p>
+				</div>
+			</label>
 		</section>
 
 		<!--

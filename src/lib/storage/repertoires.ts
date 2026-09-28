@@ -113,6 +113,17 @@ export async function setDrillMaxMoves(id: string, maxMoves: number | null): Pro
 	markRepDirty(id);
 }
 
+/** Toggle progressive unlock of new moves for the rep (issue #86). */
+export async function setProgressiveUnlock(id: string, on: boolean): Promise<void> {
+	const db = await getDB();
+	const rep = await db.get('repertoires', id);
+	if (!rep) return;
+	rep.progressiveUnlock = on;
+	rep.updatedAt = Date.now();
+	await db.put('repertoires', JSON.parse(JSON.stringify(rep)));
+	markRepDirty(id);
+}
+
 export async function setLichessStudyLink(
 	id: string,
 	link: LichessStudyLink | null

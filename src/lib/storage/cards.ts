@@ -22,12 +22,11 @@ export async function deleteCard(repertoireId: string, fenKey: string): Promise<
 export async function dueCards(
 	repertoireId: string,
 	now: number = Date.now(),
-	limit: number | null = 30
+	limit: number = 30
 ): Promise<Card[]> {
 	const db = await getDB();
 	const range = IDBKeyRange.bound([repertoireId, 0], [repertoireId, now]);
-	// `null` = no limit (every due card, still dueAt-ascending).
-	return db.getAllFromIndex('cards', 'by-repertoire-due', range, limit ?? undefined);
+	return db.getAllFromIndex('cards', 'by-repertoire-due', range, limit);
 }
 
 /**

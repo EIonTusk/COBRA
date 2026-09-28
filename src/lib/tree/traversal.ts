@@ -100,20 +100,35 @@ export function plyDepths(
 	nodes: Map<string, RepertoireNode>,
 	rootKey: string
 ): Map<string, number> {
+	return shortestPathTree(nodes, rootKey).depth;
+}
+
+/**
+ * BFS shortest-path tree from `rootKey`: ply `depth` of every reachable
+ * fenKey plus the `parent` it was first reached from (the root has none).
+ * Following `parent` up from a key walks its shortest line back to the root.
+ * Cycle-safe.
+ */
+export function shortestPathTree(
+	nodes: Map<string, RepertoireNode>,
+	rootKey: string
+): { depth: Map<string, number>; parent: Map<string, string> } {
 	const depth = new Map<string, number>([[rootKey, 0]]);
+	const parent = new Map<string, string>();
 	const queue: string[] = [rootKey];
-	while (queue.length > 0) {
-		const key = queue.shift()!;
+	for (let i = 0; i < queue.length; i++) {
+		const key = queue[i];
 		const node = nodes.get(key);
 		if (!node) continue;
 		const next = depth.get(key)! + 1;
 		for (const edge of node.children) {
 			if (depth.has(edge.toFenKey)) continue;
 			depth.set(edge.toFenKey, next);
+			parent.set(edge.toFenKey, key);
 			queue.push(edge.toFenKey);
 		}
 	}
-	return depth;
+	return { depth, parent };
 }
 
 /**

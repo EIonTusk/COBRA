@@ -4,16 +4,11 @@ import {
 	pathToFenKey,
 	plyDepths,
 	reachableFenKeys,
+	shortestPathTree,
 	liveReachableFenKeys
 } from '$lib/tree/traversal';
 import { buildLineFirstQueue } from '$lib/tree/lineOrder';
-import {
-	dueCards,
-	getCard,
-	listCards,
-	mistakeCards,
-	pickBalancedDueCards
-} from '$lib/storage/cards';
+import { getCard, listCards, mistakeCards, pickBalancedDueCards } from '$lib/storage/cards';
 import { dueIdeaCards } from '$lib/storage/ideaCards';
 import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 import { createFreshCard } from '$lib/fsrs/scheduler';
@@ -316,6 +311,62 @@ export function depthFilter(
 }
 
 /**
+ * Stability (days) below which an introduced card counts as "shaky": its
+ * last recall failed. With short-term steps off, FSRS never enters the
+ * Relearning state, so a miss shows up only as collapsed stability — a
+ * failed first answer leaves ~0.2d and a lapsed review ~0.6d, while any
+ * pass lands at 2d or more.
+ */
+const SHAKY_STABILITY_DAYS = 1;
+
+/**
+ * Order never-introduced cards for the drill pool: shallowest first across
+ * the whole tree (ply depth from the root), then import order. With
+ * `progressive` on (issue #86), a new card is only offered once every
+ * earlier user move on its shortest line is ready — introduced and not
+ * shaky, or itself a new card offered ahead of it in this same ordering (so
+ * a fresh line still unlocks move by move within one session, with the
+ * line walk teaching the parent first). Forgetting an early move therefore
+ * pauses new material beneath it until it's recalled again.
+ *
+ * New ancestors outside `fresh` (not trainable — e.g. a disabled line)
+ * don't block. Exported for unit testing; pure.
+ */
+export function orderNewCards(
+	fresh: Card[],
+	cardByKey: Map<string, Card>,
+	tree: { depth: Map<string, number>; parent: Map<string, string> },
+	progressive: boolean
+): Card[] {
+	const depthOf = (c: Card) => tree.depth.get(c.fenKey) ?? Infinity;
+	const sorted = fresh.slice().sort((a, b) => depthOf(a) - depthOf(b) || a.dueAt - b.dueAt);
+	if (!progressive) return sorted;
+
+	const freshKeys = new Set(fresh.map((c) => c.fenKey));
+	const unlocked = new Set<string>();
+	const pathReady = (fenKey: string): boolean => {
+		for (let k = tree.parent.get(fenKey); k !== undefined; k = tree.parent.get(k)) {
+			const anc = cardByKey.get(k);
+			if (!anc) continue;
+			if (anc.lastReview) {
+				const stability = typeof anc.fsrs.stability === 'number' ? anc.fsrs.stability : 0;
+				if (stability < SHAKY_STABILITY_DAYS) return false;
+			} else if (freshKeys.has(k) && !unlocked.has(k)) {
+				return false;
+			}
+		}
+		return true;
+	};
+	const out: Card[] = [];
+	for (const c of sorted) {
+		if (!pathReady(c.fenKey)) continue;
+		unlocked.add(c.fenKey);
+		out.push(c);
+	}
+	return out;
+}
+
+/**
  * Build a single-repertoire drill segment for the given mode. Honours the
  * line-walk setting in `due` mode; falls back to balanced FSRS picking
  * otherwise. Mistake/retrain modes skip line-walk and just emit the
@@ -408,16 +459,28 @@ export async function buildSegment(
 		pool = (await listCards(rep.id)).filter(
 			(c) => subtree.has(c.fenKey) && isTrainable(c) && withinDepth(c)
 		);
-	} else if (rep.drillMaxMoves && rep.drillMaxMoves > 0) {
-		// Depth-limited: filter the whole due set before capping, otherwise a
-		// backlog of deep due cards could fill the fetch window and starve the
-		// shallow moves the user asked to focus on.
-		const poolCap = settings.drillSessionCap * 5;
-		pool = (await dueCards(rep.id, Date.now(), null))
-			.filter((c) => isTrainable(c) && withinDepth(c))
-			.slice(0, poolCap);
 	} else {
-		pool = (await dueCards(rep.id, Date.now(), settings.drillSessionCap * 5)).filter(isTrainable);
+		// Reviews and new cards are pooled separately (issue #86). A single
+		// dueAt-ordered window let never-introduced cards — due since import,
+		// so older than any review — crowd reviews out entirely, and since PGN
+		// import seeds cards line by line, the new cards in that window were
+		// "the first N cards of the PGN": deep moves of the first lines ahead
+		// of the first move of later ones. New cards are instead ranked
+		// shallowest-first across the whole tree, then gated on their path.
+		const now = Date.now();
+		const poolCap = settings.drillSessionCap * 5;
+		const all = await listCards(rep.id);
+		const due = all
+			.filter((c) => c.dueAt <= now && isTrainable(c) && withinDepth(c))
+			.sort((a, b) => a.dueAt - b.dueAt);
+		const reviews = due.filter((c) => c.lastReview).slice(0, poolCap);
+		const fresh = orderNewCards(
+			due.filter((c) => !c.lastReview),
+			new Map(all.map((c) => [c.fenKey, c])),
+			shortestPathTree(nodes, rep.rootFenKey),
+			rep.progressiveUnlock !== false
+		).slice(0, poolCap);
+		pool = [...reviews, ...fresh];
 	}
 	const lineWalkOn = (settings.drillIntermediateMoves ?? 'play') === 'play';
 
