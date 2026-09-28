@@ -38,6 +38,9 @@ jobs:
       - name: Unit tests
         run: npm run test:unit -- --run
 
+      - name: Drill simulation tests
+        run: npm run test:sim
+
   e2e:
     runs-on: ubuntu-latest
     # Browsers + system deps are pre-installed in the image, so we never run

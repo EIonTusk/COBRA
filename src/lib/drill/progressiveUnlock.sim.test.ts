@@ -1,38 +1,26 @@
-// Multi-session simulation for issue #86. Each simulated day builds a real
-// `due` segment from IndexedDB, answers every card in it through the real
-// FSRS `reviewCard`, persists the result, and advances the clock a day —
-// so scheduling, pooling and progressive unlock interact the way they do
-// across real sessions, including after wrong answers.
-//
-// Simplification vs. DrillRunner: each card is rated once per session (the
-// runner's Learn/Train passes and end-of-session retries can rate a new or
-// failed card again the same day). That affects how fast stability grows,
-// not which cards the builder offers — which is what's under test here.
+// Multi-session simulation for issue #86. Each simulated day builds real
+// drill segments from IndexedDB, plays them the way DrillRunner does (Learn
+// and Train passes, failed-move retries, wrong-answer re-queues, the leaves
+// cycle — see drillSessionModel.testutil.ts) with grading through the same
+// SessionGrader, persists every grade, and advances the clock a day. So
+// scheduling, pooling, progressive unlock and in-session repetition interact
+// the way they do across real sessions, including after wrong answers.
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Rating } from 'ts-fsrs';
-import type { Card, Repertoire, RepertoireNode } from '$lib/types';
+import type { Card, Color, Repertoire, RepertoireNode, StoredMistake } from '$lib/types';
 import { getDB } from '$lib/storage/db';
 import { defaultSettings } from '$lib/storage/settings';
-import { createFreshCard, reviewCard } from '$lib/fsrs/scheduler';
-import { buildSegment } from './buildSegment';
+import { createFreshCard } from '$lib/fsrs/scheduler';
+import { buildSegment, isShaky } from './buildSegment';
+import { buildQuickDrillSegments } from './quickDrill';
+import { playSession, type Answer, type GradeEvent } from './drillSessionModel.testutil';
+import type { DrillSegment } from './types';
 
-const REP = 'rep-sim';
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 0, 1, 9);
 
-// Cards live at white-to-move keys (" w"), matching `colorToMove`.
-const rep: Repertoire = {
-	id: REP,
-	name: 'Sim',
-	color: 'white',
-	rootFen: 'startpos',
-	rootFenKey: 'n0 w',
-	createdAt: 0,
-	updatedAt: 0
-};
-
-interface SimTree {
+interface SimRep {
+	rep: Repertoire;
 	nodes: RepertoireNode[];
 	/** Card fenKeys in PGN-import (depth-first, line by line) order. */
 	importOrder: string[];
@@ -43,142 +31,230 @@ interface SimTree {
 }
 
 /**
- * White repertoire, one prepared move per position, two opponent replies
- * after each: `userMoves` deep → 2^userMoves − 1 cards. Built depth-first so
- * card creation order matches a PGN import.
+ * A repertoire for `color`, one prepared move per position and two opponent
+ * replies to each (a black rep also branches on white's first move):
+ * `userMoves` deep. Keys end in " w"/" b" so `colorToMove` reads them. Built
+ * depth-first so card creation order matches a PGN import.
  */
-function buildTree(userMoves: number): SimTree {
+function buildRep(id: string, color: Color, userMoves: number): SimRep {
 	const nodes: RepertoireNode[] = [];
 	const importOrder: string[] = [];
 	const depth = new Map<string, number>();
 	const parentCard = new Map<string, string>();
-	let id = 0;
+	const user = color === 'white' ? 'w' : 'b';
+	const opp = color === 'white' ? 'b' : 'w';
+	let n = 0;
+	const key = (side: string) => `${id}-${n++} ${side}`;
 	const edge = (to: string) => ({ san: 'm', uci: 'm', toFenKey: to });
-	const visit = (key: string, d: number, parent: string | null) => {
-		importOrder.push(key);
-		depth.set(key, d);
-		if (parent) parentCard.set(key, parent);
-		const opp = `n${++id} b`;
-		nodes.push({ repertoireId: REP, fenKey: key, children: [edge(opp)] });
+	const userNode = (k: string, d: number, parent: string | null) => {
+		importOrder.push(k);
+		depth.set(k, d);
+		if (parent) parentCard.set(k, parent);
+		const o = key(opp);
+		nodes.push({ repertoireId: id, fenKey: k, children: [edge(o)] });
+		oppNode(o, d, k);
+	};
+	const oppNode = (k: string, d: number, parent: string | null) => {
 		if (d === userMoves - 1) {
-			nodes.push({ repertoireId: REP, fenKey: opp, children: [] });
+			nodes.push({ repertoireId: id, fenKey: k, children: [] });
 			return;
 		}
-		const kids = [`n${++id} w`, `n${++id} w`];
-		nodes.push({ repertoireId: REP, fenKey: opp, children: kids.map(edge) });
-		for (const k of kids) visit(k, d + 1, key);
+		const kids = [key(user), key(user)];
+		nodes.push({ repertoireId: id, fenKey: k, children: kids.map(edge) });
+		for (const c of kids) userNode(c, parent === null ? 0 : d + 1, parent);
 	};
-	visit(rep.rootFenKey, 0, null);
-	return { nodes, importOrder, depth, parentCard };
+	const root = key(color === 'white' ? user : opp);
+	if (color === 'white') userNode(root, 0, null);
+	else oppNode(root, -1, null);
+	const rep: Repertoire = {
+		id,
+		name: id,
+		color,
+		rootFen: 'startpos',
+		rootFenKey: root,
+		createdAt: 0,
+		updatedAt: 0
+	};
+	return { rep, nodes, importOrder, depth, parentCard };
 }
 
-async function seed(tree: SimTree) {
+async function seed(reps: SimRep[], mistakes: StoredMistake[] = []) {
 	const db = await getDB();
-	const tx = db.transaction(['nodes', 'cards'], 'readwrite');
-	await tx.objectStore('nodes').clear();
-	await tx.objectStore('cards').clear();
-	for (const n of tree.nodes) await tx.objectStore('nodes').put(n);
-	for (let i = 0; i < tree.importOrder.length; i++) {
-		await tx.objectStore('cards').put(createFreshCard(REP, tree.importOrder[i], 'm', T0 - DAY + i));
+	const tx = db.transaction(['repertoires', 'nodes', 'cards', 'mistakes'], 'readwrite');
+	for (const s of ['repertoires', 'nodes', 'cards', 'mistakes'] as const) {
+		await tx.objectStore(s).clear();
 	}
+	for (const r of reps) {
+		await tx.objectStore('repertoires').put(r.rep);
+		for (const n of r.nodes) await tx.objectStore('nodes').put(n);
+		for (let i = 0; i < r.importOrder.length; i++) {
+			await tx
+				.objectStore('cards')
+				.put(createFreshCard(r.rep.id, r.importOrder[i], 'm', T0 - DAY + i));
+		}
+	}
+	for (const m of mistakes) await tx.objectStore('mistakes').put(m);
 	await tx.done;
 }
 
-type Policy = (fenKey: string, day: number, timesAsked: number) => boolean;
-
-interface SimResult {
-	introducedDay: Map<string, number>;
-	/** Sessions where a new card was offered below a shaky / unseen ancestor. */
-	gateViolations: string[];
-	/** Days whose session had due reviews available but drilled none. */
-	reviewStarvedDays: number[];
-	/** Largest overdue gap (days) of any review at session build time. */
-	maxOverdueDays: number;
-	/** Days on which each card was drilled. */
-	drilledOn: Map<string, number[]>;
-	/** Stability of each card at the start of each day. */
-	stabilityAt: (fenKey: string, day: number) => number | undefined;
+interface SimOptions {
+	days: number;
+	/** Unhinted answer model; `day` is the simulated day index. */
+	answer: (p: Parameters<Answer>[0], day: number) => boolean;
+	/** 'play' = line walk on (default setting), 'auto' = off. */
+	walk?: 'play' | 'auto';
+	/** Build the quick drill across all reps instead of one rep's drill. */
+	quick?: boolean;
+	/** Extra practice sessions run after each day's due drill. */
+	extra?: (day: number) => ('mistakes' | 'retrain')[];
+	mistakes?: StoredMistake[];
 }
 
-async function simulate(
-	tree: SimTree,
-	days: number,
-	policy: Policy,
-	repOverrides: Partial<Repertoire> = {}
-): Promise<SimResult> {
-	await seed(tree);
+interface SimResult {
+	/** Day each `${repId}|${fenKey}` got its first grade. */
+	introducedDay: Map<string, number>;
+	/** First grades that broke the progressive-unlock rule. */
+	gateViolations: string[];
+	/** `${repId}@day` where due reviews existed but the drill held none. */
+	reviewStarved: string[];
+	/** Largest overdue gap (days) of any review at session build time. */
+	maxOverdueDays: number;
+	/**
+	 * Reviews 2+ days overdue that a session neither presented, nor dropped
+	 * because an earlier move on their line was missed in that session, nor
+	 * left out of an auto-mode session that was already at its card cap.
+	 */
+	unexplainedOverdue: string[];
+	/** All grade events, tagged with the day and session kind. */
+	events: (GradeEvent & { day: number; kind: string })[];
+	/** Stored card at the start of each day. */
+	cardAt: (repId: string, fenKey: string, day: number) => Card | undefined;
+}
+
+async function simulate(reps: SimRep[], opts: SimOptions): Promise<SimResult> {
+	await seed(reps, opts.mistakes);
 	const settings = {
 		...defaultSettings(),
-		drillIntermediateMoves: 'play' as const,
+		drillIntermediateMoves: opts.walk ?? 'play',
 		drillSessionCap: 30,
 		dailyNewCardCap: 10
 	};
-	const r = { ...rep, ...repOverrides };
 	const db = await getDB();
+	const byId = new Map(reps.map((r) => [r.rep.id, r]));
 	const introducedDay = new Map<string, number>();
 	const gateViolations: string[] = [];
-	const reviewStarvedDays: number[] = [];
-	const drilledOn = new Map<string, number[]>();
-	const asked = new Map<string, number>();
-	const stabilityLog = new Map<string, Map<number, number>>();
+	const reviewStarved: string[] = [];
+	const unexplainedOverdue: string[] = [];
+	const events: SimResult['events'] = [];
+	const snapshots: Map<string, Card>[] = [];
 	let maxOverdueDays = 0;
 
-	for (let day = 0; day < days; day++) {
+	for (let day = 0; day < opts.days; day++) {
 		const now = T0 + day * DAY;
 		vi.setSystemTime(now);
-		const before = new Map((await db.getAll('cards')).map((c) => [c.fenKey, c] as [string, Card]));
+		const before = new Map<string, Card>(
+			(await db.getAll('cards')).map((c) => [`${c.repertoireId}|${c.fenKey}`, c])
+		);
+		snapshots.push(before);
 		for (const c of before.values()) {
-			if (!c.lastReview) continue;
-			let log = stabilityLog.get(c.fenKey);
-			if (!log) stabilityLog.set(c.fenKey, (log = new Map()));
-			log.set(day, c.fsrs.stability);
-		}
-		const dueReviews = [...before.values()].filter((c) => c.lastReview && c.dueAt <= now);
-		for (const c of dueReviews) maxOverdueDays = Math.max(maxOverdueDays, (now - c.dueAt) / DAY);
-
-		const seg = await buildSegment(r, 'due', settings);
-		const order = [...new Set(seg.cards.map((c) => c.fenKey))];
-		if (dueReviews.length > 0 && !order.some((k) => before.get(k)!.lastReview)) {
-			reviewStarvedDays.push(day);
+			if (c.lastReview && c.dueAt <= now) {
+				maxOverdueDays = Math.max(maxOverdueDays, (now - c.dueAt) / DAY);
+			}
 		}
 
-		// Gate invariant, checked against the state the session was built from.
-		if (r.progressiveUnlock !== false) {
-			order.forEach((k, i) => {
-				if (before.get(k)!.lastReview) return;
-				for (let a = tree.parentCard.get(k); a; a = tree.parentCard.get(a)) {
-					const anc = before.get(a)!;
-					const ok = anc.lastReview
-						? anc.fsrs.stability >= 1
-						: order.indexOf(a) !== -1 && order.indexOf(a) < i;
-					if (!ok) gateViolations.push(`day ${day}: ${k} offered below ${a}`);
-				}
-			});
+		const segments: DrillSegment[] = opts.quick
+			? await buildQuickDrillSegments(
+					reps.map((r) => r.rep),
+					settings
+				)
+			: [await buildSegment(reps[0].rep, 'due', settings)];
+		const played = await playSession(
+			segments,
+			(p) => opts.answer(p, day),
+			settings.fsrsParams,
+			new Date(now)
+		);
+		events.push(...played.map((e) => ({ ...e, day, kind: 'due' })));
+
+		// Long-overdue reviews must be drilled, unless the session cut their
+		// line after a miss above them (auto mode's pruneDeeperInLine).
+		const presented = new Set(played.map((e) => `${e.repId}|${e.fenKey}`));
+		const missed = new Set(
+			played.filter((e) => e.outcome === 'wrong').map((e) => `${e.repId}|${e.fenKey}`)
+		);
+		for (const [k, c] of before) {
+			if (!c.lastReview || now - c.dueAt < 2 * DAY || presented.has(k)) continue;
+			const sim = byId.get(c.repertoireId)!;
+			let prunedBelowMiss = false;
+			for (let a = sim.parentCard.get(c.fenKey); a; a = sim.parentCard.get(a)) {
+				if (missed.has(`${c.repertoireId}|${a}`)) prunedBelowMiss = true;
+			}
+			// Auto mode's pickBalancedDueCards stops at drillSessionCap cards;
+			// past that, reviews wait for the next session (most overdue first).
+			const seg = segments.find((sg) => sg.rep.id === c.repertoireId);
+			const leftOutOfFullSession =
+				!!seg &&
+				seg.walkStarts.length === 0 &&
+				!seg.cards.some((x) => x.fenKey === c.fenKey) &&
+				seg.dueOriginalKeys.size >= settings.drillSessionCap;
+			if (!prunedBelowMiss && !leftOutOfFullSession) {
+				unexplainedOverdue.push(`day ${day}: ${k}`);
+			}
 		}
 
-		for (const k of order) {
-			const card = (await db.get('cards', [REP, k]))!;
-			if (!card.lastReview) introducedDay.set(k, day);
-			const n = (asked.get(k) ?? 0) + 1;
-			asked.set(k, n);
-			const correct = policy(k, day, n);
-			await db.put(
-				'cards',
-				reviewCard(card, correct ? Rating.Good : Rating.Again, settings.fsrsParams, new Date(now))
+		// Reviews starved: a rep had due reviews but its drill graded none.
+		for (const r of reps) {
+			const hadDue = [...before.values()].some(
+				(c) => c.repertoireId === r.rep.id && c.lastReview && c.dueAt <= now
 			);
-			const list = drilledOn.get(k) ?? [];
-			list.push(day);
-			drilledOn.set(k, list);
+			const reviewed = played.some((e) => e.repId === r.rep.id && e.before.lastReview);
+			if (hadDue && !reviewed) reviewStarved.push(`${r.rep.id}@${day}`);
+		}
+
+		// Progressive-unlock invariant on every first grade this session: each
+		// earlier user move on its line was ready when the session was built,
+		// or itself got its first grade earlier in this same session.
+		const firstGradedAt = new Map<string, number>();
+		played.forEach((e, i) => {
+			const k = `${e.repId}|${e.fenKey}`;
+			if (!before.get(k)!.lastReview && e.after && !firstGradedAt.has(k)) {
+				firstGradedAt.set(k, i);
+				introducedDay.set(k, day);
+			}
+		});
+		for (const [k, i] of firstGradedAt) {
+			const [repId, fenKey] = k.split('|');
+			const sim = byId.get(repId)!;
+			if (sim.rep.progressiveUnlock === false) continue;
+			for (let a = sim.parentCard.get(fenKey); a; a = sim.parentCard.get(a)) {
+				const anc = before.get(`${repId}|${a}`)!;
+				const ok = anc.lastReview
+					? !isShaky(anc)
+					: (firstGradedAt.get(`${repId}|${a}`) ?? Infinity) < i;
+				if (!ok) gateViolations.push(`day ${day}: ${k} first graded below ${a}`);
+			}
+		}
+
+		for (const kind of opts.extra?.(day) ?? []) {
+			const segs = await Promise.all(reps.map((r) => buildSegment(r.rep, kind, settings)));
+			const extra = await playSession(
+				segs.filter((s) => s.cards.length > 0),
+				(p) => opts.answer(p, day),
+				settings.fsrsParams,
+				new Date(now + 60_000)
+			);
+			events.push(...extra.map((e) => ({ ...e, day, kind })));
 		}
 	}
 
 	return {
 		introducedDay,
 		gateViolations,
-		reviewStarvedDays,
+		reviewStarved,
 		maxOverdueDays,
-		drilledOn,
-		stabilityAt: (k, d) => stabilityLog.get(k)?.get(d)
+		unexplainedOverdue,
+		events,
+		cardAt: (repId, fenKey, day) => snapshots[day]?.get(`${repId}|${fenKey}`)
 	};
 }
 
@@ -191,11 +267,17 @@ function rng(seed: number) {
 	};
 }
 
-function maxDepth(tree: SimTree) {
-	return Math.max(...tree.depth.values());
+const allRight = () => true;
+
+/** Keys of every card below `anc` in the rep. */
+function below(sim: SimRep, anc: string): string[] {
+	return sim.importOrder.filter((k) => {
+		for (let a = sim.parentCard.get(k); a; a = sim.parentCard.get(a)) if (a === anc) return true;
+		return false;
+	});
 }
 
-describe('multi-session drill simulation (issue #86)', { timeout: 120_000 }, () => {
+describe('multi-session drill simulation (issue #86)', { timeout: 180_000 }, () => {
 	beforeEach(() => {
 		vi.useFakeTimers({ toFake: ['Date'] });
 	});
@@ -203,94 +285,197 @@ describe('multi-session drill simulation (issue #86)', { timeout: 120_000 }, () 
 		vi.useRealTimers();
 	});
 
-	const tree = buildTree(7); // 127 cards
+	it('all answers right: everything introduced breadth-first, reviews never starved', async () => {
+		// 255 cards — more than the 150-card window the old pool used.
+		const sim = buildRep('w', 'white', 8);
+		const res = await simulate([sim], { days: 45, answer: allRight });
 
-	it('all answers right: introduces everything, breadth-first, without starving reviews', async () => {
-		// 255 cards — more than the old 150-card due window, which is what let
-		// import order leak into the new-card order and crowd out reviews.
-		const tree = buildTree(8);
-		const res = await simulate(tree, 45, () => true);
-
-		expect(res.introducedDay.size).toBe(tree.importOrder.length);
+		expect(res.introducedDay.size).toBe(sim.importOrder.length);
 		expect(res.gateViolations).toEqual([]);
-		expect(res.reviewStarvedDays).toEqual([]);
+		expect(res.reviewStarved).toEqual([]);
 		expect(res.maxOverdueDays).toBeLessThanOrEqual(1);
-
-		// Breadth-first across the whole tree: every move at depth d is
-		// introduced no later than any move at depth d + 1.
-		for (let d = 0; d < maxDepth(tree); d++) {
-			const days = (dd: number) =>
-				tree.importOrder
-					.filter((k) => tree.depth.get(k) === dd)
-					.map((k) => res.introducedDay.get(k)!);
-			expect(Math.max(...days(d))).toBeLessThanOrEqual(Math.min(...days(d + 1)));
+		expect(res.unexplainedOverdue).toEqual([]);
+		// Every move at depth d is introduced no later than any at depth d + 1.
+		const dayOf = (k: string) => res.introducedDay.get(`w|${k}`)!;
+		for (let d = 0; d < 7; d++) {
+			const at = (dd: number) => sim.importOrder.filter((k) => sim.depth.get(k) === dd).map(dayOf);
+			expect(Math.max(...at(d))).toBeLessThanOrEqual(Math.min(...at(d + 1)));
 		}
+	});
+
+	it('a new move is recalled unhinted in its Train pass the day it is introduced', async () => {
+		const sim = buildRep('w', 'white', 4);
+		const res = await simulate([sim], { days: 1, answer: allRight });
+		const first = sim.importOrder[0];
+		const shown = res.events.filter((e) => e.fenKey === first);
+		expect(shown.map((e) => [e.phase, e.hinted, e.outcome])).toEqual([
+			['learn', true, 'peeked'],
+			['train', false, 'correct']
+		]);
+		// The recall is what's stored: a Good from new, not a Hard.
+		expect(shown[1].after!.fsrs.stability).toBeGreaterThanOrEqual(2);
+	});
+
+	it('a miss followed by a correct retry in the same session still counts as a lapse', async () => {
+		const sim = buildRep('w', 'white', 4);
+		const weak = sim.importOrder[0];
+		// The first time `weak` comes up due in its own right (not as a walk
+		// prefix, which is graded once per session anyway), miss it on the
+		// first try and get the in-session retry right.
+		let missDay = -1;
+		const res = await simulate([sim], {
+			days: 12,
+			answer: (p, day) => {
+				if (p.fenKey !== weak || p.hinted || p.lineWalkStep) return true;
+				if (missDay === -1 && p.attempt === 0) missDay = day;
+				return !(day === missDay && p.attempt === 0);
+			}
+		});
+		expect(missDay).toBeGreaterThan(0);
+		const thatDay = res.events.filter((e) => e.day === missDay && e.fenKey === weak);
+		expect(thatDay.map((e) => [e.phase, e.outcome])).toEqual([
+			['learn', 'wrong'],
+			['retry', 'correct']
+		]);
+		expect(thatDay[1].after).toBeNull(); // the retry doesn't overwrite the miss
+		const next = res.cardAt('w', weak, missDay + 1)!;
+		expect(next.fsrs.lapses).toBe(1);
+		expect(isShaky(next)).toBe(true);
 	});
 
 	it('a forgotten early move pauses only its own subtree until it is recalled', async () => {
-		// Second move of the left branch: answered wrong the first 3 times asked.
-		const weak = tree.importOrder[1];
-		const sibling = tree.importOrder.find((k) => tree.depth.get(k) === 1 && k !== weak)!;
-		const below = (anc: string) =>
-			tree.importOrder.filter((k) => {
-				for (let a = tree.parentCard.get(k); a; a = tree.parentCard.get(a))
-					if (a === anc) return true;
-				return false;
-			});
-
-		const res = await simulate(tree, 40, (k, _day, n) => !(k === weak && n <= 3));
-
-		expect(res.gateViolations).toEqual([]);
-		expect(res.reviewStarvedDays).toEqual([]);
-
-		// The weak move keeps coming back while it's shaky…
-		const weakDays = res.drilledOn.get(weak)!;
-		expect(weakDays.length).toBeGreaterThanOrEqual(4);
-		const recoveredDay = weakDays[3]; // first correct answer
-		expect(weakDays.slice(0, 4)).toEqual(
-			weakDays.slice(0, 4).map((_, i) => weakDays[0] + i) // daily, no gaps
-		);
-
-		// Days whose session was built while the weak move was shaky. (Moves
-		// below it may already have been introduced on day 0, alongside it,
-		// before it was ever answered wrong — that's by design.)
-		const shakyDays: number[] = [];
-		for (let d = weakDays[0] + 1; d <= recoveredDay; d++) {
-			if ((res.stabilityAt(weak, d) ?? Infinity) < 1) shakyDays.push(d);
-		}
-		expect(shakyDays.length).toBe(3);
-
-		// …nothing new beneath it is introduced while it's shaky…
-		for (const k of below(weak)) {
-			expect(shakyDays).not.toContain(res.introducedDay.get(k));
-		}
-		// …its subtree resumes once it's answered right…
-		expect(below(weak).some((k) => res.introducedDay.get(k)! > recoveredDay)).toBe(true);
-		// …while the sibling branch keeps progressing in the meantime…
-		expect(below(sibling).some((k) => shakyDays.includes(res.introducedDay.get(k)!))).toBe(true);
-		// …and everything is eventually learned.
-		expect(res.introducedDay.size).toBe(tree.importOrder.length);
-	});
-
-	it('random mistakes (25%): gate holds every session, no deadlock, no review starvation', async () => {
-		const rand = rng(86);
-		const res = await simulate(tree, 70, () => rand() >= 0.25);
-
-		expect(res.gateViolations).toEqual([]);
-		expect(res.reviewStarvedDays).toEqual([]);
-		expect(res.maxOverdueDays).toBeLessThanOrEqual(1);
-		expect(res.introducedDay.size).toBe(tree.importOrder.length);
-	});
-
-	it('with progressive unlock off, new moves still arrive below a shaky move', async () => {
-		const weak = tree.importOrder[1];
-		const res = await simulate(tree, 40, (k, _day, n) => !(k === weak && n <= 3), {
-			progressiveUnlock: false
+		const sim = buildRep('w', 'white', 7); // 127 cards
+		const weak = sim.importOrder[1]; // second move, left branch
+		const sibling = sim.importOrder.find((k) => sim.depth.get(k) === 1 && k !== weak)!;
+		// First unhinted attempt at `weak` is wrong on its first 3 review days;
+		// in-session retries are right (the answer was just shown).
+		const missDays = new Set<number>();
+		const res = await simulate([sim], {
+			days: 40,
+			answer: (p, day) => {
+				if (p.fenKey !== weak || p.attempt > 0 || p.phase !== 'learn') return true;
+				if (missDays.size < 3 || missDays.has(day)) {
+					missDays.add(day);
+					return false;
+				}
+				return true;
+			}
 		});
-		const weakDays = res.drilledOn.get(weak)!;
-		const recoveredDay = weakDays[3];
-		const child = tree.importOrder.find((k) => tree.parentCard.get(k) === weak)!;
-		expect(res.introducedDay.get(child)!).toBeLessThanOrEqual(recoveredDay);
-		expect(res.introducedDay.size).toBe(tree.importOrder.length);
+
+		expect(res.gateViolations).toEqual([]);
+		expect(res.reviewStarved).toEqual([]);
+		expect(res.unexplainedOverdue).toEqual([]);
+
+		const shakyDays = [...Array(40).keys()].filter((d) => {
+			const c = res.cardAt('w', weak, d);
+			return !!c?.lastReview && isShaky(c);
+		});
+		expect(shakyDays.length).toBeGreaterThanOrEqual(3);
+		const introduced = (k: string) => res.introducedDay.get(`w|${k}`);
+		// Nothing new beneath it while it's shaky…
+		for (const k of below(sim, weak)) expect(shakyDays).not.toContain(introduced(k));
+		// …the sibling branch keeps progressing meanwhile…
+		expect(below(sim, sibling).some((k) => shakyDays.includes(introduced(k)!))).toBe(true);
+		// …and everything is learned in the end.
+		expect(res.introducedDay.size).toBe(sim.importOrder.length);
+	});
+
+	it.each(['play', 'auto'] as const)(
+		'random mistakes, walk=%s: gate holds, no deadlock, reviews not starved',
+		async (walk) => {
+			const sim = buildRep('w', 'white', 7);
+			const rand = rng(86);
+			const res = await simulate([sim], {
+				days: 70,
+				walk,
+				// 25% miss on a first unhinted attempt, 5% on an in-session retry.
+				answer: (p) => rand() >= (p.attempt === 0 ? 0.25 : 0.05)
+			});
+			expect(res.gateViolations).toEqual([]);
+			expect(res.reviewStarved).toEqual([]);
+			expect(res.unexplainedOverdue).toEqual([]);
+			// With line walk off, a miss drops the rest of its line for the
+			// session, so reviews below repeatedly-missed moves wait longer.
+			expect(res.maxOverdueDays).toBeLessThanOrEqual(walk === 'play' ? 1 : 10);
+			expect(res.introducedDay.size).toBe(sim.importOrder.length);
+		}
+	);
+
+	it('quick drill across a white and a black repertoire', async () => {
+		const white = buildRep('w', 'white', 6);
+		const black = buildRep('b', 'black', 6);
+		const rand = rng(7);
+		const res = await simulate([white, black], {
+			days: 60,
+			quick: true,
+			answer: (p) => rand() >= (p.attempt === 0 ? 0.2 : 0.05)
+		});
+		expect(res.gateViolations).toEqual([]);
+		// Shared daily budgets: never more than 10 first grades a day in total.
+		const perDay = new Map<number, number>();
+		for (const d of res.introducedDay.values()) perDay.set(d, (perDay.get(d) ?? 0) + 1);
+		expect(Math.max(...perDay.values())).toBeLessThanOrEqual(10);
+		// Both repertoires get fully learned, each breadth-first on its own.
+		for (const sim of [white, black]) {
+			const id = sim.rep.id;
+			expect(sim.importOrder.every((k) => res.introducedDay.has(`${id}|${k}`))).toBe(true);
+		}
+		expect(res.reviewStarved).toEqual([]);
+		expect(res.unexplainedOverdue).toEqual([]);
+	});
+
+	it('mistakes and retrain drills never touch the schedule', async () => {
+		const sim = buildRep('w', 'white', 6);
+		const gameMistakes: StoredMistake[] = sim.importOrder.slice(0, 6).map((fenKey, i) => ({
+			id: `g${i}:w:${fenKey}`,
+			gameId: `g${i}`,
+			gameUrl: '',
+			playedAt: T0,
+			detectedAt: T0 + i,
+			speed: 'blitz',
+			opponent: 'x',
+			color: 'white',
+			repertoireId: 'w',
+			repertoireName: 'w',
+			fenKey,
+			fen: fenKey,
+			playedSan: 'z',
+			expectedSan: 'm',
+			plyOffTree: 0,
+			status: 'pending',
+			correctCount: 0
+		}));
+		const rand = rng(3);
+		const answer = (p: Parameters<Answer>[0]) => rand() >= (p.attempt === 0 ? 0.3 : 0.05);
+		const withExtras = await simulate([sim], {
+			days: 30,
+			answer,
+			mistakes: gameMistakes,
+			extra: (day) => (day % 3 === 2 ? ['mistakes', 'retrain'] : [])
+		});
+
+		const extras = withExtras.events.filter((e) => e.kind !== 'due');
+		expect(extras.some((e) => e.kind === 'mistakes')).toBe(true);
+		expect(extras.some((e) => e.kind === 'retrain')).toBe(true);
+		// Practice only: nothing graded into FSRS…
+		expect(extras.every((e) => e.after === null)).toBe(true);
+		// …and the stored cards are untouched by those sessions.
+		for (const e of extras) {
+			const nextDay = withExtras.cardAt(e.repId, e.fenKey, e.day + 1);
+			if (nextDay) {
+				const dueThatDay = withExtras.events.filter(
+					(x) => x.kind === 'due' && x.day === e.day && x.fenKey === e.fenKey && x.after
+				);
+				const expected = dueThatDay.length
+					? dueThatDay[dueThatDay.length - 1].after!
+					: withExtras.cardAt(e.repId, e.fenKey, e.day)!;
+				expect(nextDay.fsrs).toEqual(expected.fsrs);
+			}
+		}
+		// Retrain resolves game mistakes answered correctly.
+		const db = await getDB();
+		const stored = await db.getAll('mistakes');
+		expect(stored.some((m) => m.status === 'corrected')).toBe(true);
+		expect(withExtras.gateViolations).toEqual([]);
 	});
 });

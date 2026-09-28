@@ -105,7 +105,18 @@ export default defineConfig({
 					name: 'unit',
 					environment: 'node',
 					include: ['src/**/*.{test,spec}.{js,ts}'],
-					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}']
+					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}', 'src/**/*.sim.test.ts']
+				}
+			},
+			{
+				// Multi-session drill simulations: slow (minutes of simulated
+				// sessions over fake IndexedDB), so kept out of the unit run and
+				// the pre-commit hook. `npm run test:sim`; CI runs both.
+				extends: './vite.config.ts',
+				test: {
+					name: 'sim',
+					environment: 'node',
+					include: ['src/**/*.sim.test.ts']
 				}
 			}
 		]
