@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { Card, Repertoire, RepertoireNode } from '$lib/types';
 import { getDB } from '$lib/storage/db';
 import { defaultSettings } from '$lib/storage/settings';
-import { buildSegment } from './buildSegment';
+import { buildSegment, depthFilter } from './buildSegment';
 
 const REP = 'rep-1';
 const ROOT = 'root';
@@ -174,5 +174,79 @@ describe('buildSegment disabled lines', () => {
 		const seg = await buildSegment(rep, 'due', settings(), { startFenKey: 'B' });
 		// Subtree of B is {C, D, E}; D→E is disabled, so only C remains.
 		expect(keys(seg.cards)).toEqual(['C']);
+	});
+});
+
+// Training depth (issue #86): only drill moves within the first N moves of
+// each line. Test keys aren't real FENs, so `colorToMove` reads the root as
+// black-to-move (offset 1): ply 0 → move 1, plies 1–2 → move 2, plies 3–4 →
+// move 3. Tree: root(0) → A(1) → B(2) → { C(3), D(3) → E(4) }.
+describe('buildSegment training depth', () => {
+	beforeEach(async () => {
+		await wipe();
+		await seed();
+	});
+
+	it('keeps only cards within the first N moves', async () => {
+		const seg = await buildSegment({ ...rep, drillMaxMoves: 2 }, 'due', settings());
+		expect(keys(seg.cards)).toEqual(['A']);
+	});
+
+	it('only limits the repertoire it is set on', async () => {
+		const seg = await buildSegment(rep, 'due', settings());
+		expect(keys(seg.cards)).toEqual(['A', 'C', 'E']);
+	});
+
+	it('trains the full repertoire when the limit is 0', async () => {
+		const seg = await buildSegment({ ...rep, drillMaxMoves: 0 }, 'due', settings());
+		expect(keys(seg.cards)).toEqual(['A', 'C', 'E']);
+	});
+
+	it('includes a move exactly at the limit', async () => {
+		const seg = await buildSegment({ ...rep, drillMaxMoves: 3 }, 'due', settings());
+		expect(keys(seg.cards)).toEqual(['A', 'C', 'E']);
+	});
+
+	it('combines with train-from-position, counting from the repertoire root', async () => {
+		const seg = await buildSegment({ ...rep, drillMaxMoves: 2 }, 'due', settings(), {
+			startFenKey: 'B'
+		});
+		expect(seg.cards).toEqual([]);
+	});
+
+	it('applies under line-walk too', async () => {
+		const seg = await buildSegment({ ...rep, drillMaxMoves: 2 }, 'due', {
+			...settings(),
+			drillIntermediateMoves: 'play'
+		});
+		expect(keys(seg.cards)).toEqual(['A']);
+	});
+});
+
+describe('depthFilter', () => {
+	const WHITE_ROOT = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -';
+	const nodes = new Map<string, RepertoireNode>([
+		[WHITE_ROOT, node(WHITE_ROOT, ['p1'])],
+		['p1', node('p1', ['p2'])],
+		['p2', node('p2', ['p3'])],
+		['p3', node('p3', [])]
+	]);
+	const whiteRep = { ...rep, rootFenKey: WHITE_ROOT };
+	const c = (fenKey: string) => card(fenKey);
+
+	it('numbers moves from a white-to-move root', () => {
+		const within1 = depthFilter(whiteRep, nodes, 1);
+		// ply 0 (1.e4) and ply 1 (1...e5) are move 1; ply 2 is move 2.
+		expect(within1(c(WHITE_ROOT))).toBe(true);
+		expect(within1(c('p1'))).toBe(true);
+		expect(within1(c('p2'))).toBe(false);
+	});
+
+	it('drops cards unreachable from the root', () => {
+		expect(depthFilter(whiteRep, nodes, 10)(c('orphan'))).toBe(false);
+	});
+
+	it('is a no-op without a limit', () => {
+		expect(depthFilter(whiteRep, nodes, undefined)(c('orphan'))).toBe(true);
 	});
 });

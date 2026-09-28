@@ -1,14 +1,15 @@
+import { Rating } from 'ts-fsrs';
 import type { AppSettings, Card, IdeaCard, Repertoire, RepertoireNode } from '$lib/types';
 import { colorToMove } from '$lib/chess/fen';
-import { pathToFenKey, reachableFenKeys, liveReachableFenKeys } from '$lib/tree/traversal';
-import { buildLineFirstQueue } from '$lib/tree/lineOrder';
 import {
-	dueCards,
-	getCard,
-	listCards,
-	mistakeCards,
-	pickBalancedDueCards
-} from '$lib/storage/cards';
+	pathToFenKey,
+	plyDepths,
+	reachableFenKeys,
+	shortestPathTree,
+	liveReachableFenKeys
+} from '$lib/tree/traversal';
+import { buildLineFirstQueue } from '$lib/tree/lineOrder';
+import { getCard, listCards, mistakeCards, pickBalancedDueCards } from '$lib/storage/cards';
 import { dueIdeaCards } from '$lib/storage/ideaCards';
 import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 import { createFreshCard } from '$lib/fsrs/scheduler';
@@ -98,10 +99,18 @@ async function pickWithLineWalk(
 		const path = pathToFenKey(nodes, lineHead, c.fenKey);
 		depthByKey.set(c.fenKey, path ? path.length : -1);
 	}
-	// Depth-ASC: shallower candidates first so the trunk-extraction step
-	// emits shallow shared segments before deep tails, mirroring how a
-	// human builds a repertoire.
+	// Reviews claim the budget before new cards (as in pickBalancedDueCards),
+	// then depth-ASC within each: shallower candidates first so the
+	// trunk-extraction step emits shallow shared segments before deep tails,
+	// mirroring how a human builds a repertoire. Without the review-first
+	// split, breadth-first new cards — always the shallowest — outbid deeper
+	// due reviews every session and let them pile up overdue. Admission
+	// order only decides what fits the budget; emission order comes from the
+	// trie below.
 	const sortedPool = pool.slice().sort((a, b) => {
+		const nA = a.lastReview ? 0 : 1;
+		const nB = b.lastReview ? 0 : 1;
+		if (nA !== nB) return nA - nB;
 		const dA = depthByKey.get(a.fenKey) ?? -1;
 		const dB = depthByKey.get(b.fenKey) ?? -1;
 		if (dA !== dB) return dA - dB;
@@ -286,6 +295,114 @@ function sortByLineOrder(
 }
 
 /**
+ * Soft-disabled lines drop out of the trainable set (issue #80). A card at
+ * position P is trainable only when P is still reachable through non-disabled
+ * edges AND P's own prepared move isn't the disabled head — the card lives at
+ * the parent, so live-reachability alone wouldn't skip a move disabled
+ * directly at P (P stays reachable from above).
+ */
+function trainableFilter(
+	rep: Repertoire,
+	nodes: Map<string, RepertoireNode>
+): (c: Card) => boolean {
+	const live = liveReachableFenKeys(nodes, rep.rootFenKey);
+	return (c) => {
+		if (!live.has(c.fenKey)) return false;
+		const edge = nodes.get(c.fenKey)?.children.find((e) => e.san === c.expectedSan);
+		return !edge?.disabled;
+	};
+}
+
+/**
+ * Training-depth predicate (issue #86): keep only cards whose move falls
+ * within the first `maxMoves` full moves of its line, numbered from the
+ * repertoire's root position (the root's own move is move 1; if black is to
+ * move at the root, black's first reply is still move 1). A transposed
+ * position uses its shallowest route. Unreachable cards are dropped. Falsy /
+ * non-positive `maxMoves` = no limit.
+ *
+ * Exported for unit testing.
+ */
+export function depthFilter(
+	rep: Repertoire,
+	nodes: Map<string, RepertoireNode>,
+	maxMoves: number | null | undefined
+): (c: Card) => boolean {
+	if (!maxMoves || !Number.isFinite(maxMoves) || maxMoves <= 0) return () => true;
+	const depths = plyDepths(nodes, rep.rootFenKey);
+	const offset = colorToMove(rep.rootFenKey) === 'white' ? 0 : 1;
+	return (c) => {
+		const ply = depths.get(c.fenKey);
+		if (ply === undefined) return false;
+		return Math.floor((ply + offset) / 2) + 1 <= maxMoves;
+	};
+}
+
+/**
+ * Fallback for cards graded before `lastRating` was recorded: stability
+ * (days) below which the last recall is taken to have failed. With
+ * short-term steps off, FSRS never enters the Relearning state, and a miss
+ * on a young card leaves ~0.2–0.6d while any pass lands at 2d or more.
+ */
+const SHAKY_STABILITY_DAYS = 1;
+
+/**
+ * An introduced card whose last recall failed. Descendants' new moves wait
+ * until it's recalled again (progressive unlock, issue #86).
+ */
+export function isShaky(card: Card): boolean {
+	if (card.lastRating !== undefined) return card.lastRating === Rating.Again;
+	const stability = typeof card.fsrs.stability === 'number' ? card.fsrs.stability : 0;
+	return stability < SHAKY_STABILITY_DAYS;
+}
+
+/**
+ * Order never-introduced cards for the drill pool: shallowest first across
+ * the whole tree (ply depth from the root), then import order. With
+ * `progressive` on (issue #86), a new card is only offered once every
+ * earlier user move on its shortest line is ready — introduced and its
+ * last recall didn't fail (see isShaky), or itself a new card offered ahead of it in this same ordering (so
+ * a fresh line still unlocks move by move within one session, with the
+ * line walk teaching the parent first). Forgetting an early move therefore
+ * pauses new material beneath it until it's recalled again.
+ *
+ * New ancestors outside `fresh` (not trainable — e.g. a disabled line)
+ * don't block. Exported for unit testing; pure.
+ */
+export function orderNewCards(
+	fresh: Card[],
+	cardByKey: Map<string, Card>,
+	tree: { depth: Map<string, number>; parent: Map<string, string> },
+	progressive: boolean
+): Card[] {
+	const depthOf = (c: Card) => tree.depth.get(c.fenKey) ?? Infinity;
+	const sorted = fresh.slice().sort((a, b) => depthOf(a) - depthOf(b) || a.dueAt - b.dueAt);
+	if (!progressive) return sorted;
+
+	const freshKeys = new Set(fresh.map((c) => c.fenKey));
+	const unlocked = new Set<string>();
+	const pathReady = (fenKey: string): boolean => {
+		for (let k = tree.parent.get(fenKey); k !== undefined; k = tree.parent.get(k)) {
+			const anc = cardByKey.get(k);
+			if (!anc) continue;
+			if (anc.lastReview) {
+				if (isShaky(anc)) return false;
+			} else if (freshKeys.has(k) && !unlocked.has(k)) {
+				return false;
+			}
+		}
+		return true;
+	};
+	const out: Card[] = [];
+	for (const c of sorted) {
+		if (!pathReady(c.fenKey)) continue;
+		unlocked.add(c.fenKey);
+		out.push(c);
+	}
+	return out;
+}
+
+/**
  * Build a single-repertoire drill segment for the given mode. Honours the
  * line-walk setting in `due` mode; falls back to balanced FSRS picking
  * otherwise. Mistake/retrain modes skip line-walk and just emit the
@@ -360,23 +477,36 @@ export async function buildSegment(
 	// regardless of FSRS due date — an explicit "practice here now" request
 	// would otherwise yield an empty session when nothing below is due.
 	// Grading still updates FSRS as normal; only the selection ignores due.
-	// Soft-disabled lines drop out of the trainable set. A card at position P
-	// is trainable only when P is still reachable through non-disabled edges
-	// AND P's own prepared move isn't the disabled head — the card lives at the
-	// parent, so live-reachability alone wouldn't skip a move disabled directly
-	// at P (P stays reachable from above).
-	const live = liveReachableFenKeys(nodes, rep.rootFenKey);
-	const isTrainable = (c: Card): boolean => {
-		if (!live.has(c.fenKey)) return false;
-		const edge = nodes.get(c.fenKey)?.children.find((e) => e.san === c.expectedSan);
-		return !edge?.disabled;
-	};
+	const isTrainable = trainableFilter(rep, nodes);
+	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
 	let pool: Card[];
 	if (startFenKey) {
 		const subtree = reachableFenKeys(nodes, startFenKey);
-		pool = (await listCards(rep.id)).filter((c) => subtree.has(c.fenKey) && isTrainable(c));
+		pool = (await listCards(rep.id)).filter(
+			(c) => subtree.has(c.fenKey) && isTrainable(c) && withinDepth(c)
+		);
 	} else {
-		pool = (await dueCards(rep.id, Date.now(), settings.drillSessionCap * 5)).filter(isTrainable);
+		// Reviews and new cards are pooled separately (issue #86). A single
+		// dueAt-ordered window let never-introduced cards — due since import,
+		// so older than any review — crowd reviews out entirely, and since PGN
+		// import seeds cards line by line, the new cards in that window were
+		// "the first N cards of the PGN": deep moves of the first lines ahead
+		// of the first move of later ones. New cards are instead ranked
+		// shallowest-first across the whole tree, then gated on their path.
+		const now = Date.now();
+		const poolCap = settings.drillSessionCap * 5;
+		const all = await listCards(rep.id);
+		const due = all
+			.filter((c) => c.dueAt <= now && isTrainable(c) && withinDepth(c))
+			.sort((a, b) => a.dueAt - b.dueAt);
+		const reviews = due.filter((c) => c.lastReview).slice(0, poolCap);
+		const fresh = orderNewCards(
+			due.filter((c) => !c.lastReview),
+			new Map(all.map((c) => [c.fenKey, c])),
+			shortestPathTree(nodes, rep.rootFenKey),
+			rep.progressiveUnlock !== false
+		).slice(0, poolCap);
+		pool = [...reviews, ...fresh];
 	}
 	const lineWalkOn = (settings.drillIntermediateMoves ?? 'play') === 'play';
 
@@ -424,9 +554,27 @@ export async function buildSegment(
 }
 
 /**
+ * Leaf cards the runner's leaves cycle may replay: already-introduced (a
+ * second pass over moves never taught would ask them unhinted, bypassing the
+ * new-card cap and progressive unlock), in a line that isn't disabled, and
+ * within the rep's training depth — the same limits a `due` drill applies.
+ */
+export async function collectReplayLeafCards(
+	rep: Repertoire,
+	nodes: Map<string, RepertoireNode>
+): Promise<Card[]> {
+	const isTrainable = trainableFilter(rep, nodes);
+	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
+	return (await collectLeafCards(rep, nodes)).filter(
+		(c) => !!c.lastReview && isTrainable(c) && withinDepth(c)
+	);
+}
+
+/**
  * Cards whose user-move position has no deeper user-move card in the
- * repertoire — the "tips" of every prepared line. Used by the runner's
- * leaves cycle to seed an extra second-pass for a segment's deepest moves.
+ * repertoire — the "tips" of every prepared line. The runner's leaves cycle
+ * replays these (via collectReplayLeafCards) as an extra second pass over a
+ * segment's deepest moves.
  */
 export async function collectLeafCards(
 	rep: Repertoire,

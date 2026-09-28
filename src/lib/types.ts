@@ -53,6 +53,23 @@ export interface Repertoire {
 	 * user wants to gate at the root anyway).
 	 */
 	startingFenKey?: string | null;
+	/**
+	 * Training depth: only drill moves within the first N full moves of each
+	 * line, counted from this repertoire's root position. Lets a large
+	 * repertoire be learned in layers — first how to reach the main positions,
+	 * then what to do once there (issue #86). Applies to due / quick drills;
+	 * mistake and retrain drills are never depth-limited. 0 / null / undefined
+	 * = full repertoire.
+	 */
+	drillMaxMoves?: number | null;
+	/**
+	 * Progressive unlock (issue #86): only introduce a new move once every
+	 * earlier user move on its line has been introduced and its last recall
+	 * succeeded. Forgetting an early move pauses new material beneath it.
+	 * Defaults to on (`undefined` = on); `false` introduces new moves purely
+	 * shallowest-first without the path check.
+	 */
+	progressiveUnlock?: boolean;
 }
 
 /**
@@ -166,6 +183,13 @@ export interface Card {
 	fsrs: FsrsCard;
 	lastReview?: number;
 	dueAt: number;
+	/**
+	 * FSRS rating of the last grade (1 Again … 4 Easy). Progressive unlock
+	 * (issue #86) uses it to tell a move whose last recall failed: stability
+	 * alone can't, since a lapse on a mature card can leave it above a day.
+	 * Undefined on cards graded before this field existed.
+	 */
+	lastRating?: number;
 }
 
 /**

@@ -95,7 +95,8 @@ export async function importShareBundle(bundle: ShareBundle): Promise<Repertoire
 			repertoireId: newId,
 			fsrs: createEmptyCard(new Date(now)),
 			dueAt: now,
-			lastReview: undefined
+			lastReview: undefined,
+			lastRating: undefined
 		});
 	}
 	for (const ic of bundle.ideaCards) {

@@ -29,6 +29,7 @@
 	import { markMistakeByPosition } from '$lib/storage/mistakes';
 	import { getEngine } from '$lib/stockfish/engine';
 	import { reviewCard, outcomeToRating, type DrillOutcome } from '$lib/fsrs/scheduler';
+	import { SessionGrader } from './sessionGrading';
 	import { Button } from '$lib/ui';
 	import { playCorrect, playIncorrect } from '$lib/ui/sounds';
 	import {
@@ -38,7 +39,7 @@
 		type Edge,
 		type IdeaCard
 	} from '$lib/types';
-	import { collectLeafCards, sortLeavesByLineOrder } from './buildSegment';
+	import { collectReplayLeafCards, sortLeavesByLineOrder } from './buildSegment';
 	import type { DrillEntry, DrillPhase, DrillSegment } from './types';
 	import {
 		gradeMove,
@@ -147,10 +148,9 @@
 	// ─────────────────────────────────────────────────────────────────────────
 	const drilledKeys = new SvelteSet<string>();
 	const introducedKeys = new SvelteSet<string>();
-	// Line-walk prefix steps that have already banked an FSRS review this
-	// session. The Train pass and the failed-walk drain re-run entries, and a
-	// prefix card shouldn't stack several reviews minutes apart off one sitting.
-	const prefixRatedKeys = new SvelteSet<string>();
+	// Per-session FSRS grading rules (prefix steps graded once, a lapse isn't
+	// erased by a correct retry). Shared with the multi-session simulation.
+	const grader = new SessionGrader();
 	const failedWalkIndices = new SvelteSet<number>();
 	// Walks whose Learn pass introduced a new card and therefore still owe a
 	// Train pass. Drained at the segment tail rather than replayed on the spot.
@@ -397,7 +397,7 @@
 	function snapshotPlannedSet() {
 		plannedKeys.clear();
 		pendingLapses.clear();
-		prefixRatedKeys.clear();
+		grader.reset();
 		plannedSlotsDone = 0;
 		walkPhase = 'learn';
 		for (const e of entries) plannedKeys.add(ck(e.segIdx, e.card.fenKey));
@@ -858,12 +858,17 @@
 		// without also lapsing it would be worse than either — stability could
 		// only ever go up, inflating trunk intervals on recalls the user may
 		// have pattern-matched from the lead-in. Once per session, either way.
-		const alreadyRatedPrefix = isLineWalkStep && prefixRatedKeys.has(compositeKey);
-		if (!isMistakeReviewMode && !alreadyRatedPrefix) {
-			if (isLineWalkStep) prefixRatedKeys.add(compositeKey);
-			const updated = reviewCard(ratedCard, outcomeToRating(outcome), settings.fsrsParams);
-			await upsertCard(updated);
-		}
+		//
+		// And once a card lapses this session, a correct retry doesn't erase
+		// the miss (see SessionGrader).
+		const updated = grader.grade(
+			compositeKey,
+			ratedCard,
+			outcome,
+			{ isLineWalkStep, isMistakeReview: isMistakeReviewMode, isIntroductionPass },
+			settings.fsrsParams
+		);
+		if (updated) await upsertCard(updated);
 		sessionDone += 1;
 
 		if (plannedKeys.has(compositeKey)) {
@@ -1649,7 +1654,7 @@
 	async function extendSegmentWithLeaves(segIdx: number): Promise<number> {
 		const seg = segments[segIdx];
 		if (leavesCycledForSeg.has(segIdx)) return 0;
-		const leaves = await collectLeafCards(seg.rep, seg.nodes);
+		const leaves = await collectReplayLeafCards(seg.rep, seg.nodes);
 		if (leaves.length === 0) {
 			leavesCycledForSeg.add(segIdx);
 			return 0;

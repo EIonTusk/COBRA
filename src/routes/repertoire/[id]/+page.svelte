@@ -10,6 +10,7 @@
 		Bookmark,
 		Bot,
 		Gauge,
+		Layers,
 		Pencil,
 		Play,
 		Download,
@@ -33,6 +34,8 @@
 		renameRepertoire,
 		setCoverageGoal,
 		saveCoverageSnapshot,
+		setDrillMaxMoves,
+		setProgressiveUnlock,
 		setStartingPosition
 	} from '$lib/storage/repertoires';
 	import { furthestNonBranchingFenKey, pathToFenKey } from '$lib/tree/traversal';
@@ -227,6 +230,21 @@
 		// Auto-recompute against the new threshold so the % updates without
 		// the user having to hunt for a recompute button.
 		void onComputeCoverage();
+	}
+
+	const DEPTH_PRESETS = [5, 10, 15, 0];
+
+	async function onDrillMaxMovesChange(maxMoves: number) {
+		if (!rep) return;
+		const next = maxMoves > 0 ? Math.floor(maxMoves) : null;
+		await setDrillMaxMoves(rep.id, next);
+		rep = { ...rep, drillMaxMoves: next };
+	}
+
+	async function onProgressiveUnlockChange(on: boolean) {
+		if (!rep) return;
+		await setProgressiveUnlock(rep.id, on);
+		rep = { ...rep, progressiveUnlock: on };
 	}
 
 	async function onComputeCoverage() {
@@ -962,6 +980,85 @@
 					</span>
 				</div>
 			{/if}
+		</section>
+
+		<!--
+			Training depth (issue #86): limit this rep's drills to the first N
+			moves of each line so a large repertoire can be learned in layers.
+		-->
+		<section class="ink-panel mt-6 p-4" style:--i="2">
+			<div class="mb-3 flex items-center gap-3">
+				<Layers class="size-4 text-[var(--color-brass-300)]" />
+				<h2 class="eyebrow">Training depth</h2>
+				<span
+					class="ml-auto rounded-full border px-2 py-0.5 font-mono text-[10px] tracking-wider uppercase tabular-nums"
+					class:border-[var(--color-brass-400)]={!!rep.drillMaxMoves}
+					class:text-[var(--color-brass-200)]={!!rep.drillMaxMoves}
+					class:border-[var(--color-ink-700)]={!rep.drillMaxMoves}
+					class:text-[var(--color-parchment-400)]={!rep.drillMaxMoves}
+				>
+					{rep.drillMaxMoves ? `First ${rep.drillMaxMoves}` : 'Full'}
+				</span>
+			</div>
+			<p class="mb-3 font-serif text-sm text-[var(--color-parchment-400)] italic">
+				Drill only the first N moves of each line — learn how to reach the main positions first,
+				then raise the depth as they stick. Mistake drills are not limited.
+			</p>
+			<div class="flex flex-wrap items-center gap-2">
+				{#each DEPTH_PRESETS as preset (preset)}
+					<button
+						type="button"
+						onclick={() => onDrillMaxMovesChange(preset)}
+						class="rounded-[3px] border px-2.5 py-1 font-mono text-xs transition-colors {(rep.drillMaxMoves ??
+							0) === preset
+							? 'border-[var(--color-brass-300)] text-[var(--color-parchment-100)]'
+							: 'border-[var(--color-ink-700)] text-[var(--color-parchment-400)] hover:border-[var(--color-ink-600)]'}"
+					>
+						{preset === 0 ? 'Full' : `First ${preset}`}
+					</button>
+				{/each}
+				<div class="flex items-baseline gap-1.5">
+					<Input
+						id="drill-max-moves"
+						type="number"
+						min="0"
+						max="200"
+						placeholder="0"
+						autocomplete="off"
+						aria-label="Custom training depth in moves"
+						value={rep.drillMaxMoves ?? ''}
+						onchange={(e) => {
+							const v = Number((e.currentTarget as HTMLInputElement).value);
+							void onDrillMaxMovesChange(Number.isFinite(v) ? v : 0);
+						}}
+						class="w-20 font-mono"
+					/>
+					<span class="font-mono text-xs text-[var(--color-parchment-500)]">moves</span>
+				</div>
+			</div>
+			<label
+				class="mt-4 flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
+			>
+				<input
+					type="checkbox"
+					checked={rep.progressiveUnlock !== false}
+					onchange={(e) => onProgressiveUnlockChange((e.currentTarget as HTMLInputElement).checked)}
+					class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
+				/>
+				<div class="min-w-0 flex-1">
+					<span class="font-serif text-sm text-[var(--color-parchment-100)]">
+						Unlock deeper moves only after the path is learned
+					</span>
+					<p
+						class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+					>
+						New moves are always introduced shallowest-first across the whole tree. With this on, a
+						new move also waits until every earlier move on its line has been introduced and your
+						last answer to it was right — forget an early move and new material below it pauses
+						until you recall it again.
+					</p>
+				</div>
+			</label>
 		</section>
 
 		<!--

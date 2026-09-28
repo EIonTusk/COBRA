@@ -6,7 +6,7 @@
 	import { listRepertoires } from '$lib/storage/repertoires';
 	import { getSettings } from '$lib/storage/settings';
 	import DrillRunner from '$lib/drill/DrillRunner.svelte';
-	import { buildSegment, segmentEventCount, segmentNewCount } from '$lib/drill/buildSegment';
+	import { buildQuickDrillSegments } from '$lib/drill/quickDrill';
 	import type { DrillSegment } from '$lib/drill/types';
 	import type { AppSettings } from '$lib/types';
 
@@ -14,36 +14,8 @@
 	let segments = $state<DrillSegment[] | null>(null);
 	let runnerKey = $state(0);
 
-	/**
-	 * Build a segment per repertoire. White reps come first, then black —
-	 * keeps a session from ping-ponging between sides. The settings'
-	 * `drillSessionCap` and `dailyNewCardCap` apply to the *merged* session
-	 * (not per rep), so each segment is built against whatever budget the
-	 * earlier segments left behind. Once the budget is exhausted, later
-	 * reps drop out of the session entirely — they'll surface in a future
-	 * drill once today's quota is spent.
-	 */
 	async function buildAllSegments(s: AppSettings): Promise<DrillSegment[]> {
-		const reps = await listRepertoires();
-		const colorRank = (c: 'white' | 'black') => (c === 'white' ? 0 : 1);
-		const ordered = [...reps].sort((a, b) => colorRank(a.color) - colorRank(b.color));
-		const out: DrillSegment[] = [];
-		let remainingSession = s.drillSessionCap;
-		let remainingNew = s.dailyNewCardCap;
-		for (const rep of ordered) {
-			if (remainingSession <= 0) break;
-			const constrained: AppSettings = {
-				...s,
-				drillSessionCap: remainingSession,
-				dailyNewCardCap: Math.max(0, remainingNew)
-			};
-			const seg = await buildSegment(rep, 'due', constrained);
-			if (seg.cards.length === 0 && seg.ideaQueue.length === 0) continue;
-			out.push(seg);
-			remainingSession -= segmentEventCount(seg);
-			remainingNew -= segmentNewCount(seg);
-		}
-		return out;
+		return buildQuickDrillSegments(await listRepertoires(), s);
 	}
 
 	onMount(async () => {
