@@ -111,14 +111,14 @@
 			<span class="text-[var(--color-ink-600)]">·</span>
 			<span class="eyebrow text-[var(--color-parchment-400)]">from this position</span>
 		{/if}
-		{#if mode === 'due' && settings?.drillMaxMoves && settings.drillMaxMoves > 0}
+		{#if mode === 'due' && rep?.drillMaxMoves && rep.drillMaxMoves > 0}
 			<span class="text-[var(--color-ink-600)]">·</span>
 			<a
-				href={resolve('/settings')}
+				href={resolve(`/repertoire/${rep.id}`)}
 				class="eyebrow text-[var(--color-parchment-400)] transition-colors hover:text-[var(--color-parchment-100)]"
-				title="Training depth — change in Settings"
+				title="Training depth — change on the repertoire page"
 			>
-				first {settings.drillMaxMoves} moves
+				first {rep.drillMaxMoves} moves
 			</a>
 		{/if}
 		<a

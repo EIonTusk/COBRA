@@ -188,35 +188,36 @@ describe('buildSegment training depth', () => {
 	});
 
 	it('keeps only cards within the first N moves', async () => {
-		const seg = await buildSegment(rep, 'due', { ...settings(), drillMaxMoves: 2 });
+		const seg = await buildSegment({ ...rep, drillMaxMoves: 2 }, 'due', settings());
 		expect(keys(seg.cards)).toEqual(['A']);
 	});
 
+	it('only limits the repertoire it is set on', async () => {
+		const seg = await buildSegment(rep, 'due', settings());
+		expect(keys(seg.cards)).toEqual(['A', 'C', 'E']);
+	});
+
 	it('trains the full repertoire when the limit is 0', async () => {
-		const seg = await buildSegment(rep, 'due', { ...settings(), drillMaxMoves: 0 });
+		const seg = await buildSegment({ ...rep, drillMaxMoves: 0 }, 'due', settings());
 		expect(keys(seg.cards)).toEqual(['A', 'C', 'E']);
 	});
 
 	it('includes a move exactly at the limit', async () => {
-		const seg = await buildSegment(rep, 'due', { ...settings(), drillMaxMoves: 3 });
+		const seg = await buildSegment({ ...rep, drillMaxMoves: 3 }, 'due', settings());
 		expect(keys(seg.cards)).toEqual(['A', 'C', 'E']);
 	});
 
 	it('combines with train-from-position, counting from the repertoire root', async () => {
-		const seg = await buildSegment(
-			rep,
-			'due',
-			{ ...settings(), drillMaxMoves: 2 },
-			{ startFenKey: 'B' }
-		);
+		const seg = await buildSegment({ ...rep, drillMaxMoves: 2 }, 'due', settings(), {
+			startFenKey: 'B'
+		});
 		expect(seg.cards).toEqual([]);
 	});
 
 	it('applies under line-walk too', async () => {
-		const seg = await buildSegment(rep, 'due', {
+		const seg = await buildSegment({ ...rep, drillMaxMoves: 2 }, 'due', {
 			...settings(),
-			drillIntermediateMoves: 'play',
-			drillMaxMoves: 2
+			drillIntermediateMoves: 'play'
 		});
 		expect(keys(seg.cards)).toEqual(['A']);
 	});

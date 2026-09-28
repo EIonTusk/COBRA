@@ -748,49 +748,6 @@
 						sooner. 0 animates everything that's reached Review state.
 					</p>
 				</div>
-
-				<div
-					class="mt-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3"
-				>
-					<div class="flex items-baseline justify-between gap-3">
-						<Label for="drillmaxmoves" class="!mb-0">Training depth</Label>
-						<div class="flex items-baseline gap-1.5">
-							<Input
-								id="drillmaxmoves"
-								name="drillmaxmoves"
-								type="number"
-								min="0"
-								max="200"
-								placeholder="0"
-								autocomplete="off"
-								bind:value={settings.drillMaxMoves}
-								class="w-20 font-mono"
-							/>
-							<span class="font-mono text-xs text-[var(--color-parchment-500)]">moves</span>
-						</div>
-					</div>
-					<div class="mt-2 flex flex-wrap gap-1.5">
-						{#each [5, 10, 15, 0] as preset (preset)}
-							<button
-								type="button"
-								onclick={() => (settings!.drillMaxMoves = preset)}
-								class="rounded-[3px] border px-2 py-0.5 font-mono text-xs transition-colors {(settings.drillMaxMoves ||
-									0) === preset
-									? 'border-[var(--color-brass-300)] text-[var(--color-parchment-100)]'
-									: 'border-[var(--color-ink-700)] text-[var(--color-parchment-400)] hover:border-[var(--color-ink-600)]'}"
-							>
-								{preset === 0 ? 'Full' : `First ${preset}`}
-							</button>
-						{/each}
-					</div>
-					<p
-						class="mt-2 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
-					>
-						Only drill moves within the first N moves of each line, so a large repertoire can be
-						learned in layers — first how to reach the main positions, then deeper. Raise it as the
-						opening moves stick. Mistake drills are not limited. 0 trains the full repertoire.
-					</p>
-				</div>
 			</section>
 
 			<Separator />

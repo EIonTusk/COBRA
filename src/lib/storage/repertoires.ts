@@ -102,6 +102,17 @@ export async function setStartingPosition(
 	markRepDirty(id);
 }
 
+/** Set the rep's training depth (issue #86). 0 / null = full repertoire. */
+export async function setDrillMaxMoves(id: string, maxMoves: number | null): Promise<void> {
+	const db = await getDB();
+	const rep = await db.get('repertoires', id);
+	if (!rep) return;
+	rep.drillMaxMoves = maxMoves && maxMoves > 0 ? Math.floor(maxMoves) : null;
+	rep.updatedAt = Date.now();
+	await db.put('repertoires', JSON.parse(JSON.stringify(rep)));
+	markRepDirty(id);
+}
+
 export async function setLichessStudyLink(
 	id: string,
 	link: LichessStudyLink | null

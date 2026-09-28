@@ -303,7 +303,7 @@ function sortByLineOrder(
 export function depthFilter(
 	rep: Repertoire,
 	nodes: Map<string, RepertoireNode>,
-	maxMoves: number | undefined
+	maxMoves: number | null | undefined
 ): (c: Card) => boolean {
 	if (!maxMoves || !Number.isFinite(maxMoves) || maxMoves <= 0) return () => true;
 	const depths = plyDepths(nodes, rep.rootFenKey);
@@ -401,14 +401,14 @@ export async function buildSegment(
 		const edge = nodes.get(c.fenKey)?.children.find((e) => e.san === c.expectedSan);
 		return !edge?.disabled;
 	};
-	const withinDepth = depthFilter(rep, nodes, settings.drillMaxMoves);
+	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
 	let pool: Card[];
 	if (startFenKey) {
 		const subtree = reachableFenKeys(nodes, startFenKey);
 		pool = (await listCards(rep.id)).filter(
 			(c) => subtree.has(c.fenKey) && isTrainable(c) && withinDepth(c)
 		);
-	} else if (settings.drillMaxMoves) {
+	} else if (rep.drillMaxMoves && rep.drillMaxMoves > 0) {
 		// Depth-limited: filter the whole due set before capping, otherwise a
 		// backlog of deep due cards could fill the fetch window and starve the
 		// shallow moves the user asked to focus on.

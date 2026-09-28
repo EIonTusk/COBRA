@@ -53,6 +53,15 @@ export interface Repertoire {
 	 * user wants to gate at the root anyway).
 	 */
 	startingFenKey?: string | null;
+	/**
+	 * Training depth: only drill moves within the first N full moves of each
+	 * line, counted from this repertoire's root position. Lets a large
+	 * repertoire be learned in layers — first how to reach the main positions,
+	 * then what to do once there (issue #86). Applies to due / quick drills;
+	 * mistake and retrain drills are never depth-limited. 0 / null / undefined
+	 * = full repertoire.
+	 */
+	drillMaxMoves?: number | null;
 }
 
 /**
@@ -448,15 +457,6 @@ export interface AppSettings {
 	 * sooner and animate past faster. Defaults to 7.
 	 */
 	drillWellLearnedDays?: number;
-	/**
-	 * Training depth: only drill moves within the first N full moves of each
-	 * line, counted from the repertoire's root position. Lets a large
-	 * repertoire be learned in layers — first how to reach the main positions,
-	 * then what to do once there (issue #86). Applies to due / quick drills;
-	 * mistake and retrain drills are never depth-limited. 0 / undefined = full
-	 * repertoire.
-	 */
-	drillMaxMoves?: number;
 	explorerSpeeds: string[];
 	explorerRatings: number[];
 	lichessApiToken: string;
