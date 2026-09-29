@@ -26,6 +26,7 @@ import type {
 	EdgeTombstone,
 	EmpiricalGap,
 	IdeaCard,
+	MoveFrequency,
 	Repertoire,
 	RepertoireNode,
 	SparGame,
@@ -265,6 +266,15 @@ export function mergeRepertoire(local: Repertoire, remote: Repertoire): Repertoi
  */
 export const EDGE_TOMBSTONE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
+function newerFrequency(
+	a: MoveFrequency | undefined,
+	b: MoveFrequency | undefined
+): MoveFrequency | undefined {
+	if (!a) return b;
+	if (!b) return a;
+	return b.fetchedAt > a.fetchedAt ? b : a;
+}
+
 /**
  * Per-edge union with field-LWW on `annotation` / `weight`, reconciled against
  * each side's edge tombstones so a deleted variation stays deleted.
@@ -319,6 +329,12 @@ export function mergeNode(
 			// for stability.
 			byTo.set(re.toFenKey, { ...re });
 		}
+		// Move frequency is derived data written without stamping
+		// `updatedAt`, so it merges on its own: the most recently fetched
+		// counts win whichever side's edge won above.
+		const winner = byTo.get(re.toFenKey)!;
+		const freq = newerFrequency(existing.frequency, re.frequency);
+		if (freq) winner.frequency = freq;
 	}
 
 	// Union both sides' tombstones, keeping the newest deletion per target,

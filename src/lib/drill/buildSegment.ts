@@ -9,6 +9,7 @@ import {
 	liveReachableFenKeys
 } from '$lib/tree/traversal';
 import { buildLineFirstQueue } from '$lib/tree/lineOrder';
+import { reachProbabilities } from '$lib/tree/reachProbability';
 import { getCard, listCards, mistakeCards, pickBalancedDueCards } from '$lib/storage/cards';
 import { dueIdeaCards } from '$lib/storage/ideaCards';
 import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
@@ -107,10 +108,17 @@ async function pickWithLineWalk(
 	// due reviews every session and let them pile up overdue. Admission
 	// order only decides what fits the budget; emission order comes from the
 	// trie below.
+	// New cards keep the order the pool was built in: orderNewCards already
+	// ranked them (most likely to be reached first, then shallowest).
+	const poolRank = new Map<string, number>();
+	pool.forEach((c, i) => {
+		if (!poolRank.has(c.fenKey)) poolRank.set(c.fenKey, i);
+	});
 	const sortedPool = pool.slice().sort((a, b) => {
 		const nA = a.lastReview ? 0 : 1;
 		const nB = b.lastReview ? 0 : 1;
 		if (nA !== nB) return nA - nB;
+		if (nA === 1) return poolRank.get(a.fenKey)! - poolRank.get(b.fenKey)!;
 		const dA = depthByKey.get(a.fenKey) ?? -1;
 		const dB = depthByKey.get(b.fenKey) ?? -1;
 		if (dA !== dB) return dA - dB;
@@ -357,8 +365,11 @@ export function isShaky(card: Card): boolean {
 }
 
 /**
- * Order never-introduced cards for the drill pool: shallowest first across
- * the whole tree (ply depth from the root), then import order. With
+ * Order never-introduced cards for the drill pool. With `reach` (the
+ * "prioritise common lines" setting), most likely to be reached first —
+ * see reachProbabilities; a parent is always at least as likely as its
+ * children, so lines still unlock top-down. Then shallowest first across the
+ * whole tree (ply depth from the root), then import order. With
  * `progressive` on (issue #86), a new card is only offered once every
  * earlier user move on its shortest line is ready — introduced and its
  * last recall didn't fail (see isShaky), or itself a new card offered ahead of it in this same ordering (so
@@ -373,10 +384,21 @@ export function orderNewCards(
 	fresh: Card[],
 	cardByKey: Map<string, Card>,
 	tree: { depth: Map<string, number>; parent: Map<string, string> },
-	progressive: boolean
+	progressive: boolean,
+	reach?: Map<string, number>
 ): Card[] {
 	const depthOf = (c: Card) => tree.depth.get(c.fenKey) ?? Infinity;
-	const sorted = fresh.slice().sort((a, b) => depthOf(a) - depthOf(b) || a.dueAt - b.dueAt);
+	const reachOf = (c: Card) => reach?.get(c.fenKey) ?? 0;
+	const sorted = fresh.slice().sort((a, b) => {
+		if (reach) {
+			const ra = reachOf(a);
+			const rb = reachOf(b);
+			// Relative tolerance: equal-by-construction products can differ
+			// in the last bits depending on multiplication order.
+			if (Math.abs(ra - rb) > 1e-9 * Math.max(ra, rb)) return rb - ra;
+		}
+		return depthOf(a) - depthOf(b) || a.dueAt - b.dueAt;
+	});
 	if (!progressive) return sorted;
 
 	const freshKeys = new Set(fresh.map((c) => c.fenKey));
@@ -480,19 +502,33 @@ export async function buildSegment(
 	const isTrainable = trainableFilter(rep, nodes);
 	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
 	let pool: Card[];
+	const reach =
+		settings.drillPrioritizeCommon !== false
+			? reachProbabilities(nodes, rep.rootFenKey, rep.color)
+			: undefined;
 	if (startFenKey) {
 		const subtree = reachableFenKeys(nodes, startFenKey);
-		pool = (await listCards(rep.id)).filter(
-			(c) => subtree.has(c.fenKey) && isTrainable(c) && withinDepth(c)
-		);
+		const all = await listCards(rep.id);
+		const inScope = all.filter((c) => subtree.has(c.fenKey) && isTrainable(c) && withinDepth(c));
+		pool = [
+			...inScope.filter((c) => c.lastReview).sort((a, b) => a.dueAt - b.dueAt),
+			...orderNewCards(
+				inScope.filter((c) => !c.lastReview),
+				new Map(all.map((c) => [c.fenKey, c])),
+				shortestPathTree(nodes, rep.rootFenKey),
+				false,
+				reach
+			)
+		];
 	} else {
 		// Reviews and new cards are pooled separately (issue #86). A single
 		// dueAt-ordered window let never-introduced cards — due since import,
 		// so older than any review — crowd reviews out entirely, and since PGN
 		// import seeds cards line by line, the new cards in that window were
 		// "the first N cards of the PGN": deep moves of the first lines ahead
-		// of the first move of later ones. New cards are instead ranked
-		// shallowest-first across the whole tree, then gated on their path.
+		// of the first move of later ones. New cards are instead ranked across
+		// the whole tree (most likely to be reached, then shallowest first),
+		// then gated on their path.
 		const now = Date.now();
 		const poolCap = settings.drillSessionCap * 5;
 		const all = await listCards(rep.id);
@@ -504,7 +540,8 @@ export async function buildSegment(
 			due.filter((c) => !c.lastReview),
 			new Map(all.map((c) => [c.fenKey, c])),
 			shortestPathTree(nodes, rep.rootFenKey),
-			rep.progressiveUnlock !== false
+			rep.progressiveUnlock !== false,
+			reach
 		).slice(0, poolCap);
 		pool = [...reviews, ...fresh];
 	}
