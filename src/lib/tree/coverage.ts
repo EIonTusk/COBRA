@@ -57,13 +57,16 @@ export async function computeCoverage(
 	// the trivially-satisfied 100% the formula would otherwise give.
 	const totalEdges = [...nodes.values()].reduce((sum, n) => sum + n.children.length, 0);
 
-	const rootRes = await fetchExplorer({
-		fen: fenFromKey(rep.rootFenKey),
-		speeds: opts.speeds,
-		ratings: opts.ratings,
-		token: opts.token,
-		moves: 30
-	});
+	const rootRes = await fetchExplorer(
+		{
+			fen: fenFromKey(rep.rootFenKey),
+			speeds: opts.speeds,
+			ratings: opts.ratings,
+			token: opts.token,
+			moves: 30
+		},
+		{ priority: 'background' }
+	);
 	const rootTotal = rootRes.moves.reduce((s, m) => s + m.white + m.draws + m.black, 0);
 	if (rootTotal === 0 || rep.goal <= 0) {
 		return {
@@ -108,13 +111,16 @@ export async function computeCoverage(
 				moves = rootRes.moves;
 			} else {
 				try {
-					const res = await fetchExplorer({
-						fen: fenFromKey(fenKey),
-						speeds: opts.speeds,
-						ratings: opts.ratings,
-						token: opts.token,
-						moves: 30
-					});
+					const res = await fetchExplorer(
+						{
+							fen: fenFromKey(fenKey),
+							speeds: opts.speeds,
+							ratings: opts.ratings,
+							token: opts.token,
+							moves: 30
+						},
+						{ priority: 'background' }
+					);
 					probed += 1;
 					moves = res.moves;
 					opts.onProgress?.(probed, null);
