@@ -11,6 +11,7 @@ import type { Card, Color, Repertoire, RepertoireNode, StoredMistake } from '$li
 import { getDB } from '$lib/storage/db';
 import { defaultSettings } from '$lib/storage/settings';
 import { createFreshCard } from '$lib/fsrs/scheduler';
+import { reachProbabilities } from '$lib/tree/reachProbability';
 import { buildSegment, isShaky } from './buildSegment';
 import { buildQuickDrillSegments } from './quickDrill';
 import { playSession, type Answer, type GradeEvent } from './drillSessionModel.testutil';
@@ -36,7 +37,13 @@ interface SimRep {
  * `userMoves` deep. Keys end in " w"/" b" so `colorToMove` reads them. Built
  * depth-first so card creation order matches a PGN import.
  */
-function buildRep(id: string, color: Color, userMoves: number): SimRep {
+function buildRep(
+	id: string,
+	color: Color,
+	userMoves: number,
+	/** Lichess share of the first / second opponent reply everywhere. */
+	split?: [number, number]
+): SimRep {
 	const nodes: RepertoireNode[] = [];
 	const importOrder: string[] = [];
 	const depth = new Map<string, number>();
@@ -60,7 +67,23 @@ function buildRep(id: string, color: Color, userMoves: number): SimRep {
 			return;
 		}
 		const kids = [key(user), key(user)];
-		nodes.push({ repertoireId: id, fenKey: k, children: kids.map(edge) });
+		nodes.push({
+			repertoireId: id,
+			fenKey: k,
+			children: kids.map((c, i) => ({
+				...edge(c),
+				...(split
+					? {
+							frequency: {
+								games: split[i] * 1000,
+								total: 1000,
+								source: 'lichess' as const,
+								fetchedAt: 0
+							}
+						}
+					: {})
+			}))
+		});
 		for (const c of kids) userNode(c, parent === null ? 0 : d + 1, parent);
 	};
 	const root = key(color === 'white' ? user : opp);
@@ -400,6 +423,46 @@ describe('multi-session drill simulation (issue #86)', { timeout: 180_000 }, () 
 			expect(res.introducedDay.size).toBe(sim.importOrder.length);
 		}
 	);
+
+	it('with Lichess frequencies: the likeliest positions are learned first', async () => {
+		// The first-imported reply is the rare one (5%), so import order and
+		// plain breadth-first would both reach it early.
+		const sim = buildRep('w', 'white', 7, [0.05, 0.8]);
+		const res = await simulate([sim], { days: 40, answer: allRight });
+		expect(res.introducedDay.size).toBe(sim.importOrder.length);
+		expect(res.gateViolations).toEqual([]);
+		expect(res.reviewStarved).toEqual([]);
+
+		const reach = reachProbabilities(
+			new Map(sim.nodes.map((n) => [n.fenKey, n])),
+			sim.rep.rootFenKey,
+			'white'
+		);
+		const day = (k: string) => res.introducedDay.get(`w|${k}`)!;
+		// Never learn a clearly less likely position before a likelier one.
+		for (const a of sim.importOrder) {
+			for (const b of sim.importOrder) {
+				if (reach.get(a)! > reach.get(b)! * 1.5) expect(day(a)).toBeLessThanOrEqual(day(b));
+			}
+		}
+		// The common line reaches move 7 before the rare reply's second move.
+		const commonDeep = sim.importOrder.filter((k) => sim.depth.get(k) === 6 && reach.get(k)! > 0.2);
+		const rareSecond = sim.importOrder.filter((k) => sim.depth.get(k) === 1 && reach.get(k)! < 0.1);
+		expect(Math.max(...commonDeep.map(day))).toBeLessThanOrEqual(Math.min(...rareSecond.map(day)));
+	});
+
+	it('with Lichess frequencies and random mistakes: gate holds, nothing starves', async () => {
+		const sim = buildRep('w', 'white', 7, [0.05, 0.8]);
+		const rand = rng(11);
+		const res = await simulate([sim], {
+			days: 70,
+			answer: (p) => rand() >= (p.attempt === 0 ? 0.25 : 0.05)
+		});
+		expect(res.gateViolations).toEqual([]);
+		expect(res.reviewStarved).toEqual([]);
+		expect(res.unexplainedOverdue).toEqual([]);
+		expect(res.introducedDay.size).toBe(sim.importOrder.length);
+	});
 
 	it('quick drill across a white and a black repertoire', async () => {
 		const white = buildRep('w', 'white', 6);

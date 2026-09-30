@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { base, resolve } from '$app/paths';
 	import { goto } from '$app/navigation';
+	import { onDestroy } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { flip } from 'svelte/animate';
 	import {
@@ -54,6 +55,7 @@
 	import { buildShareBundle, encodeShare } from '$lib/storage/share';
 	import { computeCoverage, COVERAGE_GOALS } from '$lib/tree/coverage';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
+	import { backfillMoveFrequencies, frequencyCoverage } from '$lib/explorer/moveFrequency';
 	import { listSparGames } from '$lib/storage/sparGames';
 	import { reconcileAllPending } from '$lib/lichess/sparReview';
 	import { loadDossierReport } from '$lib/storage/dossierReport';
@@ -160,6 +162,7 @@
 			if (needsRecompute) {
 				void onComputeCoverage();
 			}
+			void startFrequencyBackfill();
 
 			// Fire post-game reconciliation in the background: any pending
 			// spar game whose Lichess PGN is ready gets its result + any
@@ -233,6 +236,69 @@
 	}
 
 	const DEPTH_PRESETS = [5, 10, 15, 0];
+
+	// Move frequencies for "learn the most common lines first" (Settings).
+	// Repertoires built in the builder collect them as lines are saved;
+	// imported ones (and ones built before the feature) get a one-off
+	// background backfill here, shallowest positions first, resumed on the
+	// next visit if the explorer rate limit interrupts it.
+	let freqCoverage = $state({ withData: 0, total: 0 });
+	let freqStatus = $state<string | null>(null);
+	let freqAbort: AbortController | null = null;
+	let freqRepId: string | null = null;
+
+	async function refreshFrequencyCoverage(id: string) {
+		if (!rep || rep.id !== id) return;
+		freqCoverage = frequencyCoverage(rep, await nodesMap(id));
+	}
+
+	async function startFrequencyBackfill() {
+		if (!rep || !settings || settings.drillPrioritizeCommon === false) return;
+		// Already running for this repertoire; a run for another one (the page
+		// is reused across repertoires) is cancelled in favour of this one.
+		if (freqAbort && freqRepId === rep.id) return;
+		freqAbort?.abort();
+		freqAbort = null;
+		freqStatus = null;
+		const nodes = await nodesMap(rep.id);
+		freqCoverage = frequencyCoverage(rep, nodes);
+		const token = effectiveLichessToken(settings);
+		if (!token) {
+			if (freqCoverage.withData < freqCoverage.total) {
+				freqStatus = 'connect Lichess in Settings to fetch the rest';
+			}
+			return;
+		}
+		const abort = new AbortController();
+		freqAbort = abort;
+		const id = rep.id;
+		freqRepId = id;
+		try {
+			const res = await backfillMoveFrequencies(rep, nodes, {
+				token,
+				speeds: settings.explorerSpeeds,
+				ratings: settings.explorerRatings,
+				signal: abort.signal,
+				onProgress: (done, todo) => {
+					if (abort.signal.aborted) return;
+					freqStatus = `fetching ${done}/${todo}`;
+					if (done % 10 === 0) void refreshFrequencyCoverage(id);
+				}
+			});
+			if (abort.signal.aborted) return;
+			freqStatus =
+				res.stoppedBy === 'rate-limit'
+					? 'paused by the Lichess rate limit, continues on your next visit'
+					: res.stoppedBy
+						? 'paused, continues on your next visit'
+						: null;
+			await refreshFrequencyCoverage(id);
+		} finally {
+			if (freqAbort === abort) freqAbort = null;
+		}
+	}
+
+	onDestroy(() => freqAbort?.abort());
 
 	async function onDrillMaxMovesChange(maxMoves: number) {
 		if (!rep) return;
@@ -1052,13 +1118,21 @@
 					<p
 						class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
 					>
-						New moves are always introduced shallowest-first across the whole tree. With this on, a
-						new move also waits until every earlier move on its line has been introduced and your
-						last answer to it was right — forget an early move and new material below it pauses
-						until you recall it again.
+						New moves are introduced across the whole tree — most common lines first, or
+						shallowest-first (see Settings). With this on, a new move also waits until every earlier
+						move on its line has been introduced and your last answer to it was right — forget an
+						early move and new material below it pauses until you recall it again.
 					</p>
 				</div>
 			</label>
+			{#if settings?.drillPrioritizeCommon !== false && freqCoverage.total > 0}
+				<p class="mt-3 font-mono text-[11px] text-[var(--color-parchment-500)] tabular-nums">
+					Move frequencies: {freqCoverage.withData} of {freqCoverage.total} opponent moves
+					{#if freqStatus}
+						· {freqStatus}
+					{/if}
+				</p>
+			{/if}
 		</section>
 
 		<!--

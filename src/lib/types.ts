@@ -130,6 +130,16 @@ export interface Edge {
 	 */
 	disabled?: boolean;
 	/**
+	 * How often this move is played from its position, in the Lichess games
+	 * (or masters / player games) the explorer counted. Recorded for opponent
+	 * moves, when the builder or the auto-builder already has the explorer
+	 * data in hand, or by a background backfill after import. Used to drill
+	 * the lines you're most likely to meet first. Derived data: writing it
+	 * does not stamp `updatedAt`, and sync merges it on its own (newest
+	 * `fetchedAt` wins) so it never overrides a real edit to the edge.
+	 */
+	frequency?: MoveFrequency;
+	/**
 	 * Wall-clock ms-since-epoch of the most recent write to this edge.
 	 * Populated by the storage layer on every mutation; used by the
 	 * sync v2 merge to break ties on `annotation`/`weight`/`disabled`
@@ -146,6 +156,17 @@ export interface Edge {
  * instead of being resurrected by the adds-win-against-deletes edge union.
  * Mirrors the repertoire-level `repTombstones` mechanism, one level down.
  */
+export interface MoveFrequency {
+	/** Games in which this move was played from the position. */
+	games: number;
+	/** All games that reached the position. */
+	total: number;
+	/** Which explorer database the counts came from. */
+	source: 'lichess' | 'masters' | 'player';
+	/** When the counts were read, ms since epoch. */
+	fetchedAt: number;
+}
+
 export interface EdgeTombstone {
 	/** Target position of the edge that was removed. */
 	toFenKey: string;
@@ -472,6 +493,14 @@ export interface AppSettings {
 	 * sooner and animate past faster. Defaults to 7.
 	 */
 	drillWellLearnedDays?: number;
+	/**
+	 * Introduce new moves in order of how likely you are to reach them — the
+	 * product of opponent move frequencies along the line (see
+	 * `Edge.frequency`) — instead of purely shallowest-first. Positions
+	 * without frequency data fall back to an even split between the
+	 * prepared replies, which is plain breadth-first. Defaults to on.
+	 */
+	drillPrioritizeCommon?: boolean;
 	explorerSpeeds: string[];
 	explorerRatings: number[];
 	lichessApiToken: string;
