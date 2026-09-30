@@ -59,7 +59,7 @@
 		upsertIdeaCard
 	} from '$lib/storage/ideaCards';
 	import { upsertCard, getCard, deleteCard } from '$lib/storage/cards';
-	import { colorToMove } from '$lib/chess/fen';
+	import { colorToMove, fenKeyFromFen } from '$lib/chess/fen';
 	import {
 		edgeFromUci,
 		edgeFromSan,
@@ -82,6 +82,7 @@
 	import { buildTreeRows } from '$lib/tree/treeView';
 	import MoveTree from '$lib/tree/MoveTree.svelte';
 	import { fetchExplorer, peekExplorer } from '$lib/explorer/client';
+	import { captureMoveFrequencies } from '$lib/explorer/moveFrequency';
 	import { generateMiddlegameGuide, type GenerateProgress } from '$lib/middlegame/generate';
 	import {
 		aggregateToArrows,
@@ -798,6 +799,12 @@
 						res = await fetchExplorer(query, { signal: hintAbort.signal });
 					}
 					candidateUcis = res.moves.map((m) => m.uci);
+					// The explorer data is in hand anyway: record how often the
+					// opponent's prepared replies here are played, for the
+					// drill's "most common lines first" ordering.
+					if (rep && localSettings?.drillPrioritizeCommon !== false) {
+						void captureMoveFrequencies(rep, fenKeyFromFen(fen), res, 'lichess');
+					}
 					const totalGames = res.moves.reduce((s, m) => s + m.white + m.draws + m.black, 0);
 					currentExplorerGames = totalGames;
 					const threshold = rep?.coverageGoal ? totalGames / rep.coverageGoal : 0;
@@ -1063,6 +1070,7 @@
 
 	async function flushPending() {
 		if (!rep || pendingEdges.length === 0) return;
+		const saved = pendingEdges;
 		for (const p of pendingEdges) {
 			await addEdge(rep.id, p.fromKey, p.edge);
 			const parentSide = colorToMove(p.fromKey);
@@ -1083,9 +1091,43 @@
 		nodes = await nodesMap(rep.id);
 		await touchRepertoire(rep.id);
 		pendingEdges = [];
+		// In the background: normally answered from the explorer cache, but a
+		// slow or rate-limited explorer must never hold up the save itself.
+		void captureFrequenciesForSaved(saved);
 		// Save has closed some gaps and may have opened deeper ones; kick
 		// off a background refresh so subsequent clicks stay instant.
 		void refreshMissingCache();
+	}
+
+	/**
+	 * Record move frequencies for the opponent positions a Save just touched.
+	 * Same explorer query as the panel, so it's answered from the cache the
+	 * panel filled while the user was on those positions.
+	 */
+	async function captureFrequenciesForSaved(saved: PendingEdge[]) {
+		if (!rep || !settings || settings.drillPrioritizeCommon === false) return;
+		const token = effectiveLichessToken(settings);
+		if (!token) return;
+		const done: string[] = [];
+		for (const p of saved) {
+			if (done.includes(p.fromKey) || colorToMove(p.fromKey) === rep.color) continue;
+			done.push(p.fromKey);
+			try {
+				const res = await fetchExplorer(
+					{
+						fen: p.fromFen,
+						speeds: settings.explorerSpeeds,
+						ratings: settings.explorerRatings,
+						moves: 10,
+						token
+					},
+					{ priority: 'background' }
+				);
+				await captureMoveFrequencies(rep, p.fromKey, res, 'lichess');
+			} catch {
+				/* rate-limited / offline — the background backfill fills it in later */
+			}
+		}
 	}
 
 	function handleMove(

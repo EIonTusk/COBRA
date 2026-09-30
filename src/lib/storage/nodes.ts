@@ -49,7 +49,16 @@ export async function replaceRepertoireTree(
 	const cards = tx.objectStore('cards');
 	const ideas = tx.objectStore('idea_cards');
 
-	// Wipe every existing node for this repertoire.
+	// Wipe every existing node for this repertoire, keeping move frequencies
+	// (derived explorer data, see Edge.frequency) for moves that survive the
+	// rebuild — the same way cards on live positions keep their FSRS history.
+	const oldNodes = await nodes.index('by-repertoire').getAll(repertoireId);
+	const oldFrequency = new Map<string, Edge['frequency']>();
+	for (const n of oldNodes) {
+		for (const e of n.children) {
+			if (e.frequency) oldFrequency.set(`${n.fenKey}|${e.toFenKey}`, e.frequency);
+		}
+	}
 	const oldKeys = await nodes.index('by-repertoire').getAllKeys(repertoireId);
 	for (const key of oldKeys) await nodes.delete(key);
 
@@ -71,7 +80,12 @@ export async function replaceRepertoireTree(
 		const parent = ensure(fromFenKey);
 		ensure(edge.toFenKey);
 		if (!parent.children.find((e) => e.toFenKey === edge.toFenKey)) {
-			parent.children.push({ ...edge, updatedAt: edge.updatedAt ?? now });
+			const frequency = edge.frequency ?? oldFrequency.get(`${fromFenKey}|${edge.toFenKey}`);
+			parent.children.push({
+				...edge,
+				...(frequency ? { frequency } : {}),
+				updatedAt: edge.updatedAt ?? now
+			});
 		}
 		// Comments/nags on the edge live on the child node (the resulting
 		// position), matching how parseRepertoirePgn carries them over.

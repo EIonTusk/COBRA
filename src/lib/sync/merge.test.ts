@@ -281,6 +281,42 @@ describe('mergeNode', () => {
 		expect(edgeChanges).toBe(1);
 	});
 
+	it('merges move frequency on its own, newest fetch wins, without affecting edge LWW', () => {
+		const freq = (fetchedAt: number, games: number) => ({
+			games,
+			total: 1000,
+			source: 'lichess' as const,
+			fetchedAt
+		});
+		// Local edge wins LWW (newer edit, e.g. disabled), remote has newer counts.
+		const a = baseNode([
+			{
+				san: 'e5',
+				uci: 'e7e5',
+				toFenKey: 'A',
+				disabled: true,
+				frequency: freq(1, 10),
+				updatedAt: 300
+			}
+		]);
+		const b = baseNode([
+			{ san: 'e5', uci: 'e7e5', toFenKey: 'A', frequency: freq(5, 400), updatedAt: 200 }
+		]);
+		const ab = mergeNode(a, b).merged.children[0];
+		expect(ab.disabled).toBe(true);
+		expect(ab.frequency?.games).toBe(400);
+		// Remote edge wins LWW but has no counts: local counts are kept.
+		const c = baseNode([
+			{ san: 'e5', uci: 'e7e5', toFenKey: 'A', frequency: freq(5, 400), updatedAt: 100 }
+		]);
+		const d = baseNode([
+			{ san: 'e5', uci: 'e7e5', toFenKey: 'A', annotation: 'x', updatedAt: 200 }
+		]);
+		const cd = mergeNode(c, d).merged.children[0];
+		expect(cd.annotation).toBe('x');
+		expect(cd.frequency?.games).toBe(400);
+	});
+
 	it('field-LWW per edge using updatedAt', () => {
 		const a = baseNode([
 			{ san: 'e4', uci: 'e2e4', toFenKey: 'A', annotation: 'old', updatedAt: 100 }

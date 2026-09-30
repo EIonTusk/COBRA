@@ -12,6 +12,7 @@ import { parseSan, makeSanAndPlay } from 'chessops/san';
 import { parseUci, makeUci } from 'chessops/util';
 
 import { fetchExplorer } from '$lib/explorer/client';
+import { captureMoveFrequencies } from '$lib/explorer/moveFrequency';
 import { colorToMove } from '$lib/chess/fen';
 import { addEdge } from '$lib/storage/nodes';
 import { getCard, upsertCard } from '$lib/storage/cards';
@@ -106,6 +107,18 @@ export async function buildFromMasters(opts: MastersBuildOpts): Promise<MastersB
 			const next = fenAfterMove(fen, edge);
 			queue.push({ fen: next, ply: ply + 1 });
 			opts.onProgress?.(probed, edgesAdded);
+		}
+		// The counts are already in hand: record how often each opponent reply
+		// is played (masters, or the imitated player's games), for the drill's
+		// "most common lines first" ordering. A later Lichess backfill or
+		// builder visit upgrades these to the user's own rating bands.
+		if (!isOurTurn) {
+			await captureMoveFrequencies(
+				{ id: opts.repId, color: opts.color },
+				fenKey,
+				res,
+				opts.imitatePlayer ? 'player' : 'masters'
+			);
 		}
 	}
 
