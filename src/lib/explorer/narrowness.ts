@@ -17,7 +17,12 @@
  * probe costs an extra request, and Lichess rate-limits hard.
  */
 
-import { fetchExplorer, type ExplorerQuery, type ExplorerResponse } from './client';
+import {
+	fetchExplorer,
+	type ExplorerQuery,
+	type ExplorerResponse,
+	type FetchOptions
+} from './client';
 
 export interface NarrownessResult {
 	/** Minimum top-reply concentration observed across the probed plies. */
@@ -59,21 +64,25 @@ function concentrationOf(r: ExplorerResponse): { c: number; top?: string; total:
 export async function probeNarrowness(
 	fen: string,
 	uci: string,
-	base: Pick<ExplorerQuery, 'speeds' | 'ratings' | 'token'>
+	base: Pick<ExplorerQuery, 'speeds' | 'ratings' | 'token'>,
+	fetchOpts: FetchOptions = {}
 ): Promise<NarrownessResult> {
 	const k1 = cacheKey(fen, [uci]);
 	const hit = cache.get(k1);
 	if (hit) return hit;
 
 	try {
-		const r1 = await fetchExplorer({
-			fen,
-			play: [uci],
-			speeds: base.speeds,
-			ratings: base.ratings,
-			token: base.token,
-			moves: 6
-		});
+		const r1 = await fetchExplorer(
+			{
+				fen,
+				play: [uci],
+				speeds: base.speeds,
+				ratings: base.ratings,
+				token: base.token,
+				moves: 6
+			},
+			fetchOpts
+		);
 		const { c: c1, top, total } = concentrationOf(r1);
 		if (!top || c1 < 0.55 || total < 30) {
 			const result: NarrownessResult = { concentration: c1, plies: 1, childGames: total };
@@ -86,14 +95,17 @@ export async function probeNarrowness(
 		const cachedC2 = cache.get(k2);
 		let c2 = cachedC2?.concentration;
 		if (c2 === undefined) {
-			const r2 = await fetchExplorer({
-				fen,
-				play: [uci, top],
-				speeds: base.speeds,
-				ratings: base.ratings,
-				token: base.token,
-				moves: 6
-			});
+			const r2 = await fetchExplorer(
+				{
+					fen,
+					play: [uci, top],
+					speeds: base.speeds,
+					ratings: base.ratings,
+					token: base.token,
+					moves: 6
+				},
+				fetchOpts
+			);
 			c2 = concentrationOf(r2).c;
 			cache.set(k2, { concentration: c2, plies: 1, childGames: 0 });
 		}

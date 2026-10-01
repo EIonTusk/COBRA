@@ -128,13 +128,16 @@ function applyUci(fen: string, uci: string): string | null {
 }
 
 async function probeTotal(fen: string, opts: MissingOpts): Promise<number> {
-	const res = await fetchExplorer({
-		fen,
-		speeds: opts.speeds,
-		ratings: opts.ratings,
-		token: opts.token,
-		moves: 30
-	});
+	const res = await fetchExplorer(
+		{
+			fen,
+			speeds: opts.speeds,
+			ratings: opts.ratings,
+			token: opts.token,
+			moves: 30
+		},
+		{ priority: 'background' }
+	);
 	return res.moves.reduce((s, m) => s + m.white + m.draws + m.black, 0);
 }
 
@@ -145,13 +148,16 @@ async function probeMissing(
 	threshold: number,
 	opts: MissingOpts
 ): Promise<MissingMove[]> {
-	const res = await fetchExplorer({
-		fen,
-		speeds: opts.speeds,
-		ratings: opts.ratings,
-		token: opts.token,
-		moves: 30
-	});
+	const res = await fetchExplorer(
+		{
+			fen,
+			speeds: opts.speeds,
+			ratings: opts.ratings,
+			token: opts.token,
+			moves: 30
+		},
+		{ priority: 'background' }
+	);
 	const covered = new Set(node.children.map((e) => e.uci));
 	const out: MissingMove[] = [];
 	for (const m of res.moves) {

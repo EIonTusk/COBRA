@@ -136,7 +136,10 @@ export interface BackfillOptions {
 	speeds?: string[];
 	ratings?: number[];
 	signal?: AbortSignal;
-	/** Pause between explorer requests, to stay polite to the rate limit. */
+	/**
+	 * Extra pause between positions. The explorer client already spaces
+	 * background requests out, so none is needed by default.
+	 */
 	delayMs?: number;
 	onProgress?: (done: number, todo: number) => void;
 }
@@ -168,7 +171,7 @@ export async function backfillMoveFrequencies(
 		n.children.some((e) => e.frequency?.source !== 'lichess')
 	);
 	let filled = 0;
-	const delay = opts.delayMs ?? 250;
+	const delay = opts.delayMs ?? 0;
 	for (let i = 0; i < todo.length; i++) {
 		if (opts.signal?.aborted) {
 			return { filled, remaining: todo.length - i, stoppedBy: 'aborted' };
@@ -176,18 +179,24 @@ export async function backfillMoveFrequencies(
 		const node = todo[i];
 		const fen = node.fenKey === rep.rootFenKey ? rep.rootFen : `${node.fenKey} 0 1`;
 		try {
-			const res = await fetchExplorer({
-				fen,
-				speeds: opts.speeds,
-				ratings: opts.ratings,
-				moves: 10,
-				token: opts.token
-			});
+			// Background: yields to whatever the user is looking at, and the
+			// client spaces background requests out (see client.ts).
+			const res = await fetchExplorer(
+				{
+					fen,
+					speeds: opts.speeds,
+					ratings: opts.ratings,
+					moves: 10,
+					token: opts.token
+				},
+				{ priority: 'background', signal: opts.signal }
+			);
 			await captureMoveFrequencies(rep, node.fenKey, res, 'lichess');
 			filled++;
 		} catch (e) {
-			const stoppedBy =
-				e instanceof ExplorerRateLimited
+			const stoppedBy = opts.signal?.aborted
+				? 'aborted'
+				: e instanceof ExplorerRateLimited
 					? 'rate-limit'
 					: e instanceof ExplorerAuthRequired
 						? 'auth'

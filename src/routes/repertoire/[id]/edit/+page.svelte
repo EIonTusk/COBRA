@@ -81,7 +81,7 @@
 	} from '$lib/tree/missing';
 	import { buildTreeRows } from '$lib/tree/treeView';
 	import MoveTree from '$lib/tree/MoveTree.svelte';
-	import { fetchExplorer } from '$lib/explorer/client';
+	import { fetchExplorer, peekExplorer } from '$lib/explorer/client';
 	import { captureMoveFrequencies } from '$lib/explorer/moveFrequency';
 	import { generateMiddlegameGuide, type GenerateProgress } from '$lib/middlegame/generate';
 	import {
@@ -230,6 +230,9 @@
 	// the position is rare enough that no opponent move at it can be
 	// above-threshold, the line is naturally complete and worth saving.
 	let currentExplorerGames = $state<number | null>(null);
+	// How long a position must stay on the board before its explorer data is
+	// requested (matches the explorer panel's settle delay; issue #88).
+	const EXPLORER_SETTLE_MS = 350;
 	let engineUnsub: (() => void) | null = null;
 	let cloudEvalAbort: AbortController | null = null;
 
@@ -742,6 +745,7 @@
 		const knownUcis = new Set<string>((currentNode?.children ?? []).map((e) => e.uci));
 		const localSettings = settings;
 		const token = localSettings ? effectiveLichessToken(localSettings) : null;
+		const hintAbort = new AbortController();
 
 		// Cloud eval: fire-and-forget, result lands in state when ready.
 		cloudEvalAbort?.abort();
@@ -776,13 +780,24 @@
 			let candidateUcis: string[] | undefined;
 			if (token) {
 				try {
-					const res = await fetchExplorer({
+					// Same query as the explorer panel, so the two share one
+					// request. Cached → instant; otherwise wait until the user
+					// stops on the position, and drop it if they move on
+					// (issue #88 — scrubbing through a line used to fire a
+					// request per position passed).
+					const query = {
 						fen,
 						speeds: localSettings?.explorerSpeeds,
 						ratings: localSettings?.explorerRatings,
 						token,
 						moves: 10
-					});
+					};
+					let res = peekExplorer(query);
+					if (!res) {
+						await new Promise((r) => setTimeout(r, EXPLORER_SETTLE_MS));
+						if (hintAbort.signal.aborted) return;
+						res = await fetchExplorer(query, { signal: hintAbort.signal });
+					}
 					candidateUcis = res.moves.map((m) => m.uci);
 					// The explorer data is in hand anyway: record how often the
 					// opponent's prepared replies here are played, for the
@@ -803,6 +818,7 @@
 					/* non-fatal */
 				}
 			}
+			if (hintAbort.signal.aborted) return;
 
 			if (engine) {
 				try {
@@ -823,6 +839,7 @@
 		})();
 
 		return () => {
+			hintAbort.abort();
 			engineUnsub?.();
 			engineUnsub = null;
 			cloudEvalAbort?.abort();
@@ -1096,13 +1113,16 @@
 			if (done.includes(p.fromKey) || colorToMove(p.fromKey) === rep.color) continue;
 			done.push(p.fromKey);
 			try {
-				const res = await fetchExplorer({
-					fen: p.fromFen,
-					speeds: settings.explorerSpeeds,
-					ratings: settings.explorerRatings,
-					moves: 10,
-					token
-				});
+				const res = await fetchExplorer(
+					{
+						fen: p.fromFen,
+						speeds: settings.explorerSpeeds,
+						ratings: settings.explorerRatings,
+						moves: 10,
+						token
+					},
+					{ priority: 'background' }
+				);
 				await captureMoveFrequencies(rep, p.fromKey, res, 'lichess');
 			} catch {
 				/* rate-limited / offline — the background backfill fills it in later */

@@ -131,6 +131,17 @@ describe('backfillMoveFrequencies', () => {
 		expect(frequencyCoverage(rep, await nodesMap(REP))).toEqual({ withData: 5, total: 5 });
 	});
 
+	it('sends its requests as background work, so the builder goes first', async () => {
+		const { fetchExplorer } = await import('./client');
+		const mocked = vi.mocked(fetchExplorer);
+		mocked.mockClear();
+		await backfillMoveFrequencies(rep, await nodesMap(REP), { token: 't', delayMs: 0 });
+		expect(mocked.mock.calls.length).toBeGreaterThan(0);
+		for (const call of mocked.mock.calls) {
+			expect(call[1]).toMatchObject({ priority: 'background' });
+		}
+	});
+
 	it('stops on the rate limit and resumes where it left off', async () => {
 		failAfter = 1;
 		const first = await backfillMoveFrequencies(rep, await nodesMap(REP), {

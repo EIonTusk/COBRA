@@ -14,13 +14,15 @@
 		CircleSlash,
 		MoreVertical
 	} from 'lucide-svelte';
-	import type { ComponentType, Snippet } from 'svelte';
+	import { untrack, type ComponentType, type Snippet } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 
 	import {
 		fetchExplorer,
+		peekExplorer,
+		explorerCooldownMs,
 		ExplorerRateLimited,
 		ExplorerAuthRequired,
 		type ExplorerMove,
@@ -280,14 +282,74 @@
 		})();
 	});
 
+	// Rate-limit friendly loading (issue #88): a position already in the
+	// explorer cache shows at once; anything else waits until the user has
+	// stopped on the position, and leaving it drops the queued request.
+	const SETTLE_MS = 350;
+	// Sharpness probes cost extra requests; only spend them on a position
+	// the user is actually studying.
+	const PROBE_SETTLE_MS = 1200;
+	let loadAbort: AbortController | null = null;
+	let probeAbort: AbortController | null = null;
+
 	$effect(() => {
 		const currentFen = fen;
 		if (!currentFen) return;
 		if (debounceTimer) clearTimeout(debounceTimer);
+		loadAbort?.abort();
+		loadAbort = null;
+		probeAbort?.abort();
+		probeAbort = null;
+		// Invalidate anything still in flight for the previous position now,
+		// not only once the next load starts.
+		probeToken++;
+		const cached = untrack(() => peekCached(currentFen));
+		if (cached) {
+			void show(currentFen, cached, ++probeToken);
+			return;
+		}
 		debounceTimer = setTimeout(() => {
 			void load(currentFen);
-		}, 300);
+		}, SETTLE_MS);
 	});
+
+	function explorerQuery(fen: string, token: string) {
+		return {
+			fen,
+			speeds: settings?.explorerSpeeds,
+			ratings: settings?.explorerRatings,
+			moves: 10,
+			token
+		};
+	}
+
+	function peekCached(fen: string): ExplorerResponse | null {
+		if (!settings) return null;
+		const token = effectiveLichessToken(settings);
+		return token ? peekExplorer(explorerQuery(fen, token)) : null;
+	}
+
+	/** Display a result and schedule this position's sharpness probes. */
+	async function show(fen: string, res: ExplorerResponse, myToken: number) {
+		needsToken = false;
+		error = null;
+		loading = false;
+		narrowness = new Map();
+		result = res;
+		// Opportunistic capture: cache the opening tag for this position
+		// so the walkthrough's line filter (and any other surface that
+		// wants a human-readable name) can skip the explorer round-trip.
+		if (res.opening) {
+			try {
+				void setPositionOpening(fenKeyFromFen(fen), res.opening);
+			} catch {
+				/* malformed FEN — nothing to cache */
+			}
+		}
+		await new Promise((r) => setTimeout(r, PROBE_SETTLE_MS));
+		if (myToken !== probeToken) return;
+		void scheduleNarrownessProbes(fen, res, myToken);
+	}
 
 	async function load(fen: string) {
 		if (!settings) settings = await getSettings();
@@ -304,28 +366,18 @@
 		// Reset probes; they were for the previous position.
 		narrowness = new Map();
 		const myToken = ++probeToken;
+		const abort = new AbortController();
+		loadAbort = abort;
 		try {
-			const res = await fetchExplorer({
-				fen,
-				speeds: settings.explorerSpeeds,
-				ratings: settings.explorerRatings,
-				moves: 10,
-				token: lichessToken
+			const res = await fetchExplorer(explorerQuery(fen, lichessToken), {
+				signal: abort.signal
 			});
 			if (myToken !== probeToken) return;
-			result = res;
-			// Opportunistic capture: cache the opening tag for this position
-			// so the walkthrough's line filter (and any other surface that
-			// wants a human-readable name) can skip the explorer round-trip.
-			if (res.opening) {
-				try {
-					void setPositionOpening(fenKeyFromFen(fen), res.opening);
-				} catch {
-					/* malformed FEN — nothing to cache */
-				}
-			}
-			void scheduleNarrownessProbes(fen, res, myToken);
+			void show(fen, res, myToken);
 		} catch (e) {
+			// Superseded by a newer position — not an error worth showing.
+			if (e instanceof DOMException && e.name === 'AbortError') return;
+			if (myToken !== probeToken) return;
 			result = null;
 			if (e instanceof ExplorerAuthRequired) {
 				needsToken = true;
@@ -358,13 +410,22 @@
 			.slice(0, 4);
 
 		const lichessToken = effectiveLichessToken(settings);
+		// Background priority: never ahead of the position the user moves to
+		// next; dropped from the queue once they do.
+		const abort = new AbortController();
+		probeAbort = abort;
 		for (const { m } of candidates) {
-			if (myToken !== probeToken) return;
-			const r = await probeNarrowness(atFen, m.uci, {
-				speeds: settings.explorerSpeeds,
-				ratings: settings.explorerRatings,
-				token: lichessToken
-			});
+			if (myToken !== probeToken || abort.signal.aborted || explorerCooldownMs() > 0) return;
+			const r = await probeNarrowness(
+				atFen,
+				m.uci,
+				{
+					speeds: settings.explorerSpeeds,
+					ratings: settings.explorerRatings,
+					token: lichessToken
+				},
+				{ priority: 'background', signal: abort.signal }
+			);
 			if (myToken !== probeToken) return;
 			const next = new SvelteMap(narrowness);
 			next.set(m.uci, r);
