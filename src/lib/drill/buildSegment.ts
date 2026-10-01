@@ -45,6 +45,19 @@ function isWellLearned(card: Card, threshold: number): boolean {
 	return graduated && stability >= threshold;
 }
 
+/**
+ * Path from the line head to `fenKey`, preferring live (non-disabled) edges
+ * so a line walk never routes through a shelved move when a transposition
+ * reaches the same position through a live line. Falls back to the plain
+ * shortest path when no live route exists.
+ */
+function linePath(nodes: Map<string, RepertoireNode>, lineHead: string, fenKey: string) {
+	return (
+		pathToFenKey(nodes, lineHead, fenKey, { skipDisabled: true }) ??
+		pathToFenKey(nodes, lineHead, fenKey)
+	);
+}
+
 interface LineWalkResult {
 	cards: Card[];
 	walkStarts: number[];
@@ -90,14 +103,15 @@ async function pickWithLineWalk(
 	settings: AppSettings,
 	sessionCap: number,
 	newCap: number,
-	lineHead: string
+	lineHead: string,
+	isTrainable: (c: Card) => boolean
 ): Promise<LineWalkResult> {
 	const wellLearnedDays = settings.drillWellLearnedDays ?? 7;
 
 	const depthByKey = new Map<string, number>();
 	for (const c of pool) {
 		if (depthByKey.has(c.fenKey)) continue;
-		const path = pathToFenKey(nodes, lineHead, c.fenKey);
+		const path = linePath(nodes, lineHead, c.fenKey);
 		depthByKey.set(c.fenKey, path ? path.length : -1);
 	}
 	// Reviews claim the budget before new cards (as in pickBalancedDueCards),
@@ -146,7 +160,7 @@ async function pickWithLineWalk(
 
 		const walk: Card[] = [];
 		if (candidate.fenKey !== lineHead) {
-			const path = pathToFenKey(nodes, lineHead, candidate.fenKey);
+			const path = linePath(nodes, lineHead, candidate.fenKey);
 			if (path) {
 				for (let i = 0; i < path.length; i++) {
 					const fenKeyBeforeEdge = i === 0 ? lineHead : path[i - 1].toFenKey;
@@ -154,6 +168,10 @@ async function pickWithLineWalk(
 					if (colorToMove(fenKeyBeforeEdge) !== rep.color) continue;
 					const stored = await getCard(rep.id, fenKeyBeforeEdge);
 					if (!stored) continue;
+					// Prefix steps obey the same disabled-line filter as the
+					// pool (issue #91): the card at a prefix position may
+					// expect a move the user has disabled.
+					if (!isTrainable(stored)) continue;
 					if (isWellLearned(stored, wellLearnedDays)) continue;
 					walk.push(stored);
 				}
@@ -308,8 +326,11 @@ function sortByLineOrder(
  * edges AND P's own prepared move isn't the disabled head — the card lives at
  * the parent, so live-reachability alone wouldn't skip a move disabled
  * directly at P (P stays reachable from above).
+ *
+ * Exported so the runner can apply the same rule when it chains into the
+ * next card of a line mid-session.
  */
-function trainableFilter(
+export function trainableFilter(
 	rep: Repertoire,
 	nodes: Map<string, RepertoireNode>
 ): (c: Card) => boolean {
@@ -442,14 +463,23 @@ export async function buildSegment(
 	// back to a normal full-repertoire drill.
 	const startFenKey =
 		options?.startFenKey && nodes.has(options.startFenKey) ? options.startFenKey : null;
+	// Every mode honours soft-disabled lines (issues #80, #91).
+	const isTrainable = trainableFilter(rep, nodes);
 	const includeIdeas = options?.includeIdeas ?? mode === 'due';
-	const ideaQueue: IdeaCard[] =
-		includeIdeas && mode === 'due'
-			? await dueIdeaCards(rep.id, Date.now(), settings.drillSessionCap)
-			: [];
+	let ideaQueue: IdeaCard[] = [];
+	if (includeIdeas && mode === 'due') {
+		// Idea cards are position prompts, not moves: drop the ones only
+		// reachable through a disabled line.
+		const live = liveReachableFenKeys(nodes, rep.rootFenKey);
+		ideaQueue = (await dueIdeaCards(rep.id, Date.now(), settings.drillSessionCap)).filter((c) =>
+			live.has(c.fenKey)
+		);
+	}
 
 	if (mode === 'mistakes') {
-		const cards = await mistakeCards(rep.id, settings.drillSessionCap);
+		const cards = (await mistakeCards(rep.id, Number.MAX_SAFE_INTEGER))
+			.filter(isTrainable)
+			.slice(0, settings.drillSessionCap);
 		const dueOriginalKeys = new Set<string>(cards.map((c) => c.fenKey));
 		const sorted = sortByLineOrder(cards, rep, nodes, false);
 		return {
@@ -476,7 +506,8 @@ export async function buildSegment(
 		const cards: Card[] = [];
 		for (const m of pending) {
 			const existing = await getCard(rep.id, m.fenKey);
-			cards.push(existing ?? createFreshCard(rep.id, m.fenKey, m.expectedSan, Date.now()));
+			const card = existing ?? createFreshCard(rep.id, m.fenKey, m.expectedSan, Date.now());
+			if (isTrainable(card)) cards.push(card);
 		}
 		const dueOriginalKeys = new Set<string>(cards.map((c) => c.fenKey));
 		const sorted = sortByLineOrder(cards, rep, nodes, false);
@@ -499,7 +530,6 @@ export async function buildSegment(
 	// regardless of FSRS due date — an explicit "practice here now" request
 	// would otherwise yield an empty session when nothing below is due.
 	// Grading still updates FSRS as normal; only the selection ignores due.
-	const isTrainable = trainableFilter(rep, nodes);
 	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
 	let pool: Card[];
 	const reach =
@@ -555,7 +585,8 @@ export async function buildSegment(
 			settings,
 			settings.drillSessionCap,
 			settings.dailyNewCardCap,
-			lineHead
+			lineHead,
+			isTrainable
 		);
 		// Line-walk preserves the candidate-led ordering verbatim — the queue
 		// is already a sequence of full per-line walks. Skip the line-first

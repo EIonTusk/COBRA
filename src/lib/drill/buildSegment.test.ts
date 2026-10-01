@@ -177,6 +177,113 @@ describe('buildSegment disabled lines', () => {
 	});
 });
 
+// Issue #91: the remaining paths that let disabled moves back into a drill —
+// mistake/retrain modes, idea prompts, and line-walk prefix steps.
+describe('buildSegment disabled lines in every mode', () => {
+	beforeEach(async () => {
+		await wipe();
+		await seed();
+		const db = await getDB();
+		await db.clear('idea_cards');
+		await db.clear('mistakes');
+		await db.clear('repertoires');
+	});
+
+	it('drops lapsed cards in a disabled line from mistakes mode', async () => {
+		const db = await getDB();
+		const lapsed = (k: string): Card => ({
+			...card(k),
+			fsrs: { lapses: 1, state: 3 } as Card['fsrs'],
+			lastReview: 1
+		});
+		for (const k of ['A', 'C', 'E']) await db.put('cards', lapsed(k));
+		await disableEdge('B', 'D');
+		const seg = await buildSegment(rep, 'mistakes', settings());
+		expect(keys(seg.cards)).toEqual(['A', 'C']);
+	});
+
+	it('drops pending game mistakes in a disabled line from retrain mode', async () => {
+		const db = await getDB();
+		await db.put('repertoires', { ...rep, startingFenKey: null });
+		const mistake = (fenKey: string) => ({
+			id: `g:${REP}:${fenKey}`,
+			gameId: 'g',
+			gameUrl: '',
+			playedAt: 0,
+			detectedAt: 0,
+			speed: 'blitz',
+			opponent: 'o',
+			color: 'white' as const,
+			repertoireId: REP,
+			repertoireName: 'Test',
+			fenKey,
+			fen: fenKey,
+			playedSan: 'y',
+			expectedSan: 'x',
+			plyOffTree: 0,
+			status: 'pending' as const,
+			correctCount: 0
+		});
+		for (const k of ['C', 'E']) await db.put('mistakes', mistake(k));
+		await disableEdge('B', 'D');
+		const seg = await buildSegment(rep, 'retrain', settings());
+		expect(keys(seg.cards)).toEqual(['C']);
+	});
+
+	it('drops idea prompts at positions only reachable through a disabled line', async () => {
+		const db = await getDB();
+		const idea = (fenKey: string) => ({
+			repertoireId: REP,
+			fenKey,
+			prompt: 'plan?',
+			fsrs: {} as Card['fsrs'],
+			dueAt: 0,
+			createdAt: 0
+		});
+		for (const k of ['C', 'E']) await db.put('idea_cards', idea(k));
+		await disableEdge('B', 'D');
+		const seg = await buildSegment(rep, 'due', settings());
+		expect(seg.ideaQueue.map((c) => c.fenKey)).toEqual(['C']);
+	});
+
+	it('never adds a disabled move as a line-walk prefix step', async () => {
+		// root → P; P offers 'p' (disabled, → Q) and 'q' (live, → R → F).
+		// The card at P expects the disabled 'p'; F is due and reached live
+		// through 'q'. Before the fix the walk to F still asked P's 'p'.
+		await wipe();
+		const db = await getDB();
+		const n = (fenKey: string, children: RepertoireNode['children']): RepertoireNode => ({
+			repertoireId: REP,
+			fenKey,
+			children
+		});
+		const e = (san: string, toFenKey: string, disabled?: boolean) => ({
+			san,
+			uci: 'xxxx',
+			toFenKey,
+			...(disabled ? { disabled } : {})
+		});
+		for (const node of [
+			n(ROOT, [e('a', 'P')]),
+			n('P', [e('p', 'Q', true), e('q', 'R')]),
+			n('Q', []),
+			n('R', [e('r', 'F')]),
+			n('F', [e('f', 'G')]),
+			n('G', [])
+		])
+			await db.put('nodes', node);
+		await db.put('cards', { ...card('P'), expectedSan: 'p' });
+		await db.put('cards', { ...card('F'), expectedSan: 'f' });
+		// Test keys read as black-to-move, so a black rep owns every position.
+		const blackRep: Repertoire = { ...rep, color: 'black' };
+		const seg = await buildSegment(blackRep, 'due', {
+			...settings(),
+			drillIntermediateMoves: 'play' as const
+		});
+		expect(seg.cards.map((c) => c.fenKey)).toEqual(['F']);
+	});
+});
+
 // Training depth (issue #86): only drill moves within the first N moves of
 // each line. Test keys aren't real FENs, so `colorToMove` reads the root as
 // black-to-move (offset 1): ply 0 → move 1, plies 1–2 → move 2, plies 3–4 →

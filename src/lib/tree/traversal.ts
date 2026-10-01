@@ -7,12 +7,18 @@ import type { Edge, RepertoireNode } from '$lib/types';
  * (three-fold repetition positions can make the graph cyclic).
  *
  * Callers supply `nodesMap(rep.id)` — a map keyed by fenKey.
+ *
+ * With `skipDisabled`, edges flagged `disabled` are never traversed, so the
+ * path only runs through live lines (null if the target is reachable only
+ * through a disabled one) — see `liveReachableFenKeys`.
  */
 export function pathToFenKey(
 	nodes: Map<string, RepertoireNode>,
 	rootKey: string,
-	targetKey: string
+	targetKey: string,
+	opts?: { skipDisabled?: boolean }
 ): Edge[] | null {
+	const skipDisabled = opts?.skipDisabled ?? false;
 	if (rootKey === targetKey) return [];
 
 	const visited = new Set<string>([rootKey]);
@@ -23,6 +29,7 @@ export function pathToFenKey(
 		const node = nodes.get(key);
 		if (!node) continue;
 		for (const edge of node.children) {
+			if (skipDisabled && edge.disabled) continue;
 			if (visited.has(edge.toFenKey)) continue;
 			const next: Edge[] = [...path, edge];
 			if (edge.toFenKey === targetKey) return next;
