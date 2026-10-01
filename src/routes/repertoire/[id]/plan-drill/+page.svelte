@@ -9,9 +9,9 @@
 	import { reviewCard, type DrillOutcome, outcomeToRating } from '$lib/fsrs/scheduler';
 	import { getRepertoire } from '$lib/storage/repertoires';
 	import { getSettings } from '$lib/storage/settings';
-	import { duePlanCards, listPlanCards, upsertPlanCard } from '$lib/storage/planCards';
+	import { listPlanCards, upsertPlanCard } from '$lib/storage/planCards';
 	import { nodesMap } from '$lib/storage/nodes';
-	import { pathToFenKey } from '$lib/tree/traversal';
+	import { liveReachableFenKeys, pathToFenKey } from '$lib/tree/traversal';
 	import { Button } from '$lib/ui';
 	import type { AppSettings, Color, PlanCard, Repertoire } from '$lib/types';
 
@@ -65,12 +65,18 @@
 	async function rebuildQueue(): Promise<void> {
 		if (!rep) return;
 		const cap = settings?.drillSessionCap ?? 30;
-		const due = await duePlanCards(rep.id, Date.now(), cap);
 		const all = await listPlanCards(rep.id);
 		totalInRep = all.length;
 		const nodes = await nodesMap(rep.id);
+		// Skip plans at positions only reachable through a disabled line.
+		const live = liveReachableFenKeys(nodes, rep.rootFenKey);
+		const now = Date.now();
+		const due = all
+			.filter((card) => card.dueAt <= now && live.has(card.fenKey))
+			.sort((a, b) => a.dueAt - b.dueAt)
+			.slice(0, cap);
 		queue = due.map((card) => {
-			const path = pathToFenKey(nodes, rep!.rootFenKey, card.fenKey);
+			const path = pathToFenKey(nodes, rep!.rootFenKey, card.fenKey, { skipDisabled: true });
 			return { card, lineSans: path ? path.map((e) => e.san) : [] };
 		});
 		totalAtStart = queue.length;

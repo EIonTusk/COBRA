@@ -37,9 +37,10 @@
 		type AppSettings,
 		type Card,
 		type Edge,
-		type IdeaCard
+		type IdeaCard,
+		type RepertoireNode
 	} from '$lib/types';
-	import { collectReplayLeafCards, sortLeavesByLineOrder } from './buildSegment';
+	import { collectReplayLeafCards, sortLeavesByLineOrder, trainableFilter } from './buildSegment';
 	import type { DrillEntry, DrillPhase, DrillSegment } from './types';
 	import {
 		gradeMove,
@@ -278,7 +279,7 @@
 	}>(() => {
 		if (!currentSegment || !currentEntry) return { fens: [], lastMoves: [] };
 		const rep = currentSegment.rep;
-		const path = pathToFenKey(currentSegment.nodes, rep.rootFenKey, currentEntry.card.fenKey);
+		const path = livePath(currentSegment.nodes, rep.rootFenKey, currentEntry.card.fenKey);
 		const fens: string[] = [rep.rootFen];
 		const lastMoves: ([Key, Key] | undefined)[] = [undefined];
 		if (!path) return { fens, lastMoves };
@@ -568,7 +569,7 @@
 	function acceptedEdgesFor(entry: DrillEntry, fen: string): Edge[] {
 		const seg = segments[entry.segIdx];
 		const node = seg.nodes.get(entry.card.fenKey);
-		const childSans = node?.children.map((e) => e.san) ?? [];
+		const childSans = liveChildren(node).map((e) => e.san);
 		const sans = childSans.length > 0 ? childSans : [entry.card.expectedSan];
 		const out: Edge[] = [];
 		for (const san of sans) {
@@ -608,7 +609,7 @@
 			return;
 		}
 
-		const pathFromRoot = pathToFenKey(seg.nodes, rep.rootFenKey, entry.card.fenKey);
+		const pathFromRoot = livePath(seg.nodes, rep.rootFenKey, entry.card.fenKey);
 		if (!pathFromRoot || pathFromRoot.length === 0) {
 			snapFen(targetFen);
 			userLastMove = undefined;
@@ -699,8 +700,9 @@
 		gradedSquare = dest;
 
 		const node = currentSegment.nodes.get(currentEntry.card.fenKey);
+		const liveSans = liveChildren(node).map((e) => e.san);
 		const accepted = new Set<string>(
-			node?.children.map((e) => e.san) ?? [currentEntry.card.expectedSan]
+			liveSans.length > 0 ? liveSans : [currentEntry.card.expectedSan]
 		);
 		if (accepted.has(edge.san)) {
 			moveQuality = 'correct';
@@ -1146,11 +1148,32 @@
 		for (const [nw, keys] of remappedDrilled) drilledByWalk.set(nw, keys);
 	}
 
+	// Soft-disabled moves (issues #80, #91) stay in the tree but are never
+	// drilled, accepted, or played by the opponent side.
+	function liveChildren(node: RepertoireNode | undefined): Edge[] {
+		return node ? node.children.filter((e) => !e.disabled) : [];
+	}
+
+	// Prefer a lead-in through live lines; fall back to any route.
+	function livePath(nodes: Map<string, RepertoireNode>, from: string, to: string): Edge[] | null {
+		return pathToFenKey(nodes, from, to, { skipDisabled: true }) ?? pathToFenKey(nodes, from, to);
+	}
+
+	const trainableBySegment = new WeakMap<DrillSegment, (c: Card) => boolean>();
+	function isTrainableIn(seg: DrillSegment, card: Card): boolean {
+		let fn = trainableBySegment.get(seg);
+		if (!fn) {
+			fn = trainableFilter(seg.rep, seg.nodes);
+			trainableBySegment.set(seg, fn);
+		}
+		return fn(card);
+	}
+
 	function effectivePlayedSan(entry: DrillEntry): string {
 		const seg = segments[entry.segIdx];
 		const node = seg.nodes.get(entry.card.fenKey);
 		const played = userPlayedSan;
-		if (played && node && node.children.some((c) => c.san === played)) {
+		if (played && liveChildren(node).some((c) => c.san === played)) {
 			return played;
 		}
 		return entry.card.expectedSan;
@@ -1168,8 +1191,8 @@
 		const postUserFen = fenAfterMove(cardFen, userEdge);
 		const postUserKey = fenKeyFromFen(postUserFen);
 		const nodeAfterUser = seg.nodes.get(postUserKey);
-		if (!nodeAfterUser || nodeAfterUser.children.length === 0) return null;
-		const oppEdge = nodeAfterUser.children[0];
+		const oppEdge = liveChildren(nodeAfterUser)[0];
+		if (!oppEdge) return null;
 		const nextKey = ck(entry.segIdx, oppEdge.toFenKey);
 		if (drilledKeys.has(nextKey)) return null;
 		// Walk-boundary gate (line-walk mode only). With shared-prefix
@@ -1211,13 +1234,16 @@
 		if (seg.mode === 'due' && !plannedKeys.has(nextKey)) {
 			const decisionNode = seg.nodes.get(entry.card.fenKey);
 			const isAltDivergence =
-				!!decisionNode && decisionNode.children.length > 1 && playedSan !== entry.card.expectedSan;
+				liveChildren(decisionNode).length > 1 && playedSan !== entry.card.expectedSan;
 			if (!isAltDivergence) return null;
 			plannedKeys.add(nextKey);
 			sessionPlannedTotal += 1;
 		}
 		const nextCard = await getCard(seg.rep.id, oppEdge.toFenKey);
 		if (!nextCard) return null;
+		// Never chain into a card the segment builder would have excluded
+		// (its prepared move disabled, issue #91).
+		if (!isTrainableIn(seg, nextCard)) return null;
 		return { card: nextCard, segIdx: entry.segIdx };
 	}
 
@@ -1233,7 +1259,7 @@
 		const postUserFen = fenAfterMove(cardFen, userEdge);
 		const postUserKey = fenKeyFromFen(postUserFen);
 		const nodeAfterUser = seg.nodes.get(postUserKey);
-		const oppEdge = nodeAfterUser?.children[0];
+		const oppEdge = liveChildren(nodeAfterUser)[0];
 		if (!oppEdge) {
 			advanceQueue();
 			return;
