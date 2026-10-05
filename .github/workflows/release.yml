@@ -60,6 +60,49 @@ jobs:
       - name: Unit tests
         run: npm run test:unit -- --run
 
+  # Create (or reuse) the GitHub Release once, before any build starts, so the
+  # parallel platform jobs all upload into the same release instead of racing
+  # to create their own (which used to leave duplicate drafts per tag).
+  draft-release:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.release.outputs.id }}
+      tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or reuse release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          # List instead of `releases/tags/{tag}`: that endpoint hides drafts.
+          ID=$(gh api "repos/$GH_REPO/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n1)
+          if [ -z "$ID" ]; then
+            ID=$(gh api -X POST "repos/$GH_REPO/releases" \
+              -f tag_name="$TAG" \
+              -f target_commitish="$GITHUB_SHA" \
+              -f name="COBRA $TAG" \
+              -f body="Automated release. See the commit history for changes." \
+              -F draft=true -F prerelease=false --jq '.id')
+            echo "Created draft release $ID for $TAG"
+          else
+            echo "Reusing release $ID for $TAG"
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
   # Generate platform-specific icons once from static/icon.svg and share them
   # with every downstream build, so each runner doesn't need librsvg.
   icons:
@@ -96,7 +139,7 @@ jobs:
           retention-days: 1
 
   desktop:
-    needs: icons
+    needs: [icons, draft-release]
     strategy:
       fail-fast: false
       matrix:
@@ -177,15 +220,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ steps.tag.outputs.value }}
-          releaseName: 'COBRA ${{ steps.tag.outputs.value }}'
-          releaseBody: 'Automated release. See the commit history for changes.'
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.draft-release.outputs.id }}
           args: ${{ matrix.args }}
 
   ios:
-    needs: icons
+    needs: [icons, draft-release]
     # Pinned to macos-15 (Xcode 16.4) deliberately. macos-latest rolled to
     # macos-26, whose Xcode 26 toolchain ships the Metal toolchain that shadows
     # the swiftCompatibility* libs Tauri's Swift glue force-loads, breaking the
@@ -298,15 +337,6 @@ jobs:
           path: dist/*
           if-no-files-found: warn
 
-      - name: Ensure release exists
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.tag.outputs.value }}"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --draft --title "COBRA $TAG" --notes "Automated release."
-          fi
-
       - name: Upload iOS assets to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -319,7 +349,7 @@ jobs:
           fi
 
   android:
-    needs: icons
+    needs: [icons, draft-release]
     runs-on: ubuntu-22.04
     env:
       NDK_VERSION: '26.3.11579264'
@@ -338,6 +368,10 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The action's default ("tools platform-tools") fails: the legacy
+          # `tools` package no longer exists in current cmdline-tools.
+          packages: platform-tools
 
       - name: Install NDK
         run: |
@@ -486,15 +520,6 @@ jobs:
           name: android-apks
           path: dist/*.apk
 
-      - name: Ensure release exists
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.tag.outputs.value }}"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --draft --title "COBRA $TAG" --notes "Automated release."
-          fi
-
       - name: Upload APKs to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -503,23 +528,25 @@ jobs:
           gh release upload "$TAG" dist/*.apk --clobber
 
   # All platform jobs upload to the same draft release. Once they've finished,
-  # flip the draft to published so users never see a half-populated release and
-  # the Tauri auto-updater never reads a release missing a platform binary.
+  # flip the draft to published so users never see a half-populated release.
+  # Publishing is the default: it only requires the desktop builds (the Tauri
+  # auto-updater's latest.json depends on them). A failing iOS/Android job
+  # still fails the run, but no longer leaves the whole release stuck as a
+  # draft — that's how v0.27.1–v0.29.1 never got published.
   publish:
-    needs: [desktop, ios, android]
+    needs: [draft-release, desktop, ios, android]
+    if: ${{ !cancelled() && needs.draft-release.result == 'success' && needs.desktop.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve tag
-        id: tag
-        shell: bash
+      - name: Report missing mobile builds
+        if: ${{ needs.ios.result != 'success' || needs.android.result != 'success' }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
+          echo "::warning::Publishing without all mobile assets (ios: ${{ needs.ios.result }}, android: ${{ needs.android.result }})."
 
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "${{ steps.tag.outputs.value }}" --draft=false --latest
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh api -X PATCH "repos/$GH_REPO/releases/${{ needs.draft-release.outputs.id }}" \
+            -F draft=false -f make_latest=true --jq '.html_url'
