@@ -18,8 +18,10 @@ on:
 permissions:
   contents: write
 
+# Keyed on the tag (not github.ref) so a tag push and a manual dispatch of the
+# same tag from another branch queue behind each other instead of racing.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
