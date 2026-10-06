@@ -50,13 +50,15 @@ export async function replaceRepertoireTree(
 	const ideas = tx.objectStore('idea_cards');
 
 	// Wipe every existing node for this repertoire, keeping move frequencies
-	// (derived explorer data, see Edge.frequency) for moves that survive the
+	// and only-move verdicts (derived data, see Edge.frequency / onlyMove) for moves that survive the
 	// rebuild — the same way cards on live positions keep their FSRS history.
 	const oldNodes = await nodes.index('by-repertoire').getAll(repertoireId);
 	const oldFrequency = new Map<string, Edge['frequency']>();
+	const oldOnlyMove = new Map<string, Edge['onlyMove']>();
 	for (const n of oldNodes) {
 		for (const e of n.children) {
 			if (e.frequency) oldFrequency.set(`${n.fenKey}|${e.toFenKey}`, e.frequency);
+			if (e.onlyMove) oldOnlyMove.set(`${n.fenKey}|${e.toFenKey}`, e.onlyMove);
 		}
 	}
 	const oldKeys = await nodes.index('by-repertoire').getAllKeys(repertoireId);
@@ -81,9 +83,11 @@ export async function replaceRepertoireTree(
 		ensure(edge.toFenKey);
 		if (!parent.children.find((e) => e.toFenKey === edge.toFenKey)) {
 			const frequency = edge.frequency ?? oldFrequency.get(`${fromFenKey}|${edge.toFenKey}`);
+			const onlyMove = edge.onlyMove ?? oldOnlyMove.get(`${fromFenKey}|${edge.toFenKey}`);
 			parent.children.push({
 				...edge,
 				...(frequency ? { frequency } : {}),
+				...(onlyMove ? { onlyMove } : {}),
 				updatedAt: edge.updatedAt ?? now
 			});
 		}

@@ -56,6 +56,7 @@
 	import { computeCoverage, COVERAGE_GOALS } from '$lib/tree/coverage';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
 	import { backfillMoveFrequencies, frequencyCoverage } from '$lib/explorer/moveFrequency';
+	import { backfillOnlyMoves } from '$lib/drill/onlyMove';
 	import { listSparGames } from '$lib/storage/sparGames';
 	import { reconcileAllPending } from '$lib/lichess/sparReview';
 	import { loadDossierReport } from '$lib/storage/dossierReport';
@@ -163,6 +164,7 @@
 				void onComputeCoverage();
 			}
 			void startFrequencyBackfill();
+			void startOnlyMoveBackfill();
 
 			// Fire post-game reconciliation in the background: any pending
 			// spar game whose Lichess PGN is ready gets its result + any
@@ -298,7 +300,33 @@
 		}
 	}
 
-	onDestroy(() => freqAbort?.abort());
+	// Engine "only move" verdicts for forced lines (issue #86): a quiet
+	// background pass over Lichess cloud evals, resumed on the next visit if
+	// it's interrupted. No UI; the drill reads the verdicts as they land.
+	let onlyMoveAbort: AbortController | null = null;
+	let onlyMoveRepId: string | null = null;
+
+	async function startOnlyMoveBackfill() {
+		if (!rep || !settings) return;
+		if (onlyMoveAbort && onlyMoveRepId === rep.id) return;
+		onlyMoveAbort?.abort();
+		const abort = new AbortController();
+		onlyMoveAbort = abort;
+		onlyMoveRepId = rep.id;
+		try {
+			await backfillOnlyMoves(rep, await nodesMap(rep.id), {
+				token: effectiveLichessToken(settings) || undefined,
+				signal: abort.signal
+			});
+		} finally {
+			if (onlyMoveAbort === abort) onlyMoveAbort = null;
+		}
+	}
+
+	onDestroy(() => {
+		freqAbort?.abort();
+		onlyMoveAbort?.abort();
+	});
 
 	async function onDrillMaxMovesChange(maxMoves: number) {
 		if (!rep) return;
