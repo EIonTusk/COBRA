@@ -275,8 +275,8 @@
 		new Set((currentNode?.children ?? []).map((e) => e.san))
 	);
 	// Saved continuations at this position with both SAN and UCI. Passed
-	// to the Explorer so the no-Lichess-token state can still render the
-	// user's own prep (with skeleton placeholders for Lichess stats).
+	// to the Explorer so it can render the user's own prep when Lichess is
+	// unavailable, or doesn't list a saved move, and still offer delete.
 	const savedMovesAtCurrent = $derived<Array<{ san: string; uci: string }>>(
 		(currentNode?.children ?? []).map((e) => ({ san: e.san, uci: e.uci }))
 	);
@@ -1148,44 +1148,62 @@
 	}
 
 	async function deleteFromExplorer(san: string, uci: string) {
+		await deleteEdgeAt(currentFenKey, uci);
+		void san;
+	}
+
+	/** Delete the saved move `uci` played from `fromKey`, anywhere in the tree. */
+	async function deleteEdgeAt(fromKey: string, uci: string) {
 		if (!rep) return;
 		// Drop any pending buffer entry for this edge first so UI state
 		// stays in sync.
-		pendingEdges = pendingEdges.filter((p) => !(p.fromKey === currentFenKey && p.edge.uci === uci));
-		const child = (currentNode?.children ?? []).find((c) => c.uci === uci);
+		pendingEdges = pendingEdges.filter((p) => !(p.fromKey === fromKey && p.edge.uci === uci));
+		const child = (nodes.get(fromKey)?.children ?? []).find((c) => c.uci === uci);
 		if (child) {
+			// Removing a move from the tree sidebar can cut the line the board
+			// is on. Step back to where the move was played from, so the board
+			// doesn't sit on (and later re-save) a deleted line.
+			const onBoardLine = history.some(
+				(step, i) =>
+					step.fenKey === child.toFenKey &&
+					(i === 0 ? rep!.rootFenKey : history[i - 1].fenKey) === fromKey
+			);
 			// Cut the edge AND sweep any positions it orphaned — descendant
 			// nodes, their FSRS move cards, and idea cards that are no longer
 			// reachable from the root. Without the sweep the drill queue keeps
 			// serving the deleted variation (it reads cards by index, not by
 			// walking the tree). Reachability-based so transpositions survive.
-			await removeEdgeAndPrune(rep.id, rep.rootFenKey, currentFenKey, child.toFenKey);
+			await removeEdgeAndPrune(rep.id, rep.rootFenKey, fromKey, child.toFenKey);
 			// If that was the last child at this position and we had a
 			// drill card here, remove the card too (it would point at a
 			// move that no longer exists). We leave cards at still-populated
 			// parents alone — they'll simply accept any remaining child.
 			const refreshed = await nodesMap(rep.id);
-			const remaining = refreshed.get(currentFenKey);
+			const remaining = refreshed.get(fromKey);
 			if (!remaining || remaining.children.length === 0) {
-				await deleteCard(rep.id, currentFenKey);
+				await deleteCard(rep.id, fromKey);
 			}
 			nodes = refreshed;
 			await touchRepertoire(rep.id);
+			if (onBoardLine) await jumpToFenKey(fromKey);
 		}
-		void san;
 	}
 
 	// Toggle a saved move's soft-disable flag. Non-destructive: the line stays
 	// in the tree (and its FSRS cards keep their history) — drilling just skips
 	// the move and everything reachable only through it until re-enabled.
 	async function disableFromExplorer(san: string, uci: string, next: boolean) {
+		await setEdgeDisabledAt(currentFenKey, uci, next);
+		void san;
+	}
+
+	async function setEdgeDisabledAt(fromKey: string, uci: string, next: boolean) {
 		if (!rep) return;
-		const child = (currentNode?.children ?? []).find((c) => c.uci === uci);
+		const child = (nodes.get(fromKey)?.children ?? []).find((c) => c.uci === uci);
 		if (!child) return;
-		await setEdgeDisabled(rep.id, currentFenKey, child.toFenKey, next);
+		await setEdgeDisabled(rep.id, fromKey, child.toFenKey, next);
 		nodes = await nodesMap(rep.id);
 		await touchRepertoire(rep.id);
-		void san;
 	}
 
 	/**
@@ -1408,7 +1426,12 @@
 	 */
 	function trainFromCurrent() {
 		if (!rep || !currentIsPinnable) return;
-		void goto(resolve(`/repertoire/${rep.id}/drill?from=${encodeURIComponent(currentFenKey)}`));
+		trainFrom(currentFenKey);
+	}
+
+	function trainFrom(fenKey: string) {
+		if (!rep) return;
+		void goto(resolve(`/repertoire/${rep.id}/drill?from=${encodeURIComponent(fenKey)}`));
 	}
 
 	function jumpTopEmpiricalGap() {
@@ -3511,6 +3534,10 @@
 						if (inDrawer) treeOpen = false;
 					}}
 					onToggleCollapse={toggleTreeCollapse}
+					onRemove={(move) => void deleteEdgeAt(move.fromFenKey, move.uci)}
+					onToggleDisabled={(move, next) => void setEdgeDisabledAt(move.fromFenKey, move.uci, next)}
+					onTrain={(move) => trainFrom(move.fenKey)}
+					countBelow={(fenKey) => countDescendantEdges(nodes, fenKey)}
 				/>
 			{/snippet}
 

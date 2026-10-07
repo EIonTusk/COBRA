@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { Shuffle, ChevronDown, ChevronRight } from 'lucide-svelte';
-	import type { TreeRow } from './treeView';
+	import { Shuffle, ChevronDown, ChevronRight, CircleSlash, GraduationCap } from 'lucide-svelte';
+	import { Button } from '$lib/ui';
+	import type { TreeMove, TreeRow } from './treeView';
 
 	interface Props {
 		rows: TreeRow[];
@@ -17,6 +18,16 @@
 		 * flex-fill (`flex-1 min-h-0`) lets it grow inside a full-height drawer.
 		 */
 		heightClass?: string;
+		/**
+		 * Right-click actions on a move (issue #96). Each is optional; the menu
+		 * shows only the ones provided, and doesn't open when none are.
+		 * `onRemove` is called after the user confirms.
+		 */
+		onRemove?: (move: TreeMove) => void;
+		onToggleDisabled?: (move: TreeMove, next: boolean) => void;
+		onTrain?: (move: TreeMove) => void;
+		/** Moves saved beneath a position, shown in the remove confirmation. */
+		countBelow?: (fenKey: string) => number;
 	}
 
 	let {
@@ -25,8 +36,54 @@
 		rootWhiteToMove,
 		onJump,
 		onToggleCollapse,
-		heightClass = 'max-h-[420px]'
+		heightClass = 'max-h-[420px]',
+		onRemove,
+		onToggleDisabled,
+		onTrain,
+		countBelow
 	}: Props = $props();
+
+	// Right-click menu, fixed-positioned at the cursor.
+	let menuMove = $state<TreeMove | null>(null);
+	let menuX = $state(0);
+	let menuY = $state(0);
+	function openMenu(e: MouseEvent, move: TreeMove) {
+		if (!onRemove && !onToggleDisabled && !onTrain) return;
+		e.preventDefault();
+		menuMove = move;
+		// Keep the menu on screen when opened near the right or bottom edge.
+		menuX = Math.max(8, Math.min(e.clientX, window.innerWidth - 200));
+		menuY = Math.max(8, Math.min(e.clientY, window.innerHeight - 140));
+	}
+	function closeMenu() {
+		menuMove = null;
+	}
+	function trainFromMenu() {
+		if (menuMove) onTrain?.(menuMove);
+		closeMenu();
+	}
+	function toggleFromMenu() {
+		if (menuMove) onToggleDisabled?.(menuMove, !menuMove.edgeDisabled);
+		closeMenu();
+	}
+
+	// Remove goes through a confirm that shows how much sits beneath the move.
+	let confirmMove = $state<TreeMove | null>(null);
+	let confirmCount = $state(0);
+	function confirmFromMenu() {
+		if (!menuMove) return;
+		confirmMove = menuMove;
+		confirmCount = countBelow?.(menuMove.fenKey) ?? 0;
+		closeMenu();
+	}
+	function closeConfirm() {
+		confirmMove = null;
+		confirmCount = 0;
+	}
+	function commitConfirm() {
+		if (confirmMove) onRemove?.(confirmMove);
+		closeConfirm();
+	}
 
 	// Move numbering relative to the root. For a Black-to-move root the first
 	// ply is a Black move, so shift the parity by one.
@@ -81,6 +138,7 @@
 						type="button"
 						data-current={move.fenKey === currentFenKey}
 						onclick={() => onJump(move.fenKey)}
+						oncontextmenu={(e) => openMenu(e, move)}
 						title={move.disabled
 							? 'Disabled — excluded from drilling'
 							: move.transposition
@@ -124,6 +182,107 @@
 		{/each}
 	{/if}
 </div>
+
+{#if menuMove}
+	<div
+		role="presentation"
+		class="fixed inset-0 z-50"
+		onclick={closeMenu}
+		oncontextmenu={(e) => {
+			e.preventDefault();
+			closeMenu();
+		}}
+	></div>
+	<div
+		role="menu"
+		tabindex="-1"
+		onkeydown={(e) => {
+			if (e.key === 'Escape') closeMenu();
+		}}
+		class="ink-panel fixed z-50 flex min-w-[11rem] flex-col overflow-hidden rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] shadow-lg"
+		style:left="{menuX}px"
+		style:top="{menuY}px"
+	>
+		<div
+			class="border-b border-[var(--color-ink-800)] px-3 py-1.5 font-mono text-[11px] text-[var(--color-parchment-500)]"
+		>
+			{menuMove.san}
+		</div>
+		{#if onTrain}
+			<button
+				type="button"
+				role="menuitem"
+				onclick={trainFromMenu}
+				class="flex items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)]"
+			>
+				<GraduationCap
+					class="size-3.5 shrink-0 text-[var(--color-parchment-400)]"
+					strokeWidth={1.75}
+				/>
+				Train from here
+			</button>
+		{/if}
+		{#if onToggleDisabled}
+			<button
+				type="button"
+				role="menuitem"
+				onclick={toggleFromMenu}
+				class="flex items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)]"
+			>
+				<CircleSlash class="size-3.5 shrink-0 text-[var(--color-parchment-400)]" strokeWidth={2} />
+				{menuMove.edgeDisabled ? 'Enable line' : 'Disable line'}
+			</button>
+		{/if}
+		{#if onRemove}
+			<button
+				type="button"
+				role="menuitem"
+				onclick={confirmFromMenu}
+				class="flex items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--color-oxblood-300)] transition-colors hover:bg-[var(--color-ink-800)]"
+			>
+				Remove move…
+			</button>
+		{/if}
+	</div>
+{/if}
+
+{#if confirmMove}
+	<div
+		role="presentation"
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+		onclick={(e) => {
+			if (e.target === e.currentTarget) closeConfirm();
+		}}
+		onkeydown={(e) => {
+			if (e.key === 'Escape') closeConfirm();
+		}}
+	>
+		<div
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="tree-confirm-remove-title"
+			class="ink-panel w-full max-w-sm rounded-[6px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-5 shadow-lg"
+		>
+			<h3 id="tree-confirm-remove-title" class="eyebrow mb-2 text-[var(--color-parchment-200)]">
+				Remove from tree
+			</h3>
+			<p class="mb-4 font-serif text-sm text-[var(--color-parchment-300)]">
+				{#if confirmCount === 0}
+					Remove <span class="font-mono text-[var(--color-parchment-100)]">{confirmMove.san}</span>
+					from your tree?
+				{:else}
+					Remove <span class="font-mono text-[var(--color-parchment-100)]">{confirmMove.san}</span>
+					and the {confirmCount}
+					{confirmCount === 1 ? 'move' : 'moves'} you've prepared beneath it?
+				{/if}
+			</p>
+			<div class="flex justify-end gap-2">
+				<Button variant="secondary" size="sm" onclick={closeConfirm}>Cancel</Button>
+				<Button variant="destructive" size="sm" onclick={commitConfirm}>Remove</Button>
+			</div>
+		</div>
+	</div>
+{/if}
 
 <style>
 	/* Fold controls stay quiet until you hover the line, so branch points
