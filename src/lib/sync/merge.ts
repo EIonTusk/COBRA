@@ -20,6 +20,7 @@
  * post-pull toast — see `MergeStats`.
  */
 
+import { newerProgress } from '$lib/storage/moveProgress';
 import type {
 	Card,
 	Edge,
@@ -80,29 +81,12 @@ export function emptyMergeStats(): MergeStats {
 // --- Cards / idea cards (identical shape) ----------------------------------
 
 /**
- * Last-write-wins by `lastReview`. The winner's full FSRS state — stability,
- * difficulty, due-date — comes along, so we never frankenstein a card with
- * one device's stability and another device's lapse count.
- *
- * Tiebreaker: a card that's been reviewed at all beats one that hasn't, then
- * the bundle's `exportedAt` if both sides claim no review. The cap-at-zero
- * means "two devices that have never opened this card converge on whichever
- * was pulled latest", which is fine.
+ * Last-write-wins by `lastReview`; see `newerProgress` for the tiebreaks.
+ * Cards keep their progress in a shared per-move record since issue #97,
+ * and incoming cards are folded into it with the same rule.
  */
 export function mergeCard(local: Card, remote: Card, _ctx: MergeContext): Card {
-	const ls = local.lastReview ?? 0;
-	const rs = remote.lastReview ?? 0;
-	if (rs > ls) return remote;
-	if (ls > rs) return local;
-	// Both unreviewed (or somehow exactly tied): prefer the row whose FSRS
-	// state has been touched (higher reps + lapses sum) — that's a
-	// near-zero edge case but yields stable behaviour. Otherwise fall back
-	// to the row with the higher dueAt, which is a deterministic tiebreak.
-	const lWeight = (local.fsrs?.reps ?? 0) + (local.fsrs?.lapses ?? 0);
-	const rWeight = (remote.fsrs?.reps ?? 0) + (remote.fsrs?.lapses ?? 0);
-	if (rWeight > lWeight) return remote;
-	if (lWeight > rWeight) return local;
-	return remote.dueAt >= local.dueAt ? remote : local;
+	return newerProgress(local, remote);
 }
 
 export function mergeIdeaCard(local: IdeaCard, remote: IdeaCard, ctx: MergeContext): IdeaCard {

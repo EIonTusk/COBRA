@@ -12,7 +12,7 @@
 import type { FSRSParameters } from 'ts-fsrs';
 import type { DrillOutcome } from '$lib/fsrs/scheduler';
 import type { Card } from '$lib/types';
-import { getDB } from '$lib/storage/db';
+import { getCard, upsertCard } from '$lib/storage/cards';
 import { markMistakeByPosition } from '$lib/storage/mistakes';
 import { pathToFenKey } from '$lib/tree/traversal';
 import { collectReplayLeafCards, sortLeavesByLineOrder } from './buildSegment';
@@ -49,7 +49,6 @@ export async function playSession(
 	params: FSRSParameters,
 	now: Date
 ): Promise<GradeEvent[]> {
-	const db = await getDB();
 	const grader = new SessionGrader();
 	const events: GradeEvent[] = [];
 	const introduced = new Set<string>();
@@ -88,7 +87,7 @@ export async function playSession(
 		};
 		// Hinted: the user plays the arrow (deriveOutcome → 'peeked').
 		const outcome: DrillOutcome = hinted ? 'peeked' : answer(p) ? 'correct' : 'wrong';
-		const before = (await db.get('cards', [seg.rep.id, card.fenKey])) ?? card;
+		const before = (await getCard(seg.rep.id, card.fenKey)) ?? card;
 		const after = grader.grade(
 			key,
 			card,
@@ -97,7 +96,7 @@ export async function playSession(
 			params,
 			now
 		);
-		if (after) await db.put('cards', after);
+		if (after) await upsertCard(after);
 		events.push({ ...p, outcome, before, after });
 		if (seg.mode === 'retrain' && outcome === 'correct') {
 			await markMistakeByPosition(seg.rep.id, card.fenKey);

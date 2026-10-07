@@ -6,7 +6,6 @@
 	import { goto, beforeNavigate } from '$app/navigation';
 	import { page } from '$app/state';
 	import { sync } from '$lib/sync/syncStore.svelte';
-	import { createEmptyCard } from 'ts-fsrs';
 	import {
 		ArrowLeft,
 		BookOpen,
@@ -58,7 +57,7 @@
 		getIdeaCard,
 		upsertIdeaCard
 	} from '$lib/storage/ideaCards';
-	import { upsertCard, getCard, deleteCard } from '$lib/storage/cards';
+	import { addCard, getCard, deleteCard } from '$lib/storage/cards';
 	import { colorToMove, fenKeyFromFen } from '$lib/chess/fen';
 	import {
 		edgeFromUci,
@@ -1076,16 +1075,7 @@
 			const parentSide = colorToMove(p.fromKey);
 			if (rep.color === parentSide) {
 				const existing = await getCard(rep.id, p.fromKey);
-				if (!existing) {
-					const now = Date.now();
-					await upsertCard({
-						repertoireId: rep.id,
-						fenKey: p.fromKey,
-						expectedSan: p.edge.san,
-						fsrs: createEmptyCard(new Date(now)),
-						dueAt: now
-					});
-				}
+				if (!existing) await addCard(rep.id, p.fromKey, p.edge.san);
 			}
 		}
 		nodes = await nodesMap(rep.id);

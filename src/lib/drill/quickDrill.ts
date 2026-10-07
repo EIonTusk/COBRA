@@ -1,6 +1,7 @@
 import type { AppSettings, Repertoire } from '$lib/types';
 import { buildSegment, segmentEventCount, segmentNewCount } from './buildSegment';
 import type { DrillSegment } from './types';
+import { moveId } from '$lib/storage/moveProgress';
 
 /**
  * Build the quick drill: one `due` segment per repertoire. White reps come
@@ -10,7 +11,9 @@ import type { DrillSegment } from './types';
  * the earlier segments left behind. Once the budget is exhausted, later reps
  * drop out of the session entirely — they'll surface in a future drill once
  * today's quota is spent. Each rep keeps its own training depth and
- * progressive-unlock setting.
+ * progressive-unlock setting. A move several reps prepare shares one
+ * progress record (issue #97), so it's planned only in the first segment
+ * that picks it up.
  */
 export async function buildQuickDrillSegments(
 	reps: Repertoire[],
@@ -21,6 +24,7 @@ export async function buildQuickDrillSegments(
 	const out: DrillSegment[] = [];
 	let remainingSession = settings.drillSessionCap;
 	let remainingNew = settings.dailyNewCardCap;
+	const planned = new Set<string>();
 	for (const rep of ordered) {
 		if (remainingSession <= 0) break;
 		const constrained: AppSettings = {
@@ -28,9 +32,10 @@ export async function buildQuickDrillSegments(
 			drillSessionCap: remainingSession,
 			dailyNewCardCap: Math.max(0, remainingNew)
 		};
-		const seg = await buildSegment(rep, 'due', constrained);
+		const seg = await buildSegment(rep, 'due', constrained, { skipMoves: planned });
 		if (seg.cards.length === 0 && seg.ideaQueue.length === 0) continue;
 		out.push(seg);
+		for (const c of seg.cards) planned.add(moveId(c));
 		remainingSession -= segmentEventCount(seg);
 		remainingNew -= segmentNewCount(seg);
 	}

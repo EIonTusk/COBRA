@@ -47,7 +47,9 @@
 		countDue,
 		countMistakeCards,
 		listCards,
-		resetAllFsrs
+		resetAllFsrs,
+		countSharedCards,
+		sharedKeptNote
 	} from '$lib/storage/cards';
 	import { countDueIdeaCards } from '$lib/storage/ideaCards';
 	import { countDuePlanCards, countPlanCards } from '$lib/storage/planCards';
@@ -437,10 +439,12 @@
 
 	async function onForgetProgress() {
 		if (!rep) return;
+		const shared = await countSharedCards(rep.id);
 		const ok = await confirmDialog({
 			title: 'Forget all progress?',
 			message:
-				'Resets the spaced-repetition schedule on every card in this repertoire. The tree and your prepared moves stay; lapses, intervals, and review history are wiped and everything becomes due now.',
+				'Resets the spaced-repetition schedule on every card in this repertoire. The tree and your prepared moves stay; lapses, intervals, and review history are wiped and everything becomes due now.' +
+				sharedKeptNote(shared),
 			confirmLabel: 'Forget progress',
 			variant: 'destructive'
 		});

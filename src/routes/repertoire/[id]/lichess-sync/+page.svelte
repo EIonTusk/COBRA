@@ -15,8 +15,7 @@
 
 	import { getRepertoire, setLichessStudyLink } from '$lib/storage/repertoires';
 	import { nodesMap, replaceRepertoireTree } from '$lib/storage/nodes';
-	import { getCard, upsertCard } from '$lib/storage/cards';
-	import { createFreshCard } from '$lib/fsrs/scheduler';
+	import { addCard, getCard } from '$lib/storage/cards';
 	import { colorToMove } from '$lib/chess/fen';
 	import { parseRepertoirePgn, chapterizeRepertoire, type ExportNode } from '$lib/chess/pgn';
 	import { getSettings } from '$lib/storage/settings';
@@ -421,7 +420,7 @@
 				if (colorToMove(fromFenKey) !== rep.color) continue;
 				const existing = await getCard(rep.id, fromFenKey);
 				if (!existing) {
-					await upsertCard(createFreshCard(rep.id, fromFenKey, edge.san));
+					await addCard(rep.id, fromFenKey, edge.san);
 				}
 			}
 

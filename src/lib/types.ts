@@ -197,10 +197,26 @@ export interface RepertoireNode {
 	deletedChildren?: EdgeTombstone[];
 }
 
-export interface Card {
+/**
+ * A move card as the drill sees it: one repertoire's prepared move at a
+ * position, joined with that move's learning progress.
+ *
+ * Storage keeps the two halves apart (issue #97). Membership — "this
+ * repertoire trains `expectedSan` here" — is a `CardSlot` in `cards`; the
+ * FSRS state is a `MoveProgress` in `move_progress`, keyed by position and
+ * move, so the same move in two repertoires is learned once. Read and write
+ * cards through `$lib/storage/cards`, which does the join.
+ */
+export interface Card extends CardSlot, CardProgress {}
+
+/** Row in the `cards` store: a repertoire trains this move at this position. */
+export interface CardSlot {
 	repertoireId: string;
 	fenKey: string;
 	expectedSan: string;
+}
+
+export interface CardProgress {
 	fsrs: FsrsCard;
 	lastReview?: number;
 	dueAt: number;
@@ -211,6 +227,16 @@ export interface Card {
 	 * Undefined on cards graded before this field existed.
 	 */
 	lastRating?: number;
+}
+
+/**
+ * Row in the `move_progress` store, keyed by `[fenKey, expectedSan]`: the
+ * learning state of one move in one position, shared by every repertoire
+ * that prepares it (issue #97).
+ */
+export interface MoveProgress extends CardProgress {
+	fenKey: string;
+	expectedSan: string;
 }
 
 /**

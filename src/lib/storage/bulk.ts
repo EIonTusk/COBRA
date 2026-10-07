@@ -1,4 +1,6 @@
 import { getDB } from './db';
+import { listCards } from './cards';
+import { foldProgress, toProgress, toSlot } from './moveProgress';
 import { getSettings, saveSettings, defaultSettings } from './settings';
 import type { AppSettings, Card, IdeaCard, Repertoire, RepertoireNode } from '$lib/types';
 
@@ -15,12 +17,14 @@ export interface LibraryExport {
 
 export async function exportAll(): Promise<LibraryExport> {
 	const db = await getDB();
-	const [repertoires, nodes, cards, ideaCards] = await Promise.all([
+	const [repertoires, nodes, ideaCards] = await Promise.all([
 		db.getAll('repertoires'),
 		db.getAll('nodes'),
-		db.getAll('cards'),
 		db.getAll('idea_cards')
 	]);
+	// Each card carries its (shared) progress, so the file keeps the same
+	// self-contained shape it had before progress moved to its own store.
+	const cards = (await Promise.all(repertoires.map((r) => listCards(r.id)))).flat();
 	const settings = await getSettings();
 	return {
 		version: 2,
@@ -65,14 +69,23 @@ export async function importAll(
 	// transaction and repopulated in another, so a failure midway through
 	// the second transaction left the user with an empty library.
 	const db = await getDB();
-	const tx = db.transaction(['repertoires', 'nodes', 'cards', 'idea_cards'], 'readwrite');
+	const tx = db.transaction(
+		['repertoires', 'nodes', 'cards', 'move_progress', 'idea_cards'],
+		'readwrite'
+	);
 	await tx.objectStore('repertoires').clear();
 	await tx.objectStore('nodes').clear();
 	await tx.objectStore('cards').clear();
+	await tx.objectStore('move_progress').clear();
 	await tx.objectStore('idea_cards').clear();
 	for (const r of data.repertoires) await tx.objectStore('repertoires').put(r);
 	for (const n of data.nodes) await tx.objectStore('nodes').put(n);
-	for (const c of data.cards) await tx.objectStore('cards').put(c);
+	// A file written before issue #97 can hold diverging copies of one
+	// move's progress (one per repertoire); the most recent review wins.
+	for (const c of data.cards) {
+		await tx.objectStore('cards').put(toSlot(c));
+		await foldProgress(tx.objectStore('move_progress'), toProgress(c));
+	}
 	if (Array.isArray(data.ideaCards)) {
 		for (const ic of data.ideaCards) await tx.objectStore('idea_cards').put(ic);
 	}

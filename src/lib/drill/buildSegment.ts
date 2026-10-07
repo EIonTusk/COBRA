@@ -10,10 +10,16 @@ import {
 } from '$lib/tree/traversal';
 import { buildLineFirstQueue } from '$lib/tree/lineOrder';
 import { reachProbabilities } from '$lib/tree/reachProbability';
-import { getCard, listCards, mistakeCards, pickBalancedDueCards } from '$lib/storage/cards';
+import {
+	cardForMove,
+	getCard,
+	listCards,
+	mistakeCards,
+	pickBalancedDueCards
+} from '$lib/storage/cards';
+import { moveId } from '$lib/storage/moveProgress';
 import { dueIdeaCards } from '$lib/storage/ideaCards';
 import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
-import { createFreshCard } from '$lib/fsrs/scheduler';
 import { nodesMap } from '$lib/storage/nodes';
 import type { DrillMode, DrillSegment } from './types';
 
@@ -455,7 +461,16 @@ export async function buildSegment(
 	rep: Repertoire,
 	mode: DrillMode,
 	settings: AppSettings,
-	options?: { includeIdeas?: boolean; startFenKey?: string | null }
+	options?: {
+		includeIdeas?: boolean;
+		startFenKey?: string | null;
+		/**
+		 * Moves (by `moveId`) already planned by an earlier segment of the
+		 * same session. Their progress is shared across repertoires (issue
+		 * #97), so a due move two repertoires both prepare is drilled once.
+		 */
+		skipMoves?: Set<string>;
+	}
 ): Promise<DrillSegment> {
 	const nodes = await nodesMap(rep.id);
 	// Train-from-position: only honour the anchor when it's actually a node in
@@ -506,7 +521,7 @@ export async function buildSegment(
 		const cards: Card[] = [];
 		for (const m of pending) {
 			const existing = await getCard(rep.id, m.fenKey);
-			const card = existing ?? createFreshCard(rep.id, m.fenKey, m.expectedSan, Date.now());
+			const card = existing ?? (await cardForMove(rep.id, m.fenKey, m.expectedSan));
 			if (isTrainable(card)) cards.push(card);
 		}
 		const dueOriginalKeys = new Set<string>(cards.map((c) => c.fenKey));
@@ -562,8 +577,9 @@ export async function buildSegment(
 		const now = Date.now();
 		const poolCap = settings.drillSessionCap * 5;
 		const all = await listCards(rep.id);
+		const skip = options?.skipMoves;
 		const due = all
-			.filter((c) => c.dueAt <= now && isTrainable(c) && withinDepth(c))
+			.filter((c) => c.dueAt <= now && isTrainable(c) && withinDepth(c) && !skip?.has(moveId(c)))
 			.sort((a, b) => a.dueAt - b.dueAt);
 		const reviews = due.filter((c) => c.lastReview).slice(0, poolCap);
 		const fresh = orderNewCards(

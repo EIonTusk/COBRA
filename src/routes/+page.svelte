@@ -5,7 +5,7 @@
 	import { ArrowRight, Plus, AlertTriangle, RotateCcw, BookOpen, Play, Zap } from 'lucide-svelte';
 
 	import { listRepertoires } from '$lib/storage/repertoires';
-	import { countDue, countCards } from '$lib/storage/cards';
+	import { listUniqueCards } from '$lib/storage/cards';
 	import { countDueIdeaCards } from '$lib/storage/ideaCards';
 	import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 	import { nodesMap } from '$lib/storage/nodes';
@@ -25,13 +25,13 @@
 
 	async function loadDashboard(initial: boolean) {
 		reps = await listRepertoires();
-		let due = 0;
-		let cards = 0;
-		for (const r of reps) {
-			due += await countDue(r.id);
-			due += await countDueIdeaCards(r.id);
-			cards += await countCards(r.id);
-		}
+		// Move cards are counted once per shared progress record, so a line
+		// that sits in several repertoires doesn't inflate the totals.
+		const moves = await listUniqueCards();
+		const now = Date.now();
+		let due = moves.filter((c) => c.dueAt <= now).length;
+		const cards = moves.length;
+		for (const r of reps) due += await countDueIdeaCards(r.id);
 		totalDue = due;
 		totalCards = cards;
 		pending = await filterActiveMistakes(await listMistakes({ status: 'pending' }));

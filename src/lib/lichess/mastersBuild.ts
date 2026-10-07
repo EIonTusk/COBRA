@@ -15,8 +15,7 @@ import { fetchExplorer } from '$lib/explorer/client';
 import { captureMoveFrequencies } from '$lib/explorer/moveFrequency';
 import { colorToMove } from '$lib/chess/fen';
 import { addEdge } from '$lib/storage/nodes';
-import { getCard, upsertCard } from '$lib/storage/cards';
-import { createFreshCard } from '$lib/fsrs/scheduler';
+import { addCard, getCard } from '$lib/storage/cards';
 import type { Color, Edge } from '$lib/types';
 
 export interface MastersBuildOpts {
@@ -100,7 +99,7 @@ export async function buildFromMasters(opts: MastersBuildOpts): Promise<MastersB
 			if (isOurTurn) {
 				const existing = await getCard(opts.repId, fenKey);
 				if (!existing) {
-					await upsertCard(createFreshCard(opts.repId, fenKey, edge.san));
+					await addCard(opts.repId, fenKey, edge.san);
 					cardsAdded += 1;
 				}
 			}
