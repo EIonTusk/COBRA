@@ -35,6 +35,11 @@ const cache = new Map<string, CloudEval | null>();
 const inflight = new Map<string, Promise<CloudEval | null>>();
 let cooldownUntil = 0;
 
+/** True while a 429 cool-down is in force (fetches return null meanwhile). */
+export function cloudEvalCoolingDown(): boolean {
+	return Date.now() < cooldownUntil;
+}
+
 /**
  * Fetch a cloud eval for `fen`. Returns null for cache misses (most
  * middlegame positions), network errors, or during a cool-down after

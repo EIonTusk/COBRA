@@ -27,6 +27,7 @@ import type {
 	EmpiricalGap,
 	IdeaCard,
 	MoveFrequency,
+	OnlyMoveVerdict,
 	Repertoire,
 	RepertoireNode,
 	SparGame,
@@ -275,6 +276,15 @@ function newerFrequency(
 	return b.fetchedAt > a.fetchedAt ? b : a;
 }
 
+function newerOnlyMove(
+	a: OnlyMoveVerdict | undefined,
+	b: OnlyMoveVerdict | undefined
+): OnlyMoveVerdict | undefined {
+	if (!a) return b;
+	if (!b) return a;
+	return b.fetchedAt > a.fetchedAt ? b : a;
+}
+
 /**
  * Per-edge union with field-LWW on `annotation` / `weight`, reconciled against
  * each side's edge tombstones so a deleted variation stays deleted.
@@ -335,6 +345,8 @@ export function mergeNode(
 		const winner = byTo.get(re.toFenKey)!;
 		const freq = newerFrequency(existing.frequency, re.frequency);
 		if (freq) winner.frequency = freq;
+		const only = newerOnlyMove(existing.onlyMove, re.onlyMove);
+		if (only) winner.onlyMove = only;
 	}
 
 	// Union both sides' tombstones, keeping the newest deletion per target,

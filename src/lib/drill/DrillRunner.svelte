@@ -41,6 +41,7 @@
 		type RepertoireNode
 	} from '$lib/types';
 	import { collectReplayLeafCards, sortLeavesByLineOrder, trainableFilter } from './buildSegment';
+	import { forcedRuns, runBefore, type ForcedRuns } from './forcedLines';
 	import type { DrillEntry, DrillPhase, DrillSegment } from './types';
 	import {
 		gradeMove,
@@ -894,6 +895,12 @@
 					failedKeysByWalk.set(failedWalk, keys);
 				}
 				keys.add(ratedCard.fenKey);
+				// A miss inside a forced run replays the run from its start
+				// (issue #86): the earlier moves in this walk go back in too.
+				for (const k of runBefore(forcedRunsOf(seg), ratedCard.fenKey)) {
+					if (!flatWalkFenKeys[failedWalk]?.has(k)) break;
+					keys.add(k);
+				}
 			}
 		}
 
@@ -1157,6 +1164,16 @@
 	// Prefer a lead-in through live lines; fall back to any route.
 	function livePath(nodes: Map<string, RepertoireNode>, from: string, to: string): Edge[] | null {
 		return pathToFenKey(nodes, from, to, { skipDisabled: true }) ?? pathToFenKey(nodes, from, to);
+	}
+
+	const runsBySegment = new WeakMap<DrillSegment, ForcedRuns>();
+	function forcedRunsOf(seg: DrillSegment): ForcedRuns {
+		let runs = runsBySegment.get(seg);
+		if (!runs) {
+			runs = forcedRuns(seg.nodes, seg.rep.rootFenKey, seg.rep.color);
+			runsBySegment.set(seg, runs);
+		}
+		return runs;
 	}
 
 	const trainableBySegment = new WeakMap<DrillSegment, (c: Card) => boolean>();

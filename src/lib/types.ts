@@ -140,6 +140,14 @@ export interface Edge {
 	 */
 	frequency?: MoveFrequency;
 	/**
+	 * Engine verdict on whether this opponent move is the only good one:
+	 * every other move loses or is much worse (issue #86, forced lines).
+	 * Recorded for a single prepared opponent reply by a background pass
+	 * over Lichess cloud evals (see `drill/onlyMove.ts`). Derived data like
+	 * `frequency`: not stamped in `updatedAt`, merged by newest `fetchedAt`.
+	 */
+	onlyMove?: OnlyMoveVerdict;
+	/**
 	 * Wall-clock ms-since-epoch of the most recent write to this edge.
 	 * Populated by the storage layer on every mutation; used by the
 	 * sync v2 merge to break ties on `annotation`/`weight`/`disabled`
@@ -164,6 +172,18 @@ export interface MoveFrequency {
 	/** Which explorer database the counts came from. */
 	source: 'lichess' | 'masters' | 'player';
 	/** When the counts were read, ms since epoch. */
+	fetchedAt: number;
+}
+
+export interface OnlyMoveVerdict {
+	/** True when every other move is at least ONLY_MOVE_GAP_CP worse. */
+	forced: boolean;
+	/**
+	 * How much worse the second-best move is than this one, in centipawns
+	 * from the mover's side (mates clamped). Null when no eval was found.
+	 */
+	gapCp: number | null;
+	/** When the eval was read, ms since epoch. */
 	fetchedAt: number;
 }
 
