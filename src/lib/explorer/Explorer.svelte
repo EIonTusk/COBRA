@@ -153,10 +153,10 @@
 		subtreeSizeBySan?: Map<string, number>;
 		/**
 		 * The user's saved continuations at this position, in tree order.
-		 * Only consumed when we can't reach Lichess (no token configured) —
-		 * we still want the user to see and click their own prep, just with
-		 * the Lichess-derived stats columns rendered as skeletons. Includes
-		 * `uci` so deletion still works without a successful explorer fetch.
+		 * Without Lichess (no token configured) these are the whole list,
+		 * with the Lichess-derived stats columns rendered as skeletons. With
+		 * Lichess, any the explorer doesn't list get rows of their own below
+		 * it. Includes `uci` so deletion works without an explorer entry.
 		 */
 		savedMoves?: Array<{ san: string; uci: string }>;
 	}
@@ -267,6 +267,18 @@
 	}
 
 	let result = $state<ExplorerResponse | null>(null);
+	// The position `result` belongs to. While a new position loads, `result`
+	// still holds the previous one's moves.
+	let resultFen = $state<string | null>(null);
+	// Saved moves the explorer list doesn't show (issue #96): rare or wrong
+	// moves Lichess has no games for, imported PGN moves, and so on. They get
+	// rows of their own so they can still be deleted or disabled here.
+	const unlistedSaved = $derived.by<Array<{ san: string; uci: string }>>(() => {
+		if (!result || resultFen !== fen || !savedMoves?.length) return [];
+		const shown = result.moves.length > 0 ? result.moves : (engineRows ?? []);
+		const shownUcis = new Set(shown.map((m) => m.uci));
+		return savedMoves.filter((m) => !shownUcis.has(m.uci));
+	});
 	let error = $state<string | null>(null);
 	let needsToken = $state(false);
 	let loading = $state(false);
@@ -336,6 +348,7 @@
 		loading = false;
 		narrowness = new Map();
 		result = res;
+		resultFen = fen;
 		// Opportunistic capture: cache the opening tag for this position
 		// so the walkthrough's line filter (and any other surface that
 		// wants a human-readable name) can skip the explorer round-trip.
@@ -1200,6 +1213,86 @@
 					Click a move to add it to your tree.
 				</p>
 			{/if}
+		{/if}
+
+		{#if unlistedSaved.length > 0}
+			<p
+				class="mt-3 mb-2 font-mono text-[10px] tracking-wider text-[var(--color-parchment-500)] uppercase"
+			>
+				Also in your repertoire
+			</p>
+			<ul class="space-y-0.5">
+				{#each unlistedSaved as m (m.uci)}
+					<li>
+						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+						<div
+							role={onselect ? 'button' : undefined}
+							tabindex={onselect ? 0 : undefined}
+							aria-disabled={!onselect ? 'true' : undefined}
+							onclick={onselect ? () => onselect?.(m.san) : undefined}
+							onkeydown={onselect ? (e) => handleRowKey(e, m) : undefined}
+							oncontextmenu={(e) => openContextMenu(e, m)}
+							class:opacity-50={disabledSans?.has(m.san)}
+							class="group relative grid w-full grid-cols-[5rem_1fr_3rem] items-center gap-1 rounded-[3px] py-1.5 pr-7 pl-1.5 text-left transition-colors lg:gap-2 {onselect
+								? 'cursor-pointer hover:bg-[var(--color-ink-800)]'
+								: 'cursor-default'}"
+						>
+							<span
+								class="grid grid-cols-[2.25rem_1fr] items-center gap-1 font-mono text-sm text-[var(--color-parchment-100)]"
+							>
+								<span class="flex items-center gap-1">
+									<span class="relative inline-block leading-none whitespace-nowrap">
+										{#if disabledSans?.has(m.san)}
+											{@render disabledGlyph()}
+										{:else if ondelete}
+											<button
+												type="button"
+												onclick={(e) => {
+													e.stopPropagation();
+													openConfirm(m);
+												}}
+												onkeydown={(e) => {
+													if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+												}}
+												title="Delete {m.san} from your tree"
+												aria-label="Delete {m.san} from your tree"
+												class="group/bookmark absolute right-full bottom-0 -m-2 mr-0.5 cursor-pointer py-2 pr-1 pl-3 leading-none"
+											>
+												<Bookmark
+													class="size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)] transition-colors group-hover/bookmark:fill-[var(--color-oxblood-300)] group-hover/bookmark:text-[var(--color-oxblood-300)]"
+													strokeWidth={1.5}
+												/>
+											</button>
+										{:else}
+											<Bookmark
+												class="absolute right-full bottom-0 mr-1.5 size-2.5 fill-[var(--color-brass-300)] text-[var(--color-brass-300)]"
+												strokeWidth={1.5}
+											/>
+										{/if}
+										{m.san}
+									</span>
+								</span>
+								{#if engineEvalByUci?.get(m.uci)}
+									{@const ev = engineEvalByUci.get(m.uci)!}
+									<span
+										class="font-mono text-[10px] tabular-nums {ev.tone}"
+										title="Stockfish evaluation"
+									>
+										{ev.text}
+									</span>
+								{:else}
+									<span></span>
+								{/if}
+							</span>
+							<span class="text-[10px] text-[var(--color-parchment-500)] italic"
+								>not in the database</span
+							>
+							<span></span>
+							{@render moreButton(m)}
+						</div>
+					</li>
+				{/each}
+			</ul>
 		{/if}
 	{/if}
 </div>
