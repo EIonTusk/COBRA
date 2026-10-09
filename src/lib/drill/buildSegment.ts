@@ -173,6 +173,13 @@ async function pickWithLineWalk(
 					// expect a move the user has disabled.
 					if (!isTrainable(stored)) continue;
 					if (isWellLearned(stored, wellLearnedDays)) continue;
+					// A prefix step reinforces a move already learned. A move never
+					// introduced can only sit on the walk's route through a
+					// transposition (the route prefers live lines; progressive
+					// unlock gates along the shortest one), and asking it here
+					// would test it unhinted and bypass the gate. The lead-in
+					// plays it instead.
+					if (!stored.lastReview) continue;
 					walk.push(stored);
 				}
 			}
