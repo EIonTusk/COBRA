@@ -148,7 +148,9 @@ describe('buildSegment progressive unlock', () => {
 
 	it('does not let a shaky move in a disabled line hold others back', async () => {
 		// root → A → B → C, plus root → X → B (transposition). A is shaky
-		// but its line is disabled, so the drill could never offer it.
+		// but only reachable through a disabled move, so the drill could
+		// never offer it. (A card whose own move is disabled while another
+		// move there is live still trains that move, see liveMoves.ts.)
 		const t = [
 			{
 				...node(ROOT, ['A', 'X']),
@@ -162,7 +164,7 @@ describe('buildSegment progressive unlock', () => {
 			node('B', ['C']),
 			node('C', [])
 		];
-		await reset(t, [{ ...reviewed(ROOT, 0.2, future), expectedSan: 'a' }, newCard('B', 1)]);
+		await reset(t, [reviewed(ROOT, 3, future), reviewed('A', 0.2, future), newCard('B', 1)]);
 		const seg = await buildSegment(rep, 'due', settings());
 		expect(seg.cards.map((c) => c.fenKey)).toEqual(['B']);
 	});
