@@ -69,12 +69,9 @@ export async function playSession(
 		const isLineWalkStep = seg.mode === 'due' && !seg.dueOriginalKeys.has(card.fenKey);
 		// hintLevel on presentation ($effect on currentEntry).
 		const hinted = !(card.lastReview || introduced.has(key) || isLineWalkStep || isMistakeReview);
-		const isIntroductionPass =
-			!card.lastReview &&
-			!introduced.has(key) &&
-			seg.mode === 'due' &&
-			!isLineWalkStep &&
-			!lineWalkMode;
+		const isHintedIntroduction =
+			!card.lastReview && !introduced.has(key) && seg.mode === 'due' && !isLineWalkStep;
+		const isIntroductionPass = isHintedIntroduction && !lineWalkMode;
 		const attempt = attempts.get(key) ?? 0;
 		attempts.set(key, attempt + 1);
 		const p: Presentation = {
@@ -93,7 +90,7 @@ export async function playSession(
 			key,
 			card,
 			outcome,
-			{ isLineWalkStep, isMistakeReview, isIntroductionPass },
+			{ isLineWalkStep, isMistakeReview, isIntroductionPass: isHintedIntroduction },
 			params,
 			now
 		);
