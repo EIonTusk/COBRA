@@ -22,6 +22,7 @@ import { parsePgn, startingPosition } from 'chessops/pgn';
 
 import { fetchExplorer, type TopGameEntry } from '$lib/explorer/client';
 import { fetchMastersGamePgn } from '$lib/lichess/singleGame';
+import { liveMoves } from '$lib/tree/liveMoves';
 import type { Color, Edge, RepertoireNode } from '$lib/types';
 
 export interface RepertoireInput {
@@ -234,9 +235,11 @@ function measurePrefixDepth(pgn: string, rep: RepertoireInput): number {
 		const move = parseSan(pos, node.san);
 		if (!move) break;
 		const treeNode = rep.nodes.get(currentKey);
-		if (!treeNode || treeNode.children.length === 0) break;
+		if (!treeNode) break;
+		const live = liveMoves(treeNode);
+		if (live.length === 0) break;
 		const san = makeSanAndPlay(pos, move);
-		const edge = treeNode.children.find((e) => e.san === san);
+		const edge = live.find((e) => e.san === san);
 		if (!edge) break;
 		depth++;
 		currentKey = edge.toFenKey;
@@ -278,7 +281,8 @@ function collectTreeNodes(
 			entries.push({ fen: cur.fen, depth: cur.depth });
 			const node = rep.nodes.get(cur.fenKey);
 			if (!node) continue;
-			for (const edge of node.children) {
+			// Disabled lines aren't active prep: no games are suggested for them (#99).
+			for (const edge of liveMoves(node)) {
 				const nextFen = playEdge(cur.fen, edge);
 				if (!nextFen) continue;
 				queue.push({ fen: nextFen, fenKey: edge.toFenKey, depth: cur.depth + 1 });

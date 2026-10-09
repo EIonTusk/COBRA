@@ -71,7 +71,8 @@
 	import {
 		pathToFenKey,
 		furthestNonBranchingFenKey,
-		countDescendantEdges
+		countDescendantEdges,
+		liveReachableFenKeys
 	} from '$lib/tree/traversal';
 	import {
 		collectMissingMoves,
@@ -1204,6 +1205,11 @@
 		await setEdgeDisabled(rep.id, fromKey, child.toFenKey, next);
 		nodes = await nodesMap(rep.id);
 		await touchRepertoire(rep.id);
+		// Missing-move suggestions only come from live lines (#99): drop cached
+		// ones a disable just shelved, then re-probe (re-enabling adds some back).
+		const live = liveReachableFenKeys(nodes, rep.rootFenKey);
+		missingCache = missingCache.filter((m) => live.has(m.fromFenKey));
+		void refreshMissingCache();
 	}
 
 	/**
