@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { Card, Repertoire, RepertoireNode } from '$lib/types';
 import { getDB } from '$lib/storage/db';
 import { defaultSettings } from '$lib/storage/settings';
-import { buildSegment, depthFilter } from './buildSegment';
+import { buildSegment, depthFilter, trainableFilter } from './buildSegment';
 
 const REP = 'rep-1';
 const ROOT = 'root';
@@ -246,10 +246,11 @@ describe('buildSegment disabled lines in every mode', () => {
 		expect(seg.ideaQueue.map((c) => c.fenKey)).toEqual(['C']);
 	});
 
-	it('never adds a disabled move as a line-walk prefix step', async () => {
+	it('drills a position by its live move when the card expects a disabled one', async () => {
 		// root → P; P offers 'p' (disabled, → Q) and 'q' (live, → R → F).
-		// The card at P expects the disabled 'p'; F is due and reached live
-		// through 'q'. Before the fix the walk to F still asked P's 'p'.
+		// The card at P was created for 'p'. Issue #91 stopped the walk to F
+		// from asking 'p'; issue #102: P isn't dropped either, since 'q' is
+		// still prepared there, so the drill asks P with 'q' as the answer.
 		await wipe();
 		const db = await getDB();
 		const n = (fenKey: string, children: RepertoireNode['children']): RepertoireNode => ({
@@ -280,7 +281,14 @@ describe('buildSegment disabled lines in every mode', () => {
 			...settings(),
 			drillIntermediateMoves: 'play' as const
 		});
-		expect(seg.cards.map((c) => c.fenKey)).toEqual(['F']);
+		expect(seg.cards.map((c) => c.fenKey)).toEqual(['P', 'F']);
+		const filter = trainableFilter(blackRep, seg.nodes);
+		expect(filter({ ...card('P'), expectedSan: 'p' })).toBe(true);
+
+		// Disable 'q' too: nothing is prepared at P any more, so P drops out.
+		await db.put('nodes', n('P', [e('p', 'Q', true), e('q', 'R', true)]));
+		const after = await buildSegment(blackRep, 'due', settings());
+		expect(after.cards.map((c) => c.fenKey)).not.toContain('P');
 	});
 });
 

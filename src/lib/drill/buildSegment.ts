@@ -9,6 +9,7 @@ import {
 	liveReachableFenKeys
 } from '$lib/tree/traversal';
 import { buildLineFirstQueue } from '$lib/tree/lineOrder';
+import { answerSan } from '$lib/tree/liveMoves';
 import { reachProbabilities } from '$lib/tree/reachProbability';
 import { getCard, listCards, mistakeCards, pickBalancedDueCards } from '$lib/storage/cards';
 import { allDueIdeaCards, dueIdeaCards } from '$lib/storage/ideaCards';
@@ -330,9 +331,11 @@ function sortByLineOrder(
 /**
  * Soft-disabled lines drop out of the trainable set (issue #80). A card at
  * position P is trainable only when P is still reachable through non-disabled
- * edges AND P's own prepared move isn't the disabled head — the card lives at
- * the parent, so live-reachability alone wouldn't skip a move disabled
- * directly at P (P stays reachable from above).
+ * edges AND P still has a prepared move in play — the card lives at the
+ * parent, so live-reachability alone wouldn't skip a move disabled directly
+ * at P (P stays reachable from above). The card's own move being disabled
+ * isn't enough to drop it (issue #102): when another prepared move at P is
+ * live, that move becomes the answer (see answerSan).
  *
  * Exported so the runner can apply the same rule when it chains into the
  * next card of a line mid-session.
@@ -344,8 +347,7 @@ export function trainableFilter(
 	const live = liveReachableFenKeys(nodes, rep.rootFenKey);
 	return (c) => {
 		if (!live.has(c.fenKey)) return false;
-		const edge = nodes.get(c.fenKey)?.children.find((e) => e.san === c.expectedSan);
-		return !edge?.disabled;
+		return answerSan(nodes.get(c.fenKey), c.expectedSan) !== null;
 	};
 }
 

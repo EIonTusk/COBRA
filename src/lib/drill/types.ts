@@ -56,6 +56,8 @@ export type DrillPhase =
 	| 'correct'
 	| 'wrong'
 	| 'refuted'
+	/** The user played a move they disabled (issue #99): noted, not graded. */
+	| 'shelved'
 	| 'idea-prompt'
 	| 'idea-reveal'
 	| 'done';
