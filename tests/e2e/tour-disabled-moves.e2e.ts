@@ -92,3 +92,26 @@ test('the tour never plays or offers a disabled move (#99)', async ({ page }) =>
 		expect(await lineText(page)).not.toContain('Nf3');
 	}
 });
+
+test('tour autoplay walks every live line and skips the disabled one (#99)', async ({ page }) => {
+	const repId = await importPgn(page);
+	await disableNf3(page, repId);
+	await page.goto(`/repertoire/${repId}/tour`);
+	await expect(page.getByRole('button', { name: 'start' })).toBeVisible();
+
+	// Play the tour and record every line it shows until it finishes.
+	await page.keyboard.press('a');
+	const seen = new Set<string>();
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		seen.add(await lineText(page));
+		if ([...seen].some((t) => t.includes('3.d3'))) break;
+		await page.waitForTimeout(150);
+	}
+	const lines = [...seen];
+	expect(
+		lines.some((t) => t.includes('3.d3')),
+		'autoplay reached the live line'
+	).toBe(true);
+	expect(lines.filter((t) => t.includes('Nf3'))).toEqual([]);
+});
