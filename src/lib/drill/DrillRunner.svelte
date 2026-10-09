@@ -52,6 +52,7 @@
 		type MoveQuality
 	} from './grade';
 	import { probeMoveEvals } from './probe';
+	import { answerSan, liveMoves, liveMovesAnswerFirst } from '$lib/tree/liveMoves';
 
 	interface Props {
 		segments: DrillSegment[];
@@ -320,6 +321,8 @@
 	const AUTO_ADVANCE_SLOW_MS = 1400;
 	const WRONG_FLASH_MS = 420;
 	const WRONG_SETTLE_MS = 380;
+	// How long the "disabled line" note stays before the board resets.
+	const SHELVED_HOLD_MS = 1600;
 	// Engine probe budget split: `BEFORE` only needs a single cp value
 	// (best-line eval at the position the user moved from), so it can
 	// run shallower and shorter. `AFTER` needs a usable PV to animate
@@ -569,7 +572,7 @@
 	function acceptedEdgesFor(entry: DrillEntry, fen: string): Edge[] {
 		const seg = segments[entry.segIdx];
 		const node = seg.nodes.get(entry.card.fenKey);
-		const childSans = liveChildren(node).map((e) => e.san);
+		const childSans = liveMovesAnswerFirst(node, entry.card.expectedSan).map((e) => e.san);
 		const sans = childSans.length > 0 ? childSans : [entry.card.expectedSan];
 		const out: Edge[] = [];
 		for (const san of sans) {
@@ -700,6 +703,13 @@
 		gradedSquare = dest;
 
 		const node = currentSegment.nodes.get(currentEntry.card.fenKey);
+		// A move the user disabled (issue #99) is neither right nor wrong: it's
+		// their own prep, shelved. Say so and ask for an active move, without
+		// grading the attempt.
+		if (node?.children.some((e) => e.disabled && e.san === edge.san)) {
+			void runShelvedSequence(currentEntry);
+			return;
+		}
 		const liveSans = liveChildren(node).map((e) => e.san);
 		const accepted = new Set<string>(
 			liveSans.length > 0 ? liveSans : [currentEntry.card.expectedSan]
@@ -718,6 +728,20 @@
 			phase = 'wrong';
 			void runWrongSequence(currentEntry);
 		}
+	}
+
+	async function runShelvedSequence(entry: DrillEntry) {
+		wrongToken.cancelled = true;
+		const token = { cancelled: false };
+		wrongToken = token;
+		phase = 'shelved';
+		await sleep(SHELVED_HOLD_MS);
+		if (token.cancelled) return;
+		currentFen = fenFromKey(entry.card.fenKey);
+		gradedSquare = null;
+		userLastMove = undefined;
+		userPlayedSan = null;
+		phase = 'pending';
 	}
 
 	async function runWrongSequence(entry: DrillEntry) {
@@ -838,12 +862,15 @@
 		const lineWalkMode = isLineWalkSegment(entry.segIdx);
 		const isMistakeReviewMode = seg.mode === 'mistakes' || seg.mode === 'retrain';
 
-		const isIntroductionPass =
+		// First, hinted showing of a brand-new card: the answer is on the
+		// board. Auto mode re-queues it for a real recall (the introduction
+		// pass); line-walk mode recalls it in the walk's Train pass instead.
+		const isHintedIntroduction =
 			!ratedCard.lastReview &&
 			!introducedKeys.has(compositeKey) &&
 			seg.mode === 'due' &&
-			!isLineWalkStep &&
-			!lineWalkMode;
+			!isLineWalkStep;
+		const isIntroductionPass = isHintedIntroduction && !lineWalkMode;
 
 		// Mistake-review is pure practice: it doesn't touch the FSRS schedule.
 		// Drilling a missed-in-game position shouldn't shorten the next due
@@ -867,14 +894,18 @@
 			compositeKey,
 			ratedCard,
 			outcome,
-			{ isLineWalkStep, isMistakeReview: isMistakeReviewMode, isIntroductionPass },
+			{
+				isLineWalkStep,
+				isMistakeReview: isMistakeReviewMode,
+				isIntroductionPass: isHintedIntroduction
+			},
 			settings.fsrsParams
 		);
 		if (updated) await upsertCard(updated);
 		sessionDone += 1;
 
 		if (plannedKeys.has(compositeKey)) {
-			if (outcome === 'wrong' && !isIntroductionPass) {
+			if (outcome === 'wrong' && !isHintedIntroduction) {
 				pendingLapses.add(compositeKey);
 			} else if (outcome !== 'wrong') {
 				pendingLapses.delete(compositeKey);
@@ -884,7 +915,7 @@
 		// Mark the failed walk for the end-of-session retry pass. Walk-index
 		// granularity avoids transposition false positives; per-walk
 		// fenKey granularity narrows the retry to actually-failed cards.
-		if (outcome === 'wrong' && !isIntroductionPass && walkPhase === 'learn') {
+		if (outcome === 'wrong' && !isHintedIntroduction && walkPhase === 'learn') {
 			const failedWalk = walkOfIdx(idx);
 			if (failedWalk >= 0) {
 				failedWalkIndices.add(failedWalk);
@@ -967,7 +998,7 @@
 				decisionNode &&
 				decisionNode.children.length > 1 &&
 				playedSan &&
-				playedSan !== ratedCard.expectedSan
+				playedSan !== cardAnswer(seg, ratedCard)
 			) {
 				const chosen = decisionNode.children.find((c) => c.san === playedSan);
 				if (chosen) pruneUnchosenSiblings(entry.segIdx, ratedCard.fenKey, chosen.toFenKey);
@@ -1151,7 +1182,13 @@
 	// Soft-disabled moves (issues #80, #91) stay in the tree but are never
 	// drilled, accepted, or played by the opponent side.
 	function liveChildren(node: RepertoireNode | undefined): Edge[] {
-		return node ? node.children.filter((e) => !e.disabled) : [];
+		return liveMoves(node);
+	}
+
+	// The move this card asks for: its own move while that's live, else a
+	// live alternative at the same position (issue #102).
+	function cardAnswer(seg: DrillSegment, card: Card): string {
+		return answerSan(seg.nodes.get(card.fenKey), card.expectedSan) ?? card.expectedSan;
 	}
 
 	// Prefer a lead-in through live lines; fall back to any route.
@@ -1176,7 +1213,7 @@
 		if (played && liveChildren(node).some((c) => c.san === played)) {
 			return played;
 		}
-		return entry.card.expectedSan;
+		return cardAnswer(seg, entry.card);
 	}
 
 	async function findNextInLine(entry: DrillEntry): Promise<DrillEntry | null> {
@@ -1234,7 +1271,7 @@
 		if (seg.mode === 'due' && !plannedKeys.has(nextKey)) {
 			const decisionNode = seg.nodes.get(entry.card.fenKey);
 			const isAltDivergence =
-				liveChildren(decisionNode).length > 1 && playedSan !== entry.card.expectedSan;
+				liveChildren(decisionNode).length > 1 && playedSan !== cardAnswer(seg, entry.card);
 			if (!isAltDivergence) return null;
 			plannedKeys.add(nextKey);
 			sessionPlannedTotal += 1;
@@ -1874,7 +1911,7 @@
 <svelte:window on:keydown={handleKey} />
 
 <!-- Progress bar -->
-{#if phase === 'intro' || phase === 'pending' || phase === 'correct' || phase === 'wrong' || phase === 'refuted' || phase === 'idea-prompt' || phase === 'idea-reveal'}
+{#if phase === 'intro' || phase === 'pending' || phase === 'correct' || phase === 'wrong' || phase === 'refuted' || phase === 'shelved' || phase === 'idea-prompt' || phase === 'idea-reveal'}
 	<div class="relative mb-8 h-px overflow-hidden bg-[var(--color-ink-800)]">
 		<div
 			class="absolute inset-y-0 left-0 bg-[var(--color-brass-300)] transition-[width] duration-500"
@@ -2222,6 +2259,19 @@
 							{userPlayedSan}<span>{nagGlyph(moveQuality)}</span>
 						</p>
 					{/if}
+				</div>
+			{:else if phase === 'shelved'}
+				<div class="ot-fade">
+					<div class="eyebrow mb-2 text-[var(--color-parchment-400)]">Disabled line</div>
+					<h2 class="font-serif text-[2rem] leading-tight text-[var(--color-parchment-100)]">
+						<em>Not in your active repertoire.</em>
+					</h2>
+					{#if userPlayedSan}
+						<p class="mt-3 font-mono text-sm text-[var(--color-parchment-400)]">{userPlayedSan}</p>
+					{/if}
+					<p class="mt-3 font-serif text-sm text-[var(--color-parchment-500)] italic">
+						You disabled this move. Play an active one; this try doesn't count against you.
+					</p>
 				</div>
 			{:else if phase === 'refuted'}
 				<div class="ot-fade">

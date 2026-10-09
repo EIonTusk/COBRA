@@ -6,7 +6,7 @@
 
 	import { listRepertoires } from '$lib/storage/repertoires';
 	import { listUniqueCards } from '$lib/storage/cards';
-	import { countDueIdeaCards } from '$lib/storage/ideaCards';
+	import { countDrillDue } from '$lib/drill/buildSegment';
 	import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 	import { nodesMap } from '$lib/storage/nodes';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
@@ -25,13 +25,12 @@
 
 	async function loadDashboard(initial: boolean) {
 		reps = await listRepertoires();
-		// Move cards are counted once per shared progress record, so a line
-		// that sits in several repertoires doesn't inflate the totals.
-		const moves = await listUniqueCards();
-		const now = Date.now();
-		let due = moves.filter((c) => c.dueAt <= now).length;
-		const cards = moves.length;
-		for (const r of reps) due += await countDueIdeaCards(r.id);
+		// A move several repertoires share has one progress record, so it is
+		// counted once, not once per repertoire that contains it.
+		const counted = new Set<string>();
+		let due = 0;
+		for (const r of reps) due += await countDrillDue(r, Date.now(), counted);
+		const cards = (await listUniqueCards()).length;
 		totalDue = due;
 		totalCards = cards;
 		pending = await filterActiveMistakes(await listMistakes({ status: 'pending' }));

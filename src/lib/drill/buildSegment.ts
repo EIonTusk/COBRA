@@ -9,6 +9,7 @@ import {
 	liveReachableFenKeys
 } from '$lib/tree/traversal';
 import { buildLineFirstQueue } from '$lib/tree/lineOrder';
+import { answerSan } from '$lib/tree/liveMoves';
 import { reachProbabilities } from '$lib/tree/reachProbability';
 import {
 	cardForMove,
@@ -18,7 +19,7 @@ import {
 	pickBalancedDueCards
 } from '$lib/storage/cards';
 import { moveId } from '$lib/storage/moveProgress';
-import { dueIdeaCards } from '$lib/storage/ideaCards';
+import { allDueIdeaCards, dueIdeaCards } from '$lib/storage/ideaCards';
 import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 import { nodesMap } from '$lib/storage/nodes';
 import type { DrillMode, DrillSegment } from './types';
@@ -179,6 +180,13 @@ async function pickWithLineWalk(
 					// expect a move the user has disabled.
 					if (!isTrainable(stored)) continue;
 					if (isWellLearned(stored, wellLearnedDays)) continue;
+					// A prefix step reinforces a move already learned. A move never
+					// introduced can only sit on the walk's route through a
+					// transposition (the route prefers live lines; progressive
+					// unlock gates along the shortest one), and asking it here
+					// would test it unhinted and bypass the gate. The lead-in
+					// plays it instead.
+					if (!stored.lastReview) continue;
 					walk.push(stored);
 				}
 			}
@@ -329,9 +337,11 @@ function sortByLineOrder(
 /**
  * Soft-disabled lines drop out of the trainable set (issue #80). A card at
  * position P is trainable only when P is still reachable through non-disabled
- * edges AND P's own prepared move isn't the disabled head — the card lives at
- * the parent, so live-reachability alone wouldn't skip a move disabled
- * directly at P (P stays reachable from above).
+ * edges AND P still has a prepared move in play — the card lives at the
+ * parent, so live-reachability alone wouldn't skip a move disabled directly
+ * at P (P stays reachable from above). The card's own move being disabled
+ * isn't enough to drop it (issue #102): when another prepared move at P is
+ * live, that move becomes the answer (see answerSan).
  *
  * Exported so the runner can apply the same rule when it chains into the
  * next card of a line mid-session.
@@ -343,8 +353,7 @@ export function trainableFilter(
 	const live = liveReachableFenKeys(nodes, rep.rootFenKey);
 	return (c) => {
 		if (!live.has(c.fenKey)) return false;
-		const edge = nodes.get(c.fenKey)?.children.find((e) => e.san === c.expectedSan);
-		return !edge?.disabled;
+		return answerSan(nodes.get(c.fenKey), c.expectedSan) !== null;
 	};
 }
 
@@ -404,16 +413,21 @@ export function isShaky(card: Card): boolean {
  * line walk teaching the parent first). Forgetting an early move therefore
  * pauses new material beneath it until it's recalled again.
  *
- * New ancestors outside `fresh` (not trainable — e.g. a disabled line)
- * don't block. Exported for unit testing; pure.
+ * `blockers` collects the fenKeys of the shaky introduced cards that held a
+ * new card back, so the caller can offer them for relearning (see
+ * planDueCards). Only cards in `cardByKey` can block: pass the trainable set,
+ * so a card the drill can never serve (e.g. in a disabled line) doesn't.
+ *
+ * Exported for unit testing; pure.
  */
-export function orderNewCards(
+export function gateNewCards(
 	fresh: Card[],
 	cardByKey: Map<string, Card>,
 	tree: { depth: Map<string, number>; parent: Map<string, string> },
 	progressive: boolean,
 	reach?: Map<string, number>
-): Card[] {
+): { cards: Card[]; blockers: Set<string> } {
+	const blockers = new Set<string>();
 	const depthOf = (c: Card) => tree.depth.get(c.fenKey) ?? Infinity;
 	const reachOf = (c: Card) => reach?.get(c.fenKey) ?? 0;
 	const sorted = fresh.slice().sort((a, b) => {
@@ -426,21 +440,25 @@ export function orderNewCards(
 		}
 		return depthOf(a) - depthOf(b) || a.dueAt - b.dueAt;
 	});
-	if (!progressive) return sorted;
+	if (!progressive) return { cards: sorted, blockers };
 
 	const freshKeys = new Set(fresh.map((c) => c.fenKey));
 	const unlocked = new Set<string>();
 	const pathReady = (fenKey: string): boolean => {
+		let ready = true;
 		for (let k = tree.parent.get(fenKey); k !== undefined; k = tree.parent.get(k)) {
 			const anc = cardByKey.get(k);
 			if (!anc) continue;
 			if (anc.lastReview) {
-				if (isShaky(anc)) return false;
+				if (isShaky(anc)) {
+					blockers.add(k);
+					ready = false;
+				}
 			} else if (freshKeys.has(k) && !unlocked.has(k)) {
-				return false;
+				ready = false;
 			}
 		}
-		return true;
+		return ready;
 	};
 	const out: Card[] = [];
 	for (const c of sorted) {
@@ -448,7 +466,86 @@ export function orderNewCards(
 		unlocked.add(c.fenKey);
 		out.push(c);
 	}
-	return out;
+	return { cards: out, blockers };
+}
+
+/** gateNewCards without the blockers. Exported for unit testing; pure. */
+export function orderNewCards(
+	fresh: Card[],
+	cardByKey: Map<string, Card>,
+	tree: { depth: Map<string, number>; parent: Map<string, string> },
+	progressive: boolean,
+	reach?: Map<string, number>
+): Card[] {
+	return gateNewCards(fresh, cardByKey, tree, progressive, reach).cards;
+}
+
+/**
+ * What a full-repertoire `due` drill can serve right now (issues #103, #101).
+ * buildSegment draws its pool from this and the due counters count it, so
+ * the "N due" on the repertoire page is what Drill actually offers.
+ *
+ *  - `reviews`: introduced cards that are due.
+ *  - `relearn`: shaky cards that aren't due yet but hold new material back.
+ *    Progressive unlock (issue #86) waits for a missed move to be recalled
+ *    before it opens the moves beneath it; without offering it early, one
+ *    miss on a trunk move (graded Again, due again a day later) hid every
+ *    new card below it and the drill came up empty while hundreds showed as
+ *    due.
+ *  - `fresh`: new cards past the progressive gate, in introduction order.
+ *
+ * Every card is trainable (not in a disabled line) and within the training
+ * depth. Pure.
+ */
+export function planDueCards(
+	rep: Repertoire,
+	nodes: Map<string, RepertoireNode>,
+	all: Card[],
+	now: number,
+	reach?: Map<string, number>
+): { reviews: Card[]; relearn: Card[]; fresh: Card[] } {
+	const isTrainable = trainableFilter(rep, nodes);
+	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
+	const eligible = all.filter((c) => isTrainable(c) && withinDepth(c));
+	const due = eligible.filter((c) => c.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
+	const gate = gateNewCards(
+		due.filter((c) => !c.lastReview),
+		new Map(eligible.map((c) => [c.fenKey, c])),
+		shortestPathTree(nodes, rep.rootFenKey),
+		rep.progressiveUnlock !== false,
+		reach
+	);
+	const relearn = eligible
+		.filter((c) => c.dueAt > now && gate.blockers.has(c.fenKey))
+		.sort((a, b) => a.dueAt - b.dueAt);
+	return { reviews: due.filter((c) => c.lastReview), relearn, fresh: gate.cards };
+}
+
+/**
+ * Due count for a repertoire: the cards planDueCards offers plus the due
+ * idea prompts a drill would queue (those outside disabled lines).
+ *
+ * Pass the same `counted` set across repertoires for a library-wide total:
+ * a move several repertoires share has one progress record (issue #97), so
+ * it is counted only in the first repertoire that offers it.
+ */
+export async function countDrillDue(
+	rep: Repertoire,
+	now: number = Date.now(),
+	counted?: Set<string>
+): Promise<number> {
+	const nodes = await nodesMap(rep.id);
+	const plan = planDueCards(rep, nodes, await listCards(rep.id), now);
+	const live = liveReachableFenKeys(nodes, rep.rootFenKey);
+	const ideas = (await allDueIdeaCards(rep.id, now)).filter((c) => live.has(c.fenKey));
+	let moves = 0;
+	for (const c of [...plan.reviews, ...plan.relearn, ...plan.fresh]) {
+		const id = moveId(c);
+		if (counted?.has(id)) continue;
+		counted?.add(id);
+		moves += 1;
+	}
+	return moves + ideas.length;
 }
 
 /**
@@ -573,23 +670,16 @@ export async function buildSegment(
 		// "the first N cards of the PGN": deep moves of the first lines ahead
 		// of the first move of later ones. New cards are instead ranked across
 		// the whole tree (most likely to be reached, then shallowest first),
-		// then gated on their path.
-		const now = Date.now();
+		// then gated on their path. Cards to relearn go first so the moves
+		// they hold back unlock as soon as possible.
 		const poolCap = settings.drillSessionCap * 5;
-		const all = await listCards(rep.id);
+		const plan = planDueCards(rep, nodes, await listCards(rep.id), Date.now(), reach);
 		const skip = options?.skipMoves;
-		const due = all
-			.filter((c) => c.dueAt <= now && isTrainable(c) && withinDepth(c) && !skip?.has(moveId(c)))
-			.sort((a, b) => a.dueAt - b.dueAt);
-		const reviews = due.filter((c) => c.lastReview).slice(0, poolCap);
-		const fresh = orderNewCards(
-			due.filter((c) => !c.lastReview),
-			new Map(all.map((c) => [c.fenKey, c])),
-			shortestPathTree(nodes, rep.rootFenKey),
-			rep.progressiveUnlock !== false,
-			reach
-		).slice(0, poolCap);
-		pool = [...reviews, ...fresh];
+		const keep = (c: Card) => !skip?.has(moveId(c));
+		pool = [
+			...[...plan.relearn, ...plan.reviews].filter(keep).slice(0, poolCap),
+			...plan.fresh.filter(keep).slice(0, poolCap)
+		];
 	}
 	const lineWalkOn = (settings.drillIntermediateMoves ?? 'play') === 'play';
 

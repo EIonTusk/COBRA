@@ -29,6 +29,7 @@ import { saveMistakes, toStored } from '$lib/storage/mistakes';
 import { upsertSparGame, listPendingSparGames } from '$lib/storage/sparGames';
 import type { MistakeRecord } from './mistakes';
 import type { Color, RepertoireNode, SparGame } from '$lib/types';
+import { liveMoves } from '$lib/tree/liveMoves';
 
 /**
  * Re-check a pending spar game. Returns the (possibly updated) record.
@@ -168,7 +169,8 @@ export async function reconcileSparGame(
 						fenKey,
 						fen,
 						playedSan: node.san,
-						expectedSan: treeNode.children[0].san,
+						// A live prepared move, not one the user disabled (issue #102).
+						expectedSan: liveMoves(treeNode)[0]?.san ?? treeNode.children[0].san,
 						plyOffTree: ply
 					};
 					break;

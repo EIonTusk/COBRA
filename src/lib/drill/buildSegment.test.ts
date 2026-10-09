@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { Card, Repertoire, RepertoireNode } from '$lib/types';
 import { getDB } from '$lib/storage/db';
 import { defaultSettings } from '$lib/storage/settings';
-import { buildSegment, depthFilter } from './buildSegment';
+import { buildSegment, depthFilter, trainableFilter } from './buildSegment';
 import { putCardRows } from '$lib/storage/cards.testutil';
 import { upsertCard } from '$lib/storage/cards';
 
@@ -248,10 +248,11 @@ describe('buildSegment disabled lines in every mode', () => {
 		expect(seg.ideaQueue.map((c) => c.fenKey)).toEqual(['C']);
 	});
 
-	it('never adds a disabled move as a line-walk prefix step', async () => {
+	it('drills a position by its live move when the card expects a disabled one', async () => {
 		// root → P; P offers 'p' (disabled, → Q) and 'q' (live, → R → F).
-		// The card at P expects the disabled 'p'; F is due and reached live
-		// through 'q'. Before the fix the walk to F still asked P's 'p'.
+		// The card at P was created for 'p'. Issue #91 stopped the walk to F
+		// from asking 'p'; issue #102: P isn't dropped either, since 'q' is
+		// still prepared there, so the drill asks P with 'q' as the answer.
 		await wipe();
 		const db = await getDB();
 		const n = (fenKey: string, children: RepertoireNode['children']): RepertoireNode => ({
@@ -279,6 +280,60 @@ describe('buildSegment disabled lines in every mode', () => {
 		// Test keys read as black-to-move, so a black rep owns every position.
 		const blackRep: Repertoire = { ...rep, color: 'black' };
 		const seg = await buildSegment(blackRep, 'due', {
+			...settings(),
+			drillIntermediateMoves: 'play' as const
+		});
+		expect(seg.cards.map((c) => c.fenKey)).toEqual(['P', 'F']);
+		const filter = trainableFilter(blackRep, seg.nodes);
+		expect(filter({ ...card('P'), expectedSan: 'p' })).toBe(true);
+
+		// Disable 'q' too: nothing is prepared at P any more, so P drops out.
+		await db.put('nodes', n('P', [e('p', 'Q', true), e('q', 'R', true)]));
+		const after = await buildSegment(blackRep, 'due', settings());
+		expect(after.cards.map((c) => c.fenKey)).not.toContain('P');
+	});
+});
+
+// A line walk's prefix steps reinforce moves already learned. Its route
+// prefers live lines while progressive unlock gates along the shortest route,
+// so through a transposition a never-introduced move can sit on the walk. It
+// must not be asked there: unhinted, and past the gate.
+describe('buildSegment line-walk prefix steps', () => {
+	it('never asks a move that was never introduced', async () => {
+		// root → Q (disabled) → F is the short route; root → P → R → F the
+		// live one. F is a due review; P is new and not yet offered.
+		await wipe();
+		const db = await getDB();
+		const e = (san: string, toFenKey: string, disabled?: boolean) => ({
+			san,
+			uci: 'xxxx',
+			toFenKey,
+			...(disabled ? { disabled } : {})
+		});
+		const n = (fenKey: string, children: RepertoireNode['children']): RepertoireNode => ({
+			repertoireId: REP,
+			fenKey,
+			children
+		});
+		for (const node of [
+			n(ROOT, [e('a', 'Q', true), e('b', 'P')]),
+			n('Q', [e('q', 'F')]),
+			n('P', [e('p', 'R')]),
+			n('R', [e('r', 'F')]),
+			n('F', [e('f', 'G')]),
+			n('G', [])
+		])
+			await db.put('nodes', node);
+		await upsertCard({ ...card('P'), expectedSan: 'p', dueAt: Date.now() + 86_400_000 });
+		await upsertCard({
+			...card('F'),
+			expectedSan: 'f',
+			fsrs: { state: 2, stability: 1 } as Card['fsrs'],
+			lastReview: Date.now() - 86_400_000,
+			lastRating: 3
+		});
+		// Test keys read as black-to-move, so a black rep owns every position.
+		const seg = await buildSegment({ ...rep, color: 'black' }, 'due', {
 			...settings(),
 			drillIntermediateMoves: 'play' as const
 		});

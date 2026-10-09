@@ -4,8 +4,8 @@
 	import { Pencil, Play, Plus } from 'lucide-svelte';
 
 	import { listRepertoires } from '$lib/storage/repertoires';
-	import { countDue, countCards } from '$lib/storage/cards';
-	import { countDueIdeaCards } from '$lib/storage/ideaCards';
+	import { countCards } from '$lib/storage/cards';
+	import { countDrillDue } from '$lib/drill/buildSegment';
 	import { listNodes } from '$lib/storage/nodes';
 	import { Button, Badge, DashboardBacklink, EmptyState } from '$lib/ui';
 	import type { Repertoire } from '$lib/types';
@@ -19,7 +19,7 @@
 		const s: typeof stats = {};
 		for (const r of reps) {
 			s[r.id] = {
-				due: (await countDue(r.id)) + (await countDueIdeaCards(r.id)),
+				due: await countDrillDue(r),
 				total: await countCards(r.id),
 				positions: (await listNodes(r.id)).length
 			};

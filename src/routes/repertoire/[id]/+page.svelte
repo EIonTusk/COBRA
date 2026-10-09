@@ -44,14 +44,13 @@
 	import type { RepertoireNode } from '$lib/types';
 	import {
 		countCards,
-		countDue,
 		countMistakeCards,
 		listCards,
 		resetAllFsrs,
 		countSharedCards,
 		sharedKeptNote
 	} from '$lib/storage/cards';
-	import { countDueIdeaCards } from '$lib/storage/ideaCards';
+	import { countDrillDue } from '$lib/drill/buildSegment';
 	import { countDuePlanCards, countPlanCards } from '$lib/storage/planCards';
 	import { nodesMap } from '$lib/storage/nodes';
 	import { buildShareBundle, encodeShare } from '$lib/storage/share';
@@ -113,7 +112,7 @@
 			rep = fetched ?? null;
 			if (fetched) {
 				total = await countCards(id);
-				due = (await countDue(id)) + (await countDueIdeaCards(id));
+				due = await countDrillDue(fetched);
 				planTotal = await countPlanCards(id);
 				planDue = planTotal > 0 ? await countDuePlanCards(id) : 0;
 				mistakes = await countMistakeCards(id);
@@ -307,12 +306,15 @@
 		const next = maxMoves > 0 ? Math.floor(maxMoves) : null;
 		await setDrillMaxMoves(rep.id, next);
 		rep = { ...rep, drillMaxMoves: next };
+		// The depth limit changes what Drill can serve.
+		due = await countDrillDue(rep);
 	}
 
 	async function onProgressiveUnlockChange(on: boolean) {
 		if (!rep) return;
 		await setProgressiveUnlock(rep.id, on);
 		rep = { ...rep, progressiveUnlock: on };
+		due = await countDrillDue(rep);
 	}
 
 	async function onComputeCoverage() {
@@ -453,7 +455,7 @@
 		// Pull fresh counts so the dashboard reflects the wipe before the
 		// user navigates anywhere.
 		total = await countCards(rep.id);
-		due = (await countDue(rep.id)) + (await countDueIdeaCards(rep.id));
+		due = await countDrillDue(rep);
 		const cards = await listCards(rep.id);
 		masteredPct = computeMasteredPct(cards);
 	}
