@@ -838,12 +838,15 @@
 		const lineWalkMode = isLineWalkSegment(entry.segIdx);
 		const isMistakeReviewMode = seg.mode === 'mistakes' || seg.mode === 'retrain';
 
-		const isIntroductionPass =
+		// First, hinted showing of a brand-new card: the answer is on the
+		// board. Auto mode re-queues it for a real recall (the introduction
+		// pass); line-walk mode recalls it in the walk's Train pass instead.
+		const isHintedIntroduction =
 			!ratedCard.lastReview &&
 			!introducedKeys.has(compositeKey) &&
 			seg.mode === 'due' &&
-			!isLineWalkStep &&
-			!lineWalkMode;
+			!isLineWalkStep;
+		const isIntroductionPass = isHintedIntroduction && !lineWalkMode;
 
 		// Mistake-review is pure practice: it doesn't touch the FSRS schedule.
 		// Drilling a missed-in-game position shouldn't shorten the next due
@@ -867,14 +870,18 @@
 			compositeKey,
 			ratedCard,
 			outcome,
-			{ isLineWalkStep, isMistakeReview: isMistakeReviewMode, isIntroductionPass },
+			{
+				isLineWalkStep,
+				isMistakeReview: isMistakeReviewMode,
+				isIntroductionPass: isHintedIntroduction
+			},
 			settings.fsrsParams
 		);
 		if (updated) await upsertCard(updated);
 		sessionDone += 1;
 
 		if (plannedKeys.has(compositeKey)) {
-			if (outcome === 'wrong' && !isIntroductionPass) {
+			if (outcome === 'wrong' && !isHintedIntroduction) {
 				pendingLapses.add(compositeKey);
 			} else if (outcome !== 'wrong') {
 				pendingLapses.delete(compositeKey);
@@ -884,7 +891,7 @@
 		// Mark the failed walk for the end-of-session retry pass. Walk-index
 		// granularity avoids transposition false positives; per-walk
 		// fenKey granularity narrows the retry to actually-failed cards.
-		if (outcome === 'wrong' && !isIntroductionPass && walkPhase === 'learn') {
+		if (outcome === 'wrong' && !isHintedIntroduction && walkPhase === 'learn') {
 			const failedWalk = walkOfIdx(idx);
 			if (failedWalk >= 0) {
 				failedWalkIndices.add(failedWalk);

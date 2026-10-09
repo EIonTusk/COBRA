@@ -284,6 +284,53 @@ describe('buildSegment disabled lines in every mode', () => {
 	});
 });
 
+// A line walk's prefix steps reinforce moves already learned. Its route
+// prefers live lines while progressive unlock gates along the shortest route,
+// so through a transposition a never-introduced move can sit on the walk. It
+// must not be asked there: unhinted, and past the gate.
+describe('buildSegment line-walk prefix steps', () => {
+	it('never asks a move that was never introduced', async () => {
+		// root → Q (disabled) → F is the short route; root → P → R → F the
+		// live one. F is a due review; P is new and not yet offered.
+		await wipe();
+		const db = await getDB();
+		const e = (san: string, toFenKey: string, disabled?: boolean) => ({
+			san,
+			uci: 'xxxx',
+			toFenKey,
+			...(disabled ? { disabled } : {})
+		});
+		const n = (fenKey: string, children: RepertoireNode['children']): RepertoireNode => ({
+			repertoireId: REP,
+			fenKey,
+			children
+		});
+		for (const node of [
+			n(ROOT, [e('a', 'Q', true), e('b', 'P')]),
+			n('Q', [e('q', 'F')]),
+			n('P', [e('p', 'R')]),
+			n('R', [e('r', 'F')]),
+			n('F', [e('f', 'G')]),
+			n('G', [])
+		])
+			await db.put('nodes', node);
+		await db.put('cards', { ...card('P'), expectedSan: 'p', dueAt: Date.now() + 86_400_000 });
+		await db.put('cards', {
+			...card('F'),
+			expectedSan: 'f',
+			fsrs: { state: 2, stability: 1 } as Card['fsrs'],
+			lastReview: Date.now() - 86_400_000,
+			lastRating: 3
+		});
+		// Test keys read as black-to-move, so a black rep owns every position.
+		const seg = await buildSegment({ ...rep, color: 'black' }, 'due', {
+			...settings(),
+			drillIntermediateMoves: 'play' as const
+		});
+		expect(seg.cards.map((c) => c.fenKey)).toEqual(['F']);
+	});
+});
+
 // Training depth (issue #86): only drill moves within the first N moves of
 // each line. Test keys aren't real FENs, so `colorToMove` reads the root as
 // black-to-move (offset 1): ply 0 → move 1, plies 1–2 → move 2, plies 3–4 →

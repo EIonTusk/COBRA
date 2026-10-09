@@ -38,6 +38,16 @@ export async function dueIdeaCards(
 	return db.getAllFromIndex('idea_cards', 'by-repertoire-due', range, limit);
 }
 
+/** Every due idea card in a repertoire (no limit), for the due counters. */
+export async function allDueIdeaCards(
+	repertoireId: string,
+	now: number = Date.now()
+): Promise<IdeaCard[]> {
+	const db = await getDB();
+	const range = IDBKeyRange.bound([repertoireId, 0], [repertoireId, now]);
+	return db.getAllFromIndex('idea_cards', 'by-repertoire-due', range);
+}
+
 export async function countDueIdeaCards(
 	repertoireId: string,
 	now: number = Date.now()

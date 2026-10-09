@@ -8,7 +8,7 @@ import type { Card, Repertoire, RepertoireNode } from '$lib/types';
 import { getDB } from '$lib/storage/db';
 import { defaultSettings } from '$lib/storage/settings';
 import { shortestPathTree } from '$lib/tree/traversal';
-import { buildSegment, orderNewCards } from './buildSegment';
+import { buildSegment, countDrillDue, orderNewCards } from './buildSegment';
 
 const REP = 'rep-progressive';
 const ROOT = 'root';
@@ -124,7 +124,47 @@ describe('buildSegment progressive unlock', () => {
 	it('holds back a new move while an earlier move on its line is shaky', async () => {
 		await reset(nodes, [reviewed('A', 0.2, future), newCard('C', 1), newCard('E', 2)]);
 		const seg = await buildSegment(rep, 'due', settings());
+		expect(seg.cards.map((c) => c.fenKey)).not.toContain('C');
+		expect(seg.cards.map((c) => c.fenKey)).not.toContain('E');
+	});
+
+	it('offers the shaky move for relearning before it is due (issue #103)', async () => {
+		// A missed trunk move is due again only a day later. Waiting for that
+		// left the drill empty ("All caught up") while every new move below
+		// it still counted as due.
+		await reset(nodes, [reviewed('A', 0.2, future), newCard('C', 1), newCard('E', 2)]);
+		const seg = await buildSegment(rep, 'due', settings());
+		expect(seg.cards.map((c) => c.fenKey)).toEqual(['A']);
+		expect(seg.dueOriginalKeys.has('A')).toBe(true);
+		expect(await countDrillDue(rep)).toBe(1);
+	});
+
+	it('does not pull a shaky move forward when nothing waits on it', async () => {
+		await reset(nodes, [reviewed('A', 0.2, future), reviewed('C', 3, future)]);
+		const seg = await buildSegment(rep, 'due', settings());
 		expect(seg.cards).toEqual([]);
+		expect(await countDrillDue(rep)).toBe(0);
+	});
+
+	it('does not let a shaky move in a disabled line hold others back', async () => {
+		// root → A → B → C, plus root → X → B (transposition). A is shaky
+		// but its line is disabled, so the drill could never offer it.
+		const t = [
+			{
+				...node(ROOT, ['A', 'X']),
+				children: [
+					{ san: 'a', uci: 'xxxx', toFenKey: 'A', disabled: true },
+					{ san: 'x', uci: 'xxxx', toFenKey: 'X' }
+				]
+			},
+			node('A', ['B']),
+			node('X', ['B']),
+			node('B', ['C']),
+			node('C', [])
+		];
+		await reset(t, [{ ...reviewed(ROOT, 0.2, future), expectedSan: 'a' }, newCard('B', 1)]);
+		const seg = await buildSegment(rep, 'due', settings());
+		expect(seg.cards.map((c) => c.fenKey)).toEqual(['B']);
 	});
 
 	it('unlocks it once the earlier move is recalled', async () => {
