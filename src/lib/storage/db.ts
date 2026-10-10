@@ -1,8 +1,16 @@
-import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+import {
+	openDB,
+	type DBSchema,
+	type IDBPDatabase,
+	type IDBPTransaction,
+	type StoreNames
+} from 'idb';
 import type {
 	Repertoire,
 	RepertoireNode,
-	Card,
+	CardSlot,
+	CardProgress,
+	MoveProgress,
 	IdeaCard,
 	PlanCard,
 	AppSettings,
@@ -11,6 +19,7 @@ import type {
 	SavedMiddlegameGuide,
 	SparGame
 } from '$lib/types';
+import { newerProgress, progressKey, toProgress } from './moveProgress';
 
 export interface ExplorerStatRow {
 	key: string;
@@ -218,14 +227,28 @@ export interface OpeningTrainerDB extends DBSchema {
 		value: RepertoireNode;
 		indexes: { 'by-repertoire': string };
 	};
+	/**
+	 * Repertoire membership of move cards. Rows written before v20 also carry
+	 * that card's FSRS fields; they were folded into `move_progress` by the
+	 * upgrade and are ignored since (left in place so an older cached build
+	 * that opens the DB still finds rows it can read). The `by-due` indexes
+	 * date from then too and no longer drive anything.
+	 */
 	cards: {
 		key: [string, string];
-		value: Card;
+		value: CardSlot & Partial<CardProgress>;
 		indexes: {
 			'by-repertoire': string;
+			'by-fenKey': string;
 			'by-due': number;
 			'by-repertoire-due': [string, number];
 		};
+	};
+	/** Learning state per (position, move), shared across repertoires (issue #97). */
+	move_progress: {
+		key: [string, string];
+		value: MoveProgress;
+		indexes: { 'by-due': number };
 	};
 	settings: {
 		key: string;
@@ -319,11 +342,12 @@ export interface OpeningTrainerDB extends DBSchema {
 // repertoires and cards survive the rebrand. Renaming would create a
 // fresh empty DB and orphan their data.
 const DB_NAME = 'openingtrainer';
-const DB_VERSION = 19;
+const DB_VERSION = 20;
 const REQUIRED_STORES = [
 	'repertoires',
 	'nodes',
 	'cards',
+	'move_progress',
 	'settings',
 	'explorer_stats',
 	'mistakes',
@@ -355,7 +379,9 @@ if (import.meta.hot) {
 
 type StoreName = (typeof REQUIRED_STORES)[number];
 
-function ensureAllStores(db: IDBPDatabase<OpeningTrainerDB>) {
+type UpgradeTx = IDBPTransaction<OpeningTrainerDB, StoreNames<OpeningTrainerDB>[], 'versionchange'>;
+
+function ensureAllStores(db: IDBPDatabase<OpeningTrainerDB>, tx: UpgradeTx) {
 	const has = (name: StoreName) =>
 		(db.objectStoreNames as unknown as { contains: (n: string) => boolean }).contains(name);
 	if (!has('repertoires')) {
@@ -371,6 +397,14 @@ function ensureAllStores(db: IDBPDatabase<OpeningTrainerDB>) {
 		cards.createIndex('by-repertoire', 'repertoireId');
 		cards.createIndex('by-due', 'dueAt');
 		cards.createIndex('by-repertoire-due', ['repertoireId', 'dueAt']);
+		cards.createIndex('by-fenKey', 'fenKey');
+	} else if (!tx.objectStore('cards').indexNames.contains('by-fenKey')) {
+		tx.objectStore('cards').createIndex('by-fenKey', 'fenKey');
+	}
+	if (!has('move_progress')) {
+		const mp = db.createObjectStore('move_progress', { keyPath: ['fenKey', 'expectedSan'] });
+		mp.createIndex('by-due', 'dueAt');
+		void foldLegacyCardProgress(tx);
 	}
 	if (!has('settings')) db.createObjectStore('settings', { keyPath: 'key' });
 	if (!has('explorer_stats')) {
@@ -435,6 +469,28 @@ function ensureAllStores(db: IDBPDatabase<OpeningTrainerDB>) {
 }
 
 /**
+ * v20 upgrade (issue #97): move each card's FSRS state out of `cards` into the
+ * shared `move_progress` store. Where two repertoires hold progress for the
+ * same move, the most recent review wins — the same rule sync uses — so a
+ * move learned in one repertoire counts as learned in all of them. Runs
+ * inside the versionchange transaction, so the DB isn't handed out until the
+ * fold has committed.
+ */
+async function foldLegacyCardProgress(tx: UpgradeTx): Promise<void> {
+	const rows = await tx.objectStore('cards').getAll();
+	const best = new Map<string, MoveProgress>();
+	for (const row of rows) {
+		if (!row.fsrs || typeof row.dueAt !== 'number') continue;
+		const p = toProgress(row as MoveProgress);
+		const id = JSON.stringify(progressKey(p.fenKey, p.expectedSan));
+		const prev = best.get(id);
+		best.set(id, prev ? newerProgress(prev, p) : p);
+	}
+	const store = tx.objectStore('move_progress');
+	for (const p of best.values()) await store.put(p);
+}
+
+/**
  * Read the current stored version of `openingtrainer` without triggering
  * an upgrade. Returns 0 if the DB doesn't exist yet.
  */
@@ -475,9 +531,9 @@ async function openAndVerify(): Promise<IDBPDatabase<OpeningTrainerDB>> {
 			console.warn(`COBRA IDB upgrade blocked: ${cur} → ${blocked}. Reloading.`);
 			if (typeof window !== 'undefined') window.location.reload();
 		},
-		upgrade(db, oldVersion) {
+		upgrade(db, oldVersion, _newVersion, transaction) {
 			console.log(`COBRA IDB upgrade: v${oldVersion} → v${targetVersion}`);
-			ensureAllStores(db);
+			ensureAllStores(db, transaction);
 		},
 		blocking() {
 			dbPromise?.then((d) => d.close());
@@ -510,9 +566,9 @@ export async function forceReopen(): Promise<IDBPDatabase<OpeningTrainerDB>> {
 			console.warn('COBRA IDB upgrade blocked during repair. Close other COBRA tabs.');
 			if (typeof window !== 'undefined') window.location.reload();
 		},
-		upgrade(db, oldVersion) {
+		upgrade(db, oldVersion, _newVersion, transaction) {
 			console.log(`COBRA IDB repair upgrade: v${oldVersion} → v${target}`);
-			ensureAllStores(db);
+			ensureAllStores(db, transaction);
 		},
 		blocking() {
 			dbPromise?.then((d) => d.close());

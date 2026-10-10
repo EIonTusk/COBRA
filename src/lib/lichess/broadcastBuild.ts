@@ -14,8 +14,7 @@ import { makeUci } from 'chessops/util';
 
 import { colorToMove } from '$lib/chess/fen';
 import { addEdge } from '$lib/storage/nodes';
-import { getCard, upsertCard } from '$lib/storage/cards';
-import { createFreshCard } from '$lib/fsrs/scheduler';
+import { addCard, getCard } from '$lib/storage/cards';
 import { fetchBroadcastPgn, searchBroadcastsByPlayer } from './broadcasts';
 import type { Color, Edge } from '$lib/types';
 
@@ -212,7 +211,7 @@ async function foldGame(
 			if (colorToMove(fenKey) === color) {
 				const existing = await getCard(repId, fenKey);
 				if (!existing) {
-					await upsertCard(createFreshCard(repId, fenKey, edge.san));
+					await addCard(repId, fenKey, edge.san);
 					progress.cardsAdded += 1;
 				}
 			}

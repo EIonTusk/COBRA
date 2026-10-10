@@ -42,7 +42,14 @@
 	import { furthestNonBranchingFenKey, pathToFenKey } from '$lib/tree/traversal';
 	import Board from '$lib/chess/Board.svelte';
 	import type { RepertoireNode } from '$lib/types';
-	import { countCards, countMistakeCards, listCards, resetAllFsrs } from '$lib/storage/cards';
+	import {
+		countCards,
+		countMistakeCards,
+		listCards,
+		resetAllFsrs,
+		countSharedCards,
+		sharedKeptNote
+	} from '$lib/storage/cards';
 	import { countDrillDue } from '$lib/drill/buildSegment';
 	import { countDuePlanCards, countPlanCards } from '$lib/storage/planCards';
 	import { nodesMap } from '$lib/storage/nodes';
@@ -434,10 +441,12 @@
 
 	async function onForgetProgress() {
 		if (!rep) return;
+		const shared = await countSharedCards(rep.id);
 		const ok = await confirmDialog({
 			title: 'Forget all progress?',
 			message:
-				'Resets the spaced-repetition schedule on every card in this repertoire. The tree and your prepared moves stay; lapses, intervals, and review history are wiped and everything becomes due now.',
+				'Resets the spaced-repetition schedule on every card in this repertoire. The tree and your prepared moves stay; lapses, intervals, and review history are wiped and everything becomes due now.' +
+				sharedKeptNote(shared),
 			confirmLabel: 'Forget progress',
 			variant: 'destructive'
 		});

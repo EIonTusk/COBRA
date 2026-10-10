@@ -140,11 +140,25 @@ async function readCards(page: Page, repId: string): Promise<StoredCard[]> {
 			lastRating?: number;
 			fsrs: { reps: number; lapses: number };
 		};
-		const cards: Card[] = await new Promise((resolve, reject) => {
-			const req = db.transaction('cards').objectStore('cards').getAll();
-			req.onsuccess = () => resolve(req.result as Card[]);
-			req.onerror = () => reject(req.error);
-		});
+		const getAll = <T>(store: string): Promise<T[]> =>
+			new Promise((resolve, reject) => {
+				const req = db.transaction(store).objectStore(store).getAll();
+				req.onsuccess = () => resolve(req.result as T[]);
+				req.onerror = () => reject(req.error);
+			});
+		// A card is its slot in `cards` joined with the move's shared record in
+		// `move_progress` (issue #97).
+		const slots = await getAll<Pick<Card, 'repertoireId' | 'fenKey' | 'expectedSan'>>('cards');
+		const progress = new Map(
+			(await getAll<Omit<Card, 'repertoireId'>>('move_progress')).map((p) => [
+				`${p.fenKey}|${p.expectedSan}`,
+				p
+			])
+		);
+		const cards: Card[] = slots.map((s) => ({
+			...progress.get(`${s.fenKey}|${s.expectedSan}`)!,
+			...s
+		}));
 		db.close();
 		return cards
 			.filter((c) => c.repertoireId === rid)
@@ -342,11 +356,16 @@ test('a missed first move is offered for relearning instead of stalling the dril
 			req.onsuccess = () => resolve(req.result);
 			req.onerror = () => reject(req.error);
 		});
-		const card: Record<string, unknown> = await new Promise((resolve, reject) => {
+		const slot: { expectedSan: string } = await new Promise((resolve, reject) => {
 			const req = db.transaction('cards').objectStore('cards').get([rid, rep.rootFenKey]);
 			req.onsuccess = () => resolve(req.result);
 			req.onerror = () => reject(req.error);
 		});
+		// Progress lives in `move_progress`, keyed by position and move (issue #97).
+		const card: Record<string, unknown> = {
+			fenKey: rep.rootFenKey,
+			expectedSan: slot.expectedSan
+		};
 		const now = Date.now();
 		const reviewedAt = now - 60_000;
 		const dueAt = now + 864e5;
@@ -365,8 +384,8 @@ test('a missed first move is offered for relearning instead of stalling the dril
 		card.dueAt = dueAt;
 		card.lastReview = reviewedAt;
 		card.lastRating = 1; // Rating.Again
-		const tx = db.transaction('cards', 'readwrite');
-		tx.objectStore('cards').put(card);
+		const tx = db.transaction('move_progress', 'readwrite');
+		tx.objectStore('move_progress').put(card);
 		await new Promise((res) => (tx.oncomplete = res));
 		db.close();
 		return { rootFenKey: rep.rootFenKey, expectedSan: card.expectedSan as string };

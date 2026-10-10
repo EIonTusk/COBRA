@@ -30,9 +30,18 @@ import { listGapsForRepertoire } from '$lib/storage/empiricalGaps';
 import { listSparGames } from '$lib/storage/sparGames';
 import { listPositionWdlForRepertoire } from '$lib/storage/positionWdl';
 import { listStoredBaselines } from '$lib/storage/baselines';
+import {
+	foldProgress,
+	newerProgress,
+	progressKey,
+	toProgress,
+	toSlot,
+	type ProgressStore
+} from '$lib/storage/moveProgress';
 import type {
 	AppSettings,
 	Card,
+	CardSlot,
 	EmpiricalGap,
 	IdeaCard,
 	Repertoire,
@@ -232,6 +241,7 @@ const REP_STORES = [
 	'repertoires',
 	'nodes',
 	'cards',
+	'move_progress',
 	'idea_cards',
 	'mistakes',
 	'empirical_gaps',
@@ -240,7 +250,7 @@ const REP_STORES = [
 ] as const;
 
 // Tier-split store groupings — the union equals REP_STORES.
-const REP_CORE_STORES = ['repertoires', 'nodes', 'cards', 'idea_cards'] as const;
+const REP_CORE_STORES = ['repertoires', 'nodes', 'cards', 'move_progress', 'idea_cards'] as const;
 const REP_TELEMETRY_STORES = ['mistakes', 'empirical_gaps', 'spar_games', 'position_wdl'] as const;
 
 const GLOBAL_STORES = ['settings', 'baselines', 'style_reports', 'masters_baseline'] as const;
@@ -266,10 +276,16 @@ export async function applyRepBundle(bundle: RepBundle): Promise<void> {
 	for (const k of oldNodeKeys) await nodes.delete(k);
 	for (const row of bundle.nodes) await nodes.put(clone(row));
 
+	// Card slots are this rep's and get replaced; their progress is shared
+	// with other reps (issue #97), so it's merged rather than overwritten.
 	const cards = tx.objectStore('cards');
 	const oldCardKeys = await cards.index('by-repertoire').getAllKeys(repId);
 	for (const k of oldCardKeys) await cards.delete(k);
-	for (const row of bundle.cards) await cards.put(clone(row));
+	const progress = tx.objectStore('move_progress');
+	for (const row of bundle.cards) {
+		await cards.put(toSlot(row));
+		await foldProgress(progress, clone(toProgress(row)));
+	}
 
 	const ideas = tx.objectStore('idea_cards');
 	const oldIdeaKeys = await ideas.index('by-repertoire').getAllKeys(repId);
@@ -360,7 +376,6 @@ export async function applyGlobalBundle(
 import {
 	emptyMergeStats,
 	mergeBaseline,
-	mergeCard,
 	mergeDossierReport,
 	mergeEmpiricalGap,
 	mergeIdeaCard,
@@ -410,11 +425,11 @@ export async function applyRepBundleMerge(bundle: RepBundle): Promise<MergeStats
 	}
 
 	// Cards.
-	stats.cards = await mergeStorePerKey(
-		tx.objectStore('cards') as unknown as SyncMergeStore<Card>,
+	stats.cards = await mergeCardsForRep(
+		tx.objectStore('cards'),
+		tx.objectStore('move_progress'),
 		repId,
-		bundle.cards,
-		(l, r) => mergeCard(l, r, ctx)
+		bundle.cards
 	);
 	stats.ideaCards = await mergeStorePerKey(
 		tx.objectStore('idea_cards') as unknown as SyncMergeStore<IdeaCard>,
@@ -497,11 +512,11 @@ export async function applyRepCoreBundleMerge(bundle: RepCoreBundle): Promise<Me
 		}
 	}
 
-	stats.cards = await mergeStorePerKey(
-		tx.objectStore('cards') as unknown as SyncMergeStore<Card>,
+	stats.cards = await mergeCardsForRep(
+		tx.objectStore('cards'),
+		tx.objectStore('move_progress'),
 		repId,
-		bundle.cards,
-		(l, r) => mergeCard(l, r, ctx)
+		bundle.cards
 	);
 	stats.ideaCards = await mergeStorePerKey(
 		tx.objectStore('idea_cards') as unknown as SyncMergeStore<IdeaCard>,
@@ -844,6 +859,49 @@ async function pruneOrphansForRep(
 		const [, fenKey] = key as [string, string];
 		if (!live.has(fenKey)) await ideasStore.delete(key);
 	}
+}
+
+/**
+ * Merge a rep's incoming cards. Each card is two rows locally (issue #97):
+ *
+ *   - its progress is folded into the shared `move_progress` record by
+ *     most-recent-review (`newerProgress`, the rule `mergeCard` has always
+ *     used), whichever repertoire's bundle it arrived in — a stale copy
+ *     riding in another rep's bundle simply loses;
+ *   - its slot (which move this rep trains at the position) goes in when
+ *     missing, and replaces a local slot with a different move only when the
+ *     remote card was reviewed more recently — the same winner a whole-row
+ *     `mergeCard` would have picked.
+ *
+ * Local-only slots flow through unchanged. Returns the number of cards that
+ * changed in either half.
+ */
+async function mergeCardsForRep(
+	slots: {
+		index: (name: 'by-repertoire') => { getAll: (key: string) => Promise<CardSlot[]> };
+		put: (row: CardSlot) => Promise<unknown>;
+	},
+	progress: ProgressStore,
+	repId: string,
+	remoteCards: Card[]
+): Promise<number> {
+	const local = new Map(
+		(await slots.index('by-repertoire').getAll(repId)).map((s) => [s.fenKey, s])
+	);
+	let changed = 0;
+	for (const remote of remoteCards) {
+		const slot = local.get(remote.fenKey);
+		let slotWins = !slot;
+		if (slot && slot.expectedSan !== remote.expectedSan) {
+			const mine = await progress.get(progressKey(slot.fenKey, slot.expectedSan));
+			const theirs = toProgress(remote);
+			slotWins = !mine || newerProgress(mine, theirs) === theirs;
+		}
+		const progressChanged = await foldProgress(progress, clone(toProgress(remote)));
+		if (slotWins) await slots.put({ ...toSlot(remote), repertoireId: repId });
+		if (slotWins || progressChanged) changed += 1;
+	}
+	return changed;
 }
 
 async function mergeStorePerKey<T extends { repertoireId?: string }>(

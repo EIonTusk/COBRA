@@ -15,8 +15,7 @@ import { streamChesscomGames } from './games';
 import { colorToMove } from '$lib/chess/fen';
 import { fenAfterMove } from '$lib/chess/position';
 import { addEdge } from '$lib/storage/nodes';
-import { getCard, upsertCard } from '$lib/storage/cards';
-import { createFreshCard } from '$lib/fsrs/scheduler';
+import { addCard, getCard } from '$lib/storage/cards';
 import type { Color, Edge } from '$lib/types';
 
 export interface ChesscomBuildOpts {
@@ -173,7 +172,7 @@ export async function buildFromChesscom(opts: ChesscomBuildOpts): Promise<Chessc
 			if (isOurTurn) {
 				const existing = await getCard(opts.repId, fenKey);
 				if (!existing) {
-					await upsertCard(createFreshCard(opts.repId, fenKey, edge.san));
+					await addCard(opts.repId, fenKey, edge.san);
 					progress.cardsAdded += 1;
 				}
 			}

@@ -13,6 +13,7 @@
 import { createEmptyCard } from 'ts-fsrs';
 import { getDB } from './db';
 import { listCards } from './cards';
+import { freshProgress, progressKey, toSlot } from './moveProgress';
 import { listIdeaCards } from './ideaCards';
 import { listNodes } from './nodes';
 import { getRepertoire } from './repertoires';
@@ -63,7 +64,7 @@ export async function decodeShare(encoded: string): Promise<ShareBundle> {
 /**
  * Import a decoded bundle as a brand-new repertoire. Remaps the rep id
  * (and every nodes/cards row's `repertoireId`) so an import never
- * overwrites an existing local rep. FSRS state on cards is reset: a
+ * overwrites an existing local rep. The sender's FSRS state isn't imported: a
  * re-shared tree is new material to the recipient, not prepared prep.
  */
 export async function importShareBundle(bundle: ShareBundle): Promise<Repertoire> {
@@ -84,20 +85,23 @@ export async function importShareBundle(bundle: ShareBundle): Promise<Repertoire
 		/* fall back to whatever was in the bundle */
 	}
 	const db = await getDB();
-	const tx = db.transaction(['repertoires', 'nodes', 'cards', 'idea_cards'], 'readwrite');
+	const tx = db.transaction(
+		['repertoires', 'nodes', 'cards', 'move_progress', 'idea_cards'],
+		'readwrite'
+	);
 	await tx.objectStore('repertoires').put(rep);
 	for (const n of bundle.nodes) {
 		await tx.objectStore('nodes').put({ ...n, repertoireId: newId });
 	}
+	// The sender's progress isn't imported, but the recipient's own is kept:
+	// a move they already train in another repertoire stays learned (issue
+	// #97). Only moves new to them get a fresh record.
+	const progress = tx.objectStore('move_progress');
 	for (const c of bundle.cards) {
-		await tx.objectStore('cards').put({
-			...c,
-			repertoireId: newId,
-			fsrs: createEmptyCard(new Date(now)),
-			dueAt: now,
-			lastReview: undefined,
-			lastRating: undefined
-		});
+		await tx.objectStore('cards').put({ ...toSlot(c), repertoireId: newId });
+		if (!(await progress.get(progressKey(c.fenKey, c.expectedSan)))) {
+			await progress.put(freshProgress(c.fenKey, c.expectedSan, now));
+		}
 	}
 	for (const ic of bundle.ideaCards) {
 		await tx.objectStore('idea_cards').put({

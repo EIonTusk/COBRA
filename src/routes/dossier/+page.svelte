@@ -83,7 +83,7 @@
 	import { buildExhibits } from '$lib/dossier/buildExhibits';
 	import { listRepertoires } from '$lib/storage/repertoires';
 	import { listNodes } from '$lib/storage/nodes';
-	import { listCards } from '$lib/storage/cards';
+	import { listUniqueCards } from '$lib/storage/cards';
 	import { buildFsrsFailures, type FsrsFailureRow } from '$lib/dossier/fsrsFeedback';
 	import { saveMistakes } from '$lib/storage/mistakes';
 	import type { AppSettings, Repertoire, ScanAccount } from '$lib/types';
@@ -194,7 +194,7 @@
 		repertoiresWithNodes = await Promise.all(
 			repertoires.map(async (r) => ({ repertoire: r, nodes: await listNodes(r.id) }))
 		);
-		const allCards = (await Promise.all(repertoires.map((r) => listCards(r.id)))).flat();
+		const allCards = await listUniqueCards();
 		fsrsFailures = buildFsrsFailures(allCards, repertoires);
 		// Load any user-calibrated baselines and inject them into the
 		// runtime cache so pickBaseline() picks them on first render.

@@ -11,10 +11,16 @@ import {
 import { buildLineFirstQueue } from '$lib/tree/lineOrder';
 import { answerSan } from '$lib/tree/liveMoves';
 import { reachProbabilities } from '$lib/tree/reachProbability';
-import { getCard, listCards, mistakeCards, pickBalancedDueCards } from '$lib/storage/cards';
+import {
+	cardForMove,
+	getCard,
+	listCards,
+	mistakeCards,
+	pickBalancedDueCards
+} from '$lib/storage/cards';
+import { moveId } from '$lib/storage/moveProgress';
 import { allDueIdeaCards, dueIdeaCards } from '$lib/storage/ideaCards';
 import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
-import { createFreshCard } from '$lib/fsrs/scheduler';
 import { nodesMap } from '$lib/storage/nodes';
 import type { DrillMode, DrillSegment } from './types';
 
@@ -518,13 +524,28 @@ export function planDueCards(
 /**
  * Due count for a repertoire: the cards planDueCards offers plus the due
  * idea prompts a drill would queue (those outside disabled lines).
+ *
+ * Pass the same `counted` set across repertoires for a library-wide total:
+ * a move several repertoires share has one progress record (issue #97), so
+ * it is counted only in the first repertoire that offers it.
  */
-export async function countDrillDue(rep: Repertoire, now: number = Date.now()): Promise<number> {
+export async function countDrillDue(
+	rep: Repertoire,
+	now: number = Date.now(),
+	counted?: Set<string>
+): Promise<number> {
 	const nodes = await nodesMap(rep.id);
 	const plan = planDueCards(rep, nodes, await listCards(rep.id), now);
 	const live = liveReachableFenKeys(nodes, rep.rootFenKey);
 	const ideas = (await allDueIdeaCards(rep.id, now)).filter((c) => live.has(c.fenKey));
-	return plan.reviews.length + plan.relearn.length + plan.fresh.length + ideas.length;
+	let moves = 0;
+	for (const c of [...plan.reviews, ...plan.relearn, ...plan.fresh]) {
+		const id = moveId(c);
+		if (counted?.has(id)) continue;
+		counted?.add(id);
+		moves += 1;
+	}
+	return moves + ideas.length;
 }
 
 /**
@@ -537,7 +558,16 @@ export async function buildSegment(
 	rep: Repertoire,
 	mode: DrillMode,
 	settings: AppSettings,
-	options?: { includeIdeas?: boolean; startFenKey?: string | null }
+	options?: {
+		includeIdeas?: boolean;
+		startFenKey?: string | null;
+		/**
+		 * Moves (by `moveId`) already planned by an earlier segment of the
+		 * same session. Their progress is shared across repertoires (issue
+		 * #97), so a due move two repertoires both prepare is drilled once.
+		 */
+		skipMoves?: Set<string>;
+	}
 ): Promise<DrillSegment> {
 	const nodes = await nodesMap(rep.id);
 	// Train-from-position: only honour the anchor when it's actually a node in
@@ -588,7 +618,7 @@ export async function buildSegment(
 		const cards: Card[] = [];
 		for (const m of pending) {
 			const existing = await getCard(rep.id, m.fenKey);
-			const card = existing ?? createFreshCard(rep.id, m.fenKey, m.expectedSan, Date.now());
+			const card = existing ?? (await cardForMove(rep.id, m.fenKey, m.expectedSan));
 			if (isTrainable(card)) cards.push(card);
 		}
 		const dueOriginalKeys = new Set<string>(cards.map((c) => c.fenKey));
@@ -644,9 +674,11 @@ export async function buildSegment(
 		// they hold back unlock as soon as possible.
 		const poolCap = settings.drillSessionCap * 5;
 		const plan = planDueCards(rep, nodes, await listCards(rep.id), Date.now(), reach);
+		const skip = options?.skipMoves;
+		const keep = (c: Card) => !skip?.has(moveId(c));
 		pool = [
-			...[...plan.relearn, ...plan.reviews].slice(0, poolCap),
-			...plan.fresh.slice(0, poolCap)
+			...[...plan.relearn, ...plan.reviews].filter(keep).slice(0, poolCap),
+			...plan.fresh.filter(keep).slice(0, poolCap)
 		];
 	}
 	const lineWalkOn = (settings.drillIntermediateMoves ?? 'play') === 'play';
