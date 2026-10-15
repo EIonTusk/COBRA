@@ -24,6 +24,7 @@
 	import { getIdeaCard } from '$lib/storage/ideaCards';
 	import { fenAfterMove } from '$lib/chess/position';
 	import { colorToMove } from '$lib/chess/fen';
+	import { liveMoves } from '$lib/tree/liveMoves';
 	import { Button, Select } from '$lib/ui';
 	import type { Color, Edge, IdeaCard, Repertoire, RepertoireNode } from '$lib/types';
 
@@ -63,7 +64,10 @@
 	const currentFenKey = $derived(history.at(-1)?.fenKey ?? rootKey);
 	const currentNode = $derived<RepertoireNode | undefined>(nodes.get(currentFenKey));
 	const currentLastMove = $derived<[Key, Key] | undefined>(history.at(-1)?.lastMove);
-	const currentChildren = $derived<Edge[]>(currentNode?.children ?? []);
+	// The tour walks live moves only: a disabled move is saved but shelved, so
+	// it is listed apart and never played or suggested (#99).
+	const currentChildren = $derived<Edge[]>(liveMoves(currentNode));
+	const disabledHere = $derived<Edge[]>((currentNode?.children ?? []).filter((e) => e.disabled));
 	const sideToMove = $derived<Color>(currentFenKey ? colorToMove(currentFenKey) : 'white');
 	const atLeaf = $derived(currentChildren.length === 0);
 
@@ -219,8 +223,8 @@
 		let node = untrack(() => currentNode);
 		const newSteps: Step[] = [];
 		let guard = 0;
-		while (node && node.children.length > 0 && guard++ < 256) {
-			const edge = node.children[0];
+		while (node && liveMoves(node).length > 0 && guard++ < 256) {
+			const edge = liveMoves(node)[0];
 			const next = fenAfterMove(fen, edge);
 			newSteps.push({
 				fen: next,
@@ -240,8 +244,9 @@
 		let node = nodes.get(key);
 		const newSteps: Step[] = [];
 		let guard = 0;
-		while (node && node.children.length > 0 && guard++ < 256) {
-			const edge = node.children[Math.floor(Math.random() * node.children.length)];
+		while (node && liveMoves(node).length > 0 && guard++ < 256) {
+			const live = liveMoves(node);
+			const edge = live[Math.floor(Math.random() * live.length)];
 			const next = fenAfterMove(fen, edge);
 			newSteps.push({
 				fen: next,
@@ -306,14 +311,14 @@
 	function findNextBranchAncestor(): number {
 		for (let i = history.length - 1; i >= 0; i--) {
 			const ancestorKey = i === 0 ? rootKey : history[i - 1].fenKey;
-			const node = nodes.get(ancestorKey);
-			if (!node || node.children.length === 0) continue;
+			const live = liveMoves(nodes.get(ancestorKey));
+			if (live.length === 0) continue;
 			const ancestorOurMove = rep ? colorToMove(ancestorKey) === rep.color : false;
 			let hasUnvisited = false;
 			if (ancestorOurMove) {
-				if (!tourVisited.has(edgeKey(ancestorKey, node.children[0]))) hasUnvisited = true;
+				if (!tourVisited.has(edgeKey(ancestorKey, live[0]))) hasUnvisited = true;
 			} else {
-				for (const c of node.children) {
+				for (const c of live) {
 					if (!tourVisited.has(edgeKey(ancestorKey, c))) {
 						hasUnvisited = true;
 						break;
@@ -344,17 +349,18 @@
 		const _speed = autoplaySpeed;
 		if (!isOn) return;
 		const node = nodes.get(fromKey);
+		const live = liveMoves(node);
 		const ourMove = rep ? colorToMove(fromKey) === rep.color : false;
 		let nextChildIdx = -1;
-		if (node && node.children.length > 0) {
+		if (live.length > 0) {
 			if (ourMove) {
 				// Only the main line on our side.
-				if (!tourVisited.has(edgeKey(fromKey, node.children[0]))) {
+				if (!tourVisited.has(edgeKey(fromKey, live[0]))) {
 					nextChildIdx = 0;
 				}
 			} else {
-				for (let i = 0; i < node.children.length; i++) {
-					if (!tourVisited.has(edgeKey(fromKey, node.children[i]))) {
+				for (let i = 0; i < live.length; i++) {
+					if (!tourVisited.has(edgeKey(fromKey, live[i]))) {
 						nextChildIdx = i;
 						break;
 					}
@@ -367,7 +373,7 @@
 			const delay = hasComment ? baseDelay * 2 : baseDelay;
 			autoplayTimer = setTimeout(() => {
 				if (!autoplay) return;
-				const edge = node!.children[nextChildIdx];
+				const edge = live[nextChildIdx];
 				tourVisited.add(edgeKey(fromKey, edge));
 				goForward(nextChildIdx);
 			}, delay);
@@ -777,6 +783,14 @@
 							{/each}
 						</ul>
 					</section>
+				{/if}
+
+				{#if disabledHere.length > 0}
+					<p class="font-mono text-[12px] text-[var(--color-parchment-500)]">
+						<span class="eyebrow mr-1">Disabled</span>
+						<span class="line-through opacity-70">{disabledHere.map((e) => e.san).join(', ')}</span>
+						<span class="italic">· not in your active repertoire</span>
+					</p>
 				{/if}
 
 				<!-- Autoplay config + key reference. Small, out of the

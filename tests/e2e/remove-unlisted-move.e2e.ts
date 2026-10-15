@@ -117,6 +117,9 @@ test('candidates panel lists saved moves Lichess does not, and deletes them', as
 	await page.goto('/settings');
 	await page.getByLabel('Or paste a personal API token').fill('lip_test');
 	await page.getByRole('button', { name: 'Save changes' }).click();
+	// Wait for the save to land before navigating away, or the token can be
+	// lost and every Lichess-backed control stays disabled.
+	await expect(page.getByText('Saved', { exact: true })).toBeVisible();
 
 	const repId = await seedRepertoire(page);
 	await page.goto(`/repertoire/${repId}/edit`);

@@ -21,6 +21,7 @@ import { parseFen, makeFen } from 'chessops/fen';
 import { parseUci } from 'chessops/util';
 
 import { colorToMove } from '$lib/chess/fen';
+import { liveMoves } from '$lib/tree/liveMoves';
 import { fetchExplorer } from '$lib/explorer/client';
 import type { Color, RepertoireNode } from '$lib/types';
 
@@ -184,6 +185,7 @@ async function probeMissing(
  * Walk the given line (fenKey+fen pairs from root to the current board) and
  * return the first opponent-turn position with an uncovered threshold-popular
  * move. The move itself is the most popular uncovered one at that position.
+ * The walk stops at a disabled move: nothing past it is suggested (#99).
  */
 export async function firstMissingOnLine(
 	nodes: Map<string, RepertoireNode>,
@@ -199,6 +201,10 @@ export async function firstMissingOnLine(
 
 	for (let i = 0; i < path.length; i++) {
 		const { fenKey, fen } = path[i];
+		if (i > 0) {
+			const via = nodes.get(path[i - 1].fenKey)?.children.find((e) => e.toFenKey === fenKey);
+			if (via?.disabled) break;
+		}
 		if (colorToMove(fenKey) === color) continue;
 		const node = nodes.get(fenKey);
 		if (!node) continue;
@@ -212,8 +218,9 @@ export async function firstMissingOnLine(
 }
 
 /**
- * BFS the tree from the root; at each opponent-turn node, probe explorer and
- * gather every uncovered threshold-popular move. Returns the full list sorted
+ * BFS the tree from the root through live moves (disabled lines are skipped,
+ * #99); at each opponent-turn node, probe explorer and gather every uncovered
+ * threshold-popular move. Returns the full list sorted
  * by games played (desc). Callers pick top-1 or filter by `excludeFenKeys`
  * depending on the button; caching the list lets the edit page answer
  * subsequent clicks without another round of probes.
@@ -251,7 +258,7 @@ export async function collectMissingMoves(
 			probed += 1;
 			for (const m of missing) out.push({ ...m, depth });
 		}
-		for (const edge of node.children) {
+		for (const edge of liveMoves(node)) {
 			if (visited.has(edge.toFenKey)) continue;
 			visited.add(edge.toFenKey);
 			queue.push({ fenKey: edge.toFenKey, fen: fenFromKey(edge.toFenKey), depth: depth + 1 });
