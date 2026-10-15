@@ -6,7 +6,11 @@ import type { Edge, RepertoireNode } from '$lib/types';
  */
 export interface TreeMove {
 	san: string;
+	uci: string;
+	/** Position after this move. */
 	fenKey: string;
+	/** Position this move is played from — with `uci`, identifies the edge. */
+	fromFenKey: string;
 	/** 1-based plies from the repertoire root (used for move numbering). */
 	ply: number;
 	/**
@@ -16,6 +20,8 @@ export interface TreeMove {
 	 * `liveReachableFenKeys`); here we grey the branch as drawn.
 	 */
 	disabled: boolean;
+	/** This edge itself carries the `disabled` flag (it heads a shelved line). */
+	edgeDisabled: boolean;
 	/**
 	 * This move's subtree was already expanded elsewhere in the tree (the
 	 * position is a transposition hub). We stop at the move itself — clicking
@@ -94,15 +100,24 @@ export function buildTreeRows(
 	 * transposition (already expanded — the caller should not descend further).
 	 * Marks the position expanded the first time it's seen.
 	 */
-	function pushMove(row: TreeRow, edge: Edge, ply: number, parentDisabled: boolean) {
+	function pushMove(
+		row: TreeRow,
+		fromFenKey: string,
+		edge: Edge,
+		ply: number,
+		parentDisabled: boolean
+	) {
 		const target = edge.toFenKey;
 		const disabled = parentDisabled || !!edge.disabled;
 		const transposition = expanded.has(target);
 		const move: TreeMove = {
 			san: edge.san,
+			uci: edge.uci,
 			fenKey: target,
+			fromFenKey,
 			ply,
 			disabled,
+			edgeDisabled: !!edge.disabled,
 			transposition,
 			foldable: false,
 			collapsed: false,
@@ -131,13 +146,14 @@ export function buildTreeRows(
 	}
 
 	/**
-	 * Walk one mainline starting at `entryEdge` (a child of some node), pushing
+	 * Walk one mainline starting at `entryEdge` (a child of `entryFrom`), pushing
 	 * rows as it goes. Variations branching off this line are recursed at
 	 * `depth + 1`. `parentDisabled` inherits the shelved state; `blockStart` is
 	 * true for the opening move of a top-level block (a fold point for the whole
 	 * opening).
 	 */
 	function emitLine(
+		entryFrom: string,
 		entryEdge: Edge,
 		depth: number,
 		entryPly: number,
@@ -146,16 +162,17 @@ export function buildTreeRows(
 	) {
 		let row = newRow(depth);
 		let edge: Edge | null = entryEdge;
+		let from = entryFrom;
 		let ply = entryPly;
 		let disabled = parentDisabled;
 		let first = true;
 		// Sidelines queued at the previous branch, flushed once the mainline
 		// move they're alternatives to has been placed on the row.
-		let pending: { subs: Edge[]; ply: number; disabled: boolean } | null = null;
+		let pending: { from: string; subs: Edge[]; ply: number; disabled: boolean } | null = null;
 
 		while (edge) {
 			if (rows.length >= maxRows) return;
-			const res = pushMove(row, edge, ply, disabled);
+			const res = pushMove(row, from, edge, ply, disabled);
 			disabled = res.disabled;
 			const isOpeningMove = first && blockStart && depth === 0;
 			first = false;
@@ -165,7 +182,7 @@ export function buildTreeRows(
 			if (pending) {
 				rows.push(row);
 				for (const sub of pending.subs) {
-					emitLine(sub, depth + 1, pending.ply, pending.disabled, false);
+					emitLine(pending.from, sub, depth + 1, pending.ply, pending.disabled, false);
 					if (rows.length >= maxRows) return;
 				}
 				row = newRow(depth);
@@ -187,8 +204,9 @@ export function buildTreeRows(
 			if (kids.length > 1) {
 				// Alternatives to the mainline child, flushed next iteration
 				// once that child has been placed.
-				pending = { subs: kids.slice(1), ply: ply + 1, disabled };
+				pending = { from: res.target, subs: kids.slice(1), ply: ply + 1, disabled };
 			}
+			from = res.target;
 			edge = kids[0];
 			ply += 1;
 		}
@@ -199,7 +217,7 @@ export function buildTreeRows(
 	const rootKids = nodes.get(rootFenKey)?.children ?? [];
 	for (const kid of rootKids) {
 		if (rows.length >= maxRows) break;
-		emitLine(kid, 0, 1, false, true);
+		emitLine(rootFenKey, kid, 0, 1, false, true);
 	}
 
 	return rows;

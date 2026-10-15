@@ -12,6 +12,7 @@ import { makeFen } from 'chessops/fen';
 
 import { colorToMove } from '$lib/chess/fen';
 import type { Color, RepertoireNode } from '$lib/types';
+import { liveMoves } from '$lib/tree/liveMoves';
 import type { LichessGameMeta } from './games';
 
 export interface MistakeRecord {
@@ -221,7 +222,8 @@ function detectInternal(
 							fenKey,
 							fen: makeFen(pos.toSetup()),
 							playedSan: node.san,
-							expectedSan: treeNode.children[0].san,
+							// A live prepared move, not one the user disabled (issue #102).
+							expectedSan: liveMoves(treeNode)[0]?.san ?? treeNode.children[0].san,
 							plyOffTree: ply
 						}
 					};

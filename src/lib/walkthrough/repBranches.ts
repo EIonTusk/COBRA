@@ -1,4 +1,5 @@
 import { fenAfterMove } from '$lib/chess/position';
+import { liveMoves } from '$lib/tree/liveMoves';
 import type { RepertoireNode } from '$lib/types';
 
 interface RepWithFen {
@@ -10,7 +11,7 @@ interface RepWithFen {
 
 /**
  * Walk down from the rep's startingFenKey (or rootFenKey) through any
- * unique-child prefix and stop at the first position with multiple children
+ * unique-live-move prefix and stop at the first position with multiple live moves
  * — that's the position where the rep meaningfully branches into separate
  * lines. Returns null if the start position is missing or the walk loops
  * back on itself (defensive against malformed transpositions).
@@ -27,8 +28,9 @@ export function findBranchPoint(rep: {
 		seen.add(cur);
 		const node = rep.nodes.get(cur);
 		if (!node) return null;
-		if (node.children.length !== 1) return cur;
-		cur = node.children[0].toFenKey;
+		const live = liveMoves(node);
+		if (live.length !== 1) return cur;
+		cur = live[0].toFenKey;
 	}
 	return cur;
 }

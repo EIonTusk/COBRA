@@ -47,7 +47,12 @@ export async function playSession(
 	segments: DrillSegment[],
 	answer: Answer,
 	params: FSRSParameters,
-	now: Date
+	now: Date,
+	/**
+	 * Hinted presentations: true when the user plays something other than
+	 * the arrow anyway (a misclick). Default: they follow it ('peeked').
+	 */
+	hintedMiss?: Answer
 ): Promise<GradeEvent[]> {
 	const db = await getDB();
 	const grader = new SessionGrader();
@@ -62,19 +67,21 @@ export async function playSession(
 		card: Card,
 		phase: Presentation['phase'],
 		lineWalkMode: boolean
-	): Promise<{ outcome: DrillOutcome; isIntroductionPass: boolean; isLineWalkStep: boolean }> => {
+	): Promise<{
+		outcome: DrillOutcome;
+		isIntroductionPass: boolean;
+		isLineWalkStep: boolean;
+		isHintedIntroduction: boolean;
+	}> => {
 		const seg = segments[segIdx];
 		const key = ck(segIdx, card.fenKey);
 		const isMistakeReview = seg.mode === 'mistakes' || seg.mode === 'retrain';
 		const isLineWalkStep = seg.mode === 'due' && !seg.dueOriginalKeys.has(card.fenKey);
 		// hintLevel on presentation ($effect on currentEntry).
 		const hinted = !(card.lastReview || introduced.has(key) || isLineWalkStep || isMistakeReview);
-		const isIntroductionPass =
-			!card.lastReview &&
-			!introduced.has(key) &&
-			seg.mode === 'due' &&
-			!isLineWalkStep &&
-			!lineWalkMode;
+		const isHintedIntroduction =
+			!card.lastReview && !introduced.has(key) && seg.mode === 'due' && !isLineWalkStep;
+		const isIntroductionPass = isHintedIntroduction && !lineWalkMode;
 		const attempt = attempts.get(key) ?? 0;
 		attempts.set(key, attempt + 1);
 		const p: Presentation = {
@@ -86,14 +93,21 @@ export async function playSession(
 			lineWalkStep: isLineWalkStep,
 			phase
 		};
-		// Hinted: the user plays the arrow (deriveOutcome → 'peeked').
-		const outcome: DrillOutcome = hinted ? 'peeked' : answer(p) ? 'correct' : 'wrong';
+		// Hinted: the user plays the arrow (deriveOutcome → 'peeked'), unless
+		// they misclick (wrongAttempts > 0 → 'wrong').
+		const outcome: DrillOutcome = hinted
+			? hintedMiss?.(p)
+				? 'wrong'
+				: 'peeked'
+			: answer(p)
+				? 'correct'
+				: 'wrong';
 		const before = (await db.get('cards', [seg.rep.id, card.fenKey])) ?? card;
 		const after = grader.grade(
 			key,
 			card,
 			outcome,
-			{ isLineWalkStep, isMistakeReview, isIntroductionPass },
+			{ isLineWalkStep, isMistakeReview, isIntroductionPass: isHintedIntroduction },
 			params,
 			now
 		);
@@ -102,7 +116,7 @@ export async function playSession(
 		if (seg.mode === 'retrain' && outcome === 'correct') {
 			await markMistakeByPosition(seg.rep.id, card.fenKey);
 		}
-		return { outcome, isIntroductionPass, isLineWalkStep };
+		return { outcome, isIntroductionPass, isLineWalkStep, isHintedIntroduction };
 	};
 
 	for (let s = 0; s < segments.length; s++) {
@@ -123,8 +137,10 @@ export async function playSession(
 					const key = ck(s, card.fenKey);
 					if (drilled.has(key)) continue;
 					const wasNew = !card.lastReview && !introduced.has(key);
-					const { outcome } = await present(s, card, phase, true);
-					if (outcome === 'wrong' && phase === 'learn') {
+					const { outcome, isHintedIntroduction } = await present(s, card, phase, true);
+					// rateAndAdvance: a miss on the hinted introduction isn't a
+					// failed recall; the Train pass is the retry.
+					if (outcome === 'wrong' && phase === 'learn' && !isHintedIntroduction) {
 						const set = failedByWalk.get(w) ?? new Set<string>();
 						set.add(card.fenKey);
 						failedByWalk.set(w, set);

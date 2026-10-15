@@ -110,6 +110,28 @@ describe('buildTreeRows', () => {
 		]);
 	});
 
+	it('records the position each move is played from', () => {
+		// Sidelines hang off the branching position, not the previous row's move.
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a')]));
+		m.set('a', node('a', [edge('e5', 'b'), edge('c5', 'sic', true)]));
+		m.set('b', node('b', [edge('Nf3', 'c')]));
+		m.set('c', node('c', []));
+		m.set('sic', node('sic', [edge('Nf3', 'sic2')]));
+		m.set('sic2', node('sic2', []));
+		const flat = buildTreeRows(m, 'r').flatMap((row) => row.moves);
+		expect(flat.map((x) => `${x.fromFenKey}>${x.san}>${x.fenKey}`)).toEqual([
+			'r>e4>a',
+			'a>e5>b',
+			'a>c5>sic',
+			'sic>Nf3>sic2',
+			'b>Nf3>c'
+		]);
+		// Only the shelved head carries the edge flag; its continuation inherits.
+		expect(flat.filter((x) => x.edgeDisabled).map((x) => x.fenKey)).toEqual(['sic']);
+		expect(flat.filter((x) => x.disabled).map((x) => x.fenKey)).toEqual(['sic', 'sic2']);
+	});
+
 	it('treats each distinct first move as its own depth-0 block', () => {
 		const m = new Map<string, RepertoireNode>();
 		m.set('r', node('r', [edge('e4', 'a'), edge('d4', 'b')]));

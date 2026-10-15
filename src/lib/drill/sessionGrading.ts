@@ -7,7 +7,12 @@ export interface GradeContext {
 	isLineWalkStep: boolean;
 	/** Mistakes / retrain drills: practice only, never touch the schedule. */
 	isMistakeReview: boolean;
-	/** First, hinted presentation of a brand-new card (auto mode). */
+	/**
+	 * First, hinted presentation of a brand-new card, in either mode: auto
+	 * mode's introduction pass or a line walk's Learn pass. A wrong move with
+	 * the answer on the board isn't a failed recall, so it never lapses; the
+	 * real recall that follows (re-queue or Train pass) sets the grade.
+	 */
 	isIntroductionPass: boolean;
 }
 
@@ -31,6 +36,9 @@ export interface GradeContext {
  *  - A line-walk prefix step grades at most once per session (issue #84).
  *  - Once a card lapses in a session (a wrong answer outside a hinted
  *    introduction), later presentations don't re-grade it: the miss stands.
+ *    A miss on the hinted introduction itself doesn't lapse (issue #101): in
+ *    line-walk mode it used to, so one slip on the Learn pass of a new trunk
+ *    move graded it Again and progressive unlock froze everything below it.
  */
 export class SessionGrader {
 	#prefixRated = new Set<string>();

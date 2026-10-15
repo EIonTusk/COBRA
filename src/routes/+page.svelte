@@ -5,8 +5,8 @@
 	import { ArrowRight, Plus, AlertTriangle, RotateCcw, BookOpen, Play, Zap } from 'lucide-svelte';
 
 	import { listRepertoires } from '$lib/storage/repertoires';
-	import { countDue, countCards } from '$lib/storage/cards';
-	import { countDueIdeaCards } from '$lib/storage/ideaCards';
+	import { countCards } from '$lib/storage/cards';
+	import { countDrillDue } from '$lib/drill/buildSegment';
 	import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 	import { nodesMap } from '$lib/storage/nodes';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
@@ -28,8 +28,7 @@
 		let due = 0;
 		let cards = 0;
 		for (const r of reps) {
-			due += await countDue(r.id);
-			due += await countDueIdeaCards(r.id);
+			due += await countDrillDue(r);
 			cards += await countCards(r.id);
 		}
 		totalDue = due;
