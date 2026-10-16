@@ -9,6 +9,7 @@ import { defaultSettings } from '$lib/storage/settings';
 import { createFreshCard } from '$lib/fsrs/scheduler';
 import { replaceRepertoireTree, nodesMap } from '$lib/storage/nodes';
 import { buildSegment, groupForcedRuns } from './buildSegment';
+import { putCardRows } from '$lib/storage/cards.testutil';
 import { forcedRuns, isForcedReply, MAX_FORCED_RUN, runAfter, runBefore } from './forcedLines';
 import { onlyMoveVerdict } from './onlyMove';
 
@@ -80,11 +81,12 @@ function learned(fenKey: string, dueAt: number): Card {
 
 async function seed(cards: Card[]) {
 	const db = await getDB();
-	const tx = db.transaction(['nodes', 'cards'], 'readwrite');
+	const tx = db.transaction(['nodes', 'cards', 'move_progress'], 'readwrite');
 	await tx.objectStore('nodes').clear();
 	await tx.objectStore('cards').clear();
+	await tx.objectStore('move_progress').clear();
 	for (const x of tree) await tx.objectStore('nodes').put(structuredClone(x));
-	for (const c of cards) await tx.objectStore('cards').put(c);
+	for (const c of cards) await putCardRows(tx, c);
 	await tx.done;
 }
 

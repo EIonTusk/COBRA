@@ -7,7 +7,7 @@
 	import { buildFsrsFailures, LAPSE_THRESHOLD } from '$lib/dossier/fsrsFeedback';
 	import type { FsrsFailureRow } from '$lib/dossier/fsrsFeedback';
 	import { listRepertoires } from '$lib/storage/repertoires';
-	import { listCards } from '$lib/storage/cards';
+	import { listUniqueCards } from '$lib/storage/cards';
 	import type { DossierScanResult } from '$lib/dossier/scan';
 
 	let loaded = $state(false);
@@ -17,7 +17,7 @@
 	onMount(async () => {
 		const [saved, reps] = await Promise.all([loadDossierReport(), listRepertoires()]);
 		if (saved?.payload) result = saved.payload as DossierScanResult;
-		const allCards = (await Promise.all(reps.map((r) => listCards(r.id)))).flat();
+		const allCards = await listUniqueCards();
 		failures = buildFsrsFailures(allCards, reps, { limit: 100 });
 		loaded = true;
 	});

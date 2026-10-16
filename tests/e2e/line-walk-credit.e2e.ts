@@ -147,7 +147,7 @@ test('a recalled line-walk prefix move earns FSRS credit (issue #84)', async ({ 
 			});
 
 		type Node = { repertoireId: string; fenKey: string; children: { toFenKey: string }[] };
-		type Card = { repertoireId: string; fenKey: string; fsrs: Record<string, unknown> };
+		type Card = { repertoireId: string; fenKey: string; expectedSan: string };
 		const nodes = (await all<Node>('nodes')).filter((n) => n.repertoireId === rid);
 		const cards = (await all<Card>('cards')).filter((c) => c.repertoireId === rid);
 		const reps = await all<{ id: string; rootFenKey: string }>('repertoires');
@@ -174,23 +174,28 @@ test('a recalled line-walk prefix move earns FSRS credit (issue #84)', async ({ 
 		const now = Date.now();
 		const reviewedAt = new Date(now - 3 * 864e5); // 3 days ago
 		const nextDue = new Date(now + 2 * 864e5); // on a 5-day interval → due in 2 days
-		const tx = db.transaction('cards', 'readwrite');
+		// Progress lives in `move_progress`, keyed by position and move and
+		// shared across repertoires (issue #97); `cards` only holds membership.
+		const tx = db.transaction('move_progress', 'readwrite');
 		for (const c of shallowest) {
-			c.fsrs = {
-				due: nextDue,
-				stability: 5, // below the 7-day well-learned threshold → still walked
-				difficulty: 5,
-				elapsed_days: 5,
-				scheduled_days: 5,
-				reps: 3,
-				lapses: 0,
-				state: 2, // Review
-				last_review: reviewedAt,
-				learning_steps: 0
-			};
-			(c as Record<string, unknown>).dueAt = nextDue.getTime();
-			(c as Record<string, unknown>).lastReview = reviewedAt.getTime();
-			tx.objectStore('cards').put(c);
+			tx.objectStore('move_progress').put({
+				fenKey: c.fenKey,
+				expectedSan: c.expectedSan,
+				fsrs: {
+					due: nextDue,
+					stability: 5, // below the 7-day well-learned threshold → still walked
+					difficulty: 5,
+					elapsed_days: 5,
+					scheduled_days: 5,
+					reps: 3,
+					lapses: 0,
+					state: 2, // Review
+					last_review: reviewedAt,
+					learning_steps: 0
+				},
+				dueAt: nextDue.getTime(),
+				lastReview: reviewedAt.getTime()
+			});
 		}
 		await new Promise((res) => (tx.oncomplete = res));
 		return shallowest.map((c) => c.fenKey);
@@ -208,18 +213,18 @@ test('a recalled line-walk prefix move earns FSRS credit (issue #84)', async ({ 
 				});
 				const out = [];
 				for (const fenKey of keys as string[]) {
-					const c: {
+					const get = <T>(store: string, key: IDBValidKey): Promise<T> =>
+						new Promise((resolve, reject) => {
+							const req = db.transaction(store).objectStore(store).get(key);
+							req.onsuccess = () => resolve(req.result as T);
+							req.onerror = () => reject(req.error);
+						});
+					const slot = await get<{ expectedSan: string }>('cards', [rid as string, fenKey]);
+					const c = await get<{
 						fsrs: { reps: number; stability: number; state: number };
 						dueAt: number;
 						lastReview?: number;
-					} = await new Promise((resolve, reject) => {
-						const req = db
-							.transaction('cards')
-							.objectStore('cards')
-							.get([rid as string, fenKey]);
-						req.onsuccess = () => resolve(req.result);
-						req.onerror = () => reject(req.error);
-					});
+					}>('move_progress', [fenKey, slot.expectedSan]);
 					out.push({
 						fenKey,
 						reps: c.fsrs.reps,

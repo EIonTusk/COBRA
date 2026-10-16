@@ -16,6 +16,8 @@ import { buildSegment, isShaky } from './buildSegment';
 import { buildQuickDrillSegments } from './quickDrill';
 import { playSession, type Answer, type GradeEvent } from './drillSessionModel.testutil';
 import type { DrillSegment } from './types';
+import { putCardRows } from '$lib/storage/cards.testutil';
+import { listCards } from '$lib/storage/cards';
 
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 0, 1, 9);
@@ -103,17 +105,16 @@ function buildRep(
 
 async function seed(reps: SimRep[], mistakes: StoredMistake[] = []) {
 	const db = await getDB();
-	const tx = db.transaction(['repertoires', 'nodes', 'cards', 'mistakes'], 'readwrite');
-	for (const s of ['repertoires', 'nodes', 'cards', 'mistakes'] as const) {
+	const stores = ['repertoires', 'nodes', 'cards', 'move_progress', 'mistakes'] as const;
+	const tx = db.transaction([...stores], 'readwrite');
+	for (const s of stores) {
 		await tx.objectStore(s).clear();
 	}
 	for (const r of reps) {
 		await tx.objectStore('repertoires').put(r.rep);
 		for (const n of r.nodes) await tx.objectStore('nodes').put(n);
 		for (let i = 0; i < r.importOrder.length; i++) {
-			await tx
-				.objectStore('cards')
-				.put(createFreshCard(r.rep.id, r.importOrder[i], 'm', T0 - DAY + i));
+			await putCardRows(tx, createFreshCard(r.rep.id, r.importOrder[i], 'm', T0 - DAY + i));
 		}
 	}
 	for (const m of mistakes) await tx.objectStore('mistakes').put(m);
@@ -162,7 +163,6 @@ async function simulate(reps: SimRep[], opts: SimOptions): Promise<SimResult> {
 		drillSessionCap: 30,
 		dailyNewCardCap: 10
 	};
-	const db = await getDB();
 	const byId = new Map(reps.map((r) => [r.rep.id, r]));
 	const introducedDay = new Map<string, number>();
 	const gateViolations: string[] = [];
@@ -176,7 +176,9 @@ async function simulate(reps: SimRep[], opts: SimOptions): Promise<SimResult> {
 		const now = T0 + day * DAY;
 		vi.setSystemTime(now);
 		const before = new Map<string, Card>(
-			(await db.getAll('cards')).map((c) => [`${c.repertoireId}|${c.fenKey}`, c])
+			(await Promise.all(reps.map((r) => listCards(r.rep.id))))
+				.flat()
+				.map((c) => [`${c.repertoireId}|${c.fenKey}`, c])
 		);
 		snapshots.push(before);
 		for (const c of before.values()) {

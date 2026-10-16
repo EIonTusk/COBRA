@@ -9,6 +9,7 @@ import { defaultSettings } from '$lib/storage/settings';
 import { createFreshCard } from '$lib/fsrs/scheduler';
 import { replaceRepertoireTree, nodesMap } from '$lib/storage/nodes';
 import { buildSegment } from './buildSegment';
+import { putCardRows } from '$lib/storage/cards.testutil';
 
 const REP = 'rep-common';
 const f = (games: number): MoveFrequency => ({
@@ -55,11 +56,14 @@ const rep: Repertoire = {
 
 async function seed() {
 	const db = await getDB();
-	const tx = db.transaction(['nodes', 'cards'], 'readwrite');
+	const tx = db.transaction(['nodes', 'cards', 'move_progress'], 'readwrite');
 	await tx.objectStore('nodes').clear();
 	await tx.objectStore('cards').clear();
+	await tx.objectStore('move_progress').clear();
 	for (const n of tree) await tx.objectStore('nodes').put(structuredClone(n));
-	cardKeys.forEach((k, i) => tx.objectStore('cards').put(createFreshCard(REP, k, 'x', 1 + i)));
+	for (const [i, k] of cardKeys.entries()) {
+		await putCardRows(tx, createFreshCard(REP, k, 'x', 1 + i));
+	}
 	await tx.done;
 }
 

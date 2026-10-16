@@ -11,6 +11,8 @@ import type { Card, Repertoire, RepertoireNode } from '$lib/types';
 import { getDB } from '$lib/storage/db';
 import { defaultSettings } from '$lib/storage/settings';
 import { buildSegment, depthFilter, trainableFilter } from './buildSegment';
+import { putCardRows } from '$lib/storage/cards.testutil';
+import { upsertCard } from '$lib/storage/cards';
 
 const REP = 'rep-1';
 const ROOT = 'root';
@@ -44,7 +46,7 @@ const rep: Repertoire = {
 
 async function seed() {
 	const db = await getDB();
-	const tx = db.transaction(['nodes', 'cards'], 'readwrite');
+	const tx = db.transaction(['nodes', 'cards', 'move_progress'], 'readwrite');
 	const nodes = [
 		node(ROOT, ['A']),
 		node('A', ['B']),
@@ -54,15 +56,16 @@ async function seed() {
 		node('E', [])
 	];
 	for (const n of nodes) await tx.objectStore('nodes').put(n);
-	for (const c of [card('A'), card('C'), card('E')]) await tx.objectStore('cards').put(c);
+	for (const c of [card('A'), card('C'), card('E')]) await putCardRows(tx, c);
 	await tx.done;
 }
 
 async function wipe() {
 	const db = await getDB();
-	const tx = db.transaction(['nodes', 'cards'], 'readwrite');
+	const tx = db.transaction(['nodes', 'cards', 'move_progress'], 'readwrite');
 	await tx.objectStore('nodes').clear();
 	await tx.objectStore('cards').clear();
+	await tx.objectStore('move_progress').clear();
 	await tx.done;
 }
 
@@ -108,10 +111,10 @@ describe('buildSegment train-from-position', () => {
 		// Push every card's due date far into the future: a normal `due` drill
 		// would be empty, but train-from-position still surfaces the subtree.
 		const db = await getDB();
-		const tx = db.transaction('cards', 'readwrite');
+		const tx = db.transaction(['cards', 'move_progress'], 'readwrite');
 		const future = 8640000000000; // well beyond any test `now`
 		for (const c of [card('A'), card('C'), card('E')]) {
-			await tx.objectStore('cards').put({ ...c, dueAt: future });
+			await putCardRows(tx, { ...c, dueAt: future });
 		}
 		await tx.done;
 
@@ -190,13 +193,12 @@ describe('buildSegment disabled lines in every mode', () => {
 	});
 
 	it('drops lapsed cards in a disabled line from mistakes mode', async () => {
-		const db = await getDB();
 		const lapsed = (k: string): Card => ({
 			...card(k),
 			fsrs: { lapses: 1, state: 3 } as Card['fsrs'],
 			lastReview: 1
 		});
-		for (const k of ['A', 'C', 'E']) await db.put('cards', lapsed(k));
+		for (const k of ['A', 'C', 'E']) await upsertCard(lapsed(k));
 		await disableEdge('B', 'D');
 		const seg = await buildSegment(rep, 'mistakes', settings());
 		expect(keys(seg.cards)).toEqual(['A', 'C']);
@@ -273,8 +275,8 @@ describe('buildSegment disabled lines in every mode', () => {
 			n('G', [])
 		])
 			await db.put('nodes', node);
-		await db.put('cards', { ...card('P'), expectedSan: 'p' });
-		await db.put('cards', { ...card('F'), expectedSan: 'f' });
+		await upsertCard({ ...card('P'), expectedSan: 'p' });
+		await upsertCard({ ...card('F'), expectedSan: 'f' });
 		// Test keys read as black-to-move, so a black rep owns every position.
 		const blackRep: Repertoire = { ...rep, color: 'black' };
 		const seg = await buildSegment(blackRep, 'due', {
@@ -322,8 +324,8 @@ describe('buildSegment line-walk prefix steps', () => {
 			n('G', [])
 		])
 			await db.put('nodes', node);
-		await db.put('cards', { ...card('P'), expectedSan: 'p', dueAt: Date.now() + 86_400_000 });
-		await db.put('cards', {
+		await upsertCard({ ...card('P'), expectedSan: 'p', dueAt: Date.now() + 86_400_000 });
+		await upsertCard({
 			...card('F'),
 			expectedSan: 'f',
 			fsrs: { state: 2, stability: 1 } as Card['fsrs'],

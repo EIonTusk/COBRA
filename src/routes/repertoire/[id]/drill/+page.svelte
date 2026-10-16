@@ -6,7 +6,7 @@
 
 	import { getRepertoire } from '$lib/storage/repertoires';
 	import { getSettings } from '$lib/storage/settings';
-	import { resetAllFsrs } from '$lib/storage/cards';
+	import { countSharedCards, resetAllFsrs, sharedKeptNote } from '$lib/storage/cards';
 	import { confirmDialog } from '$lib/ui';
 	import DrillRunner from '$lib/drill/DrillRunner.svelte';
 	import { buildSegment } from '$lib/drill/buildSegment';
@@ -76,10 +76,12 @@
 
 	async function retrain() {
 		if (!rep || !settings || retrainBusy) return;
+		const shared = await countSharedCards(rep.id);
 		const ok = await confirmDialog({
 			title: 'Retrain from scratch',
 			message:
-				'Reset spaced-repetition state for every card in this repertoire. Positions stay; the schedule restarts from zero and everything becomes due immediately.',
+				'Reset spaced-repetition state for every card in this repertoire. Positions stay; the schedule restarts from zero and everything becomes due immediately.' +
+				sharedKeptNote(shared),
 			confirmLabel: 'Reset schedule',
 			variant: 'destructive'
 		});

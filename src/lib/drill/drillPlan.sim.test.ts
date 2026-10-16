@@ -30,6 +30,8 @@ import {
 	trainableFilter
 } from './buildSegment';
 import { playSession, type Answer } from './drillSessionModel.testutil';
+import { listCards } from '$lib/storage/cards';
+import { putCardRows } from '$lib/storage/cards.testutil';
 
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 0, 1, 9);
@@ -145,8 +147,9 @@ type SimRep = ReturnType<typeof randomRep>;
 
 async function seed(sim: SimRep) {
 	const db = await getDB();
-	const tx = db.transaction(['repertoires', 'nodes', 'cards', 'idea_cards'], 'readwrite');
-	for (const s of ['repertoires', 'nodes', 'cards', 'idea_cards'] as const) {
+	const stores = ['repertoires', 'nodes', 'cards', 'move_progress', 'idea_cards'] as const;
+	const tx = db.transaction([...stores], 'readwrite');
+	for (const s of stores) {
 		await tx.objectStore(s).clear();
 	}
 	await tx.objectStore('repertoires').put(sim.rep);
@@ -154,7 +157,7 @@ async function seed(sim: SimRep) {
 	for (let i = 0; i < sim.cardKeys.length; i++) {
 		const k = sim.cardKeys[i];
 		const san = sim.nodes.get(k)!.children[0].san;
-		await tx.objectStore('cards').put(createFreshCard(sim.rep.id, k, san, T0 - DAY + i));
+		await putCardRows(tx, createFreshCard(sim.rep.id, k, san, T0 - DAY + i));
 	}
 	await tx.done;
 }
@@ -184,7 +187,6 @@ async function run(sim: SimRep, o: RunOptions): Promise<RunResult> {
 		drillSessionCap: 30,
 		dailyNewCardCap: 10
 	};
-	const db = await getDB();
 	const { rep, nodes } = sim;
 	const isTrainable = trainableFilter(rep, nodes);
 	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
@@ -197,7 +199,7 @@ async function run(sim: SimRep, o: RunOptions): Promise<RunResult> {
 			const now = T0 + day * DAY + s * 5 * 60_000;
 			vi.setSystemTime(now);
 			const tag = `day ${day} session ${s}`;
-			const all = await db.getAllFromIndex('cards', 'by-repertoire', rep.id);
+			const all = await listCards(rep.id);
 			const byKey = new Map(all.map((c) => [c.fenKey, c]));
 			const plan = planDueCards(rep, nodes, all, now);
 			const planKeys = new Set(
@@ -259,9 +261,7 @@ async function run(sim: SimRep, o: RunOptions): Promise<RunResult> {
 		}
 	}
 
-	const eligible = (await db.getAllFromIndex('cards', 'by-repertoire', rep.id)).filter(
-		(c: Card) => isTrainable(c) && withinDepth(c)
-	);
+	const eligible = (await listCards(rep.id)).filter((c: Card) => isTrainable(c) && withinDepth(c));
 	return {
 		violations,
 		firstGraded,
@@ -385,7 +385,6 @@ describe('due plan under random repertoires and mistakes', { timeout: 600_000 },
 			transpose: 0,
 			disable: 0
 		});
-		const db = await getDB();
 		let clicked = 0;
 		const res = await run(sim, {
 			days: 1,
@@ -401,9 +400,7 @@ describe('due plan under random repertoires and mistakes', { timeout: 600_000 },
 		expect(clicked).toBeGreaterThan(0);
 		expect(res.violations).toEqual([]);
 		// The Train-pass recall sets the grade: nothing introduced is shaky.
-		const shaky = (await db.getAllFromIndex('cards', 'by-repertoire', 'r')).filter(
-			(c) => c.lastReview && isShaky(c)
-		);
+		const shaky = (await listCards('r')).filter((c) => c.lastReview && isShaky(c));
 		expect(shaky.map((c) => c.fenKey)).toEqual([]);
 	});
 });

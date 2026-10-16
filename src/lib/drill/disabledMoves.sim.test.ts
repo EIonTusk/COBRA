@@ -20,6 +20,8 @@ import { liveReachableFenKeys } from '$lib/tree/traversal';
 import { answerSan } from '$lib/tree/liveMoves';
 import { buildSegment } from './buildSegment';
 import { playSession } from './drillSessionModel.testutil';
+import { listCards } from '$lib/storage/cards';
+import { putCardRows } from '$lib/storage/cards.testutil';
 
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 0, 1, 9);
@@ -135,14 +137,15 @@ describe('disabled moves under random repertoires', { timeout: 300_000 }, () => 
 					}
 					const { rep, nodes, cardKeys, toggleable } = sim;
 					const db = await getDB();
-					const tx = db.transaction(['nodes', 'cards'], 'readwrite');
+					const tx = db.transaction(['nodes', 'cards', 'move_progress'], 'readwrite');
 					await tx.objectStore('nodes').clear();
 					await tx.objectStore('cards').clear();
+					await tx.objectStore('move_progress').clear();
 					for (const node of nodes.values()) await tx.objectStore('nodes').put(node);
 					for (let i = 0; i < cardKeys.length; i++) {
 						const k = cardKeys[i];
 						const san = nodes.get(k)!.children[0].san;
-						await tx.objectStore('cards').put(createFreshCard(rep.id, k, san, T0 - DAY + i));
+						await putCardRows(tx, createFreshCard(rep.id, k, san, T0 - DAY + i));
 					}
 					await tx.done;
 
@@ -187,7 +190,7 @@ describe('disabled moves under random repertoires', { timeout: 300_000 }, () => 
 					// Every position with a live move, reachable through live moves,
 					// got trained.
 					const live = liveReachableFenKeys(nodes, rep.rootFenKey);
-					const cards = await db.getAllFromIndex('cards', 'by-repertoire', rep.id);
+					const cards = await listCards(rep.id);
 					const shouldTrain = cards.filter(
 						(c) => live.has(c.fenKey) && answerSan(nodes.get(c.fenKey), c.expectedSan) !== null
 					);

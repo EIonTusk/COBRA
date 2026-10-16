@@ -1,6 +1,5 @@
 import { addEdge, applyImportedNote } from './nodes';
-import { getCard, upsertCard } from './cards';
-import { createFreshCard } from '$lib/fsrs/scheduler';
+import { addCard, getCard } from './cards';
 import { colorToMove } from '$lib/chess/fen';
 import type { ParsedLine } from '$lib/chess/pgn';
 import type { Color } from '$lib/types';
@@ -54,7 +53,7 @@ export async function mergeLinesIntoRepertoire(
 			if (colorToMove(fromFenKey) === color) {
 				const existing = await getCard(repertoireId, fromFenKey);
 				if (!existing) {
-					await upsertCard(createFreshCard(repertoireId, fromFenKey, edge.san));
+					await addCard(repertoireId, fromFenKey, edge.san);
 					addedCards += 1;
 				}
 			}

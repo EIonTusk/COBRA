@@ -75,11 +75,25 @@ async function readCards(page: Page, repId: string): Promise<StoredCard[]> {
 			lastRating?: number;
 			fsrs: { reps: number; lapses: number };
 		};
-		const cards: Card[] = await new Promise((resolve, reject) => {
-			const req = db.transaction('cards').objectStore('cards').getAll();
-			req.onsuccess = () => resolve(req.result as Card[]);
-			req.onerror = () => reject(req.error);
-		});
+		const getAll = <T>(store: string): Promise<T[]> =>
+			new Promise((resolve, reject) => {
+				const req = db.transaction(store).objectStore(store).getAll();
+				req.onsuccess = () => resolve(req.result as T[]);
+				req.onerror = () => reject(req.error);
+			});
+		// A card is its slot in `cards` joined with the move's shared record in
+		// `move_progress` (issue #97).
+		const slots = await getAll<Pick<Card, 'repertoireId' | 'fenKey' | 'expectedSan'>>('cards');
+		const progress = new Map(
+			(await getAll<Omit<Card, 'repertoireId'>>('move_progress')).map((p) => [
+				`${p.fenKey}|${p.expectedSan}`,
+				p
+			])
+		);
+		const cards: Card[] = slots.map((s) => ({
+			...progress.get(`${s.fenKey}|${s.expectedSan}`)!,
+			...s
+		}));
 		db.close();
 		return cards
 			.filter((c) => c.repertoireId === rid)
@@ -334,8 +348,10 @@ async function seed(page: Page, repId: string): Promise<{ pKey: string }> {
 			reviewedAgo: number,
 			dueIn: number
 		): Promise<Record<string, unknown>> => {
-			const card = await get<Record<string, unknown>>('cards', [rid, fenKey]);
-			if (!card) throw new Error(`no card at ${fenKey}`);
+			const slot = await get<{ expectedSan: string }>('cards', [rid, fenKey]);
+			if (!slot) throw new Error(`no card at ${fenKey}`);
+			// Progress lives in `move_progress`, keyed by position and move (issue #97).
+			const card: Record<string, unknown> = { fenKey, expectedSan: slot.expectedSan };
 			card.fsrs = {
 				due: new Date(now + dueIn),
 				stability,
@@ -358,9 +374,9 @@ async function seed(page: Page, repId: string): Promise<{ pKey: string }> {
 		const d3Card = await schedule(d3Key, 5, 2 * day, 3 * day);
 		if (pCard.expectedSan !== 'Nf3') throw new Error(`P card expects ${pCard.expectedSan}`);
 
-		const tx = db.transaction(['nodes', 'cards'], 'readwrite');
+		const tx = db.transaction(['nodes', 'move_progress'], 'readwrite');
 		tx.objectStore('nodes').put(pNode);
-		for (const c of [rootCard, pCard, d3Card]) tx.objectStore('cards').put(c);
+		for (const c of [rootCard, pCard, d3Card]) tx.objectStore('move_progress').put(c);
 		await new Promise((res) => (tx.oncomplete = res));
 		db.close();
 		return { pKey };
