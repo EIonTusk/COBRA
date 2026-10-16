@@ -22,6 +22,7 @@ import { moveId } from '$lib/storage/moveProgress';
 import { allDueIdeaCards, dueIdeaCards } from '$lib/storage/ideaCards';
 import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 import { nodesMap } from '$lib/storage/nodes';
+import { forcedRuns, runAfter, runBefore, type ForcedRuns } from './forcedLines';
 import type { DrillMode, DrillSegment } from './types';
 
 /**
@@ -111,7 +112,9 @@ async function pickWithLineWalk(
 	sessionCap: number,
 	newCap: number,
 	lineHead: string,
-	isTrainable: (c: Card) => boolean
+	isTrainable: (c: Card) => boolean,
+	runs: ForcedRuns,
+	withinDepth: (c: Card) => boolean
 ): Promise<LineWalkResult> {
 	const wellLearnedDays = settings.drillWellLearnedDays ?? 7;
 
@@ -147,7 +150,11 @@ async function pickWithLineWalk(
 	});
 
 	const poolKeys = new Set<string>();
-	for (const c of pool) poolKeys.add(c.fenKey);
+	const poolByKey = new Map<string, Card>();
+	for (const c of pool) {
+		poolKeys.add(c.fenKey);
+		if (!poolByKey.has(c.fenKey)) poolByKey.set(c.fenKey, c);
+	}
 
 	const admittedWalks: Card[][] = [];
 	const ledBy = new Set<string>();
@@ -166,6 +173,10 @@ async function pickWithLineWalk(
 		if (admittedFenKeys.has(candidate.fenKey)) continue;
 
 		const walk: Card[] = [];
+		// Forced runs (issue #86) are drilled whole: the earlier moves of the
+		// candidate's run join the walk even when well-learned, and the rest
+		// of the run follows it.
+		const runHead = new Set(runBefore(runs, candidate.fenKey));
 		if (candidate.fenKey !== lineHead) {
 			const path = linePath(nodes, lineHead, candidate.fenKey);
 			if (path) {
@@ -179,7 +190,7 @@ async function pickWithLineWalk(
 					// pool (issue #91): the card at a prefix position may
 					// expect a move the user has disabled.
 					if (!isTrainable(stored)) continue;
-					if (isWellLearned(stored, wellLearnedDays)) continue;
+					if (isWellLearned(stored, wellLearnedDays) && !runHead.has(fenKeyBeforeEdge)) continue;
 					// A prefix step reinforces a move already learned. A move never
 					// introduced can only sit on the walk's route through a
 					// transposition (the route prefers live lines; progressive
@@ -192,6 +203,16 @@ async function pickWithLineWalk(
 			}
 		}
 		walk.push(candidate);
+		const suffix: Card[] = [];
+		for (const k of runAfter(runs, candidate.fenKey)) {
+			const stored = poolByKey.get(k) ?? (await getCard(rep.id, k));
+			// A move the drill wouldn't offer ends the run: disabled, past the
+			// training depth, or new and not yet unlocked (new cards in the
+			// pool are the unlocked ones).
+			if (!stored || !isTrainable(stored) || !withinDepth(stored)) break;
+			if (!stored.lastReview && !poolKeys.has(k)) break;
+			suffix.push(stored);
+		}
 
 		// Budget the walk at its INCREMENTAL cost — the cards it adds that no
 		// already-admitted walk covers. Trunk extraction emits a shared run
@@ -201,15 +222,32 @@ async function pickWithLineWalk(
 		// six the user actually plays. On a large repertoire (deep lines, heavy
 		// sharing) that over-charge consumed the whole session cap on moves
 		// that were never emitted, which is why a big due queue barely moved.
-		const incremental = walk.filter((c) => !admittedFenKeys.has(c.fenKey));
-		const newInWalk = incremental.reduce(
-			(sum, c) => sum + (!c.lastReview && !uniqueNewSeen.has(c.fenKey) ? 1 : 0),
-			0
-		);
-		const walkHasNew = incremental.some((c) => !c.lastReview);
-		const eventCost = incremental.length * (walkHasNew ? 2 : 1);
-		if (eventCost > totalRemaining) continue;
-		if (newInWalk > newRemaining) continue;
+		const cost = (cards: Card[]) => {
+			const incremental = cards.filter((c) => !admittedFenKeys.has(c.fenKey));
+			const newCount = incremental.reduce(
+				(sum, c) => sum + (!c.lastReview && !uniqueNewSeen.has(c.fenKey) ? 1 : 0),
+				0
+			);
+			const hasNew = incremental.some((c) => !c.lastReview);
+			return { events: incremental.length * (hasNew ? 2 : 1), newCount };
+		};
+		const base = cost(walk);
+		if (base.events > totalRemaining) continue;
+		if (base.newCount > newRemaining) continue;
+		// The forced run's tail rides along when it fits the session. Its new
+		// moves count as one introduction with the move that starts the run:
+		// they may overshoot the new-move budget (as long as any is left), or
+		// a run longer than the daily budget would never unlock.
+		let { events: eventCost, newCount: newInWalk } = base;
+		if (suffix.length > 0) {
+			const full = cost([...walk, ...suffix]);
+			const newOk = full.newCount === base.newCount || newRemaining > 0;
+			if (full.events <= totalRemaining && newOk) {
+				walk.push(...suffix);
+				eventCost = full.events;
+				newInWalk = full.newCount;
+			}
+		}
 
 		ledBy.add(candidate.fenKey);
 		for (const c of walk) {
@@ -218,7 +256,7 @@ async function pickWithLineWalk(
 		}
 		admittedWalks.push(walk);
 		totalRemaining -= eventCost;
-		newRemaining -= newInWalk;
+		newRemaining = Math.max(0, newRemaining - newInWalk);
 	}
 
 	return extractSharedPrefixWalks(admittedWalks, poolKeys);
@@ -425,7 +463,8 @@ export function gateNewCards(
 	cardByKey: Map<string, Card>,
 	tree: { depth: Map<string, number>; parent: Map<string, string> },
 	progressive: boolean,
-	reach?: Map<string, number>
+	reach?: Map<string, number>,
+	runs?: ForcedRuns
 ): { cards: Card[]; blockers: Set<string> } {
 	const blockers = new Set<string>();
 	const depthOf = (c: Card) => tree.depth.get(c.fenKey) ?? Infinity;
@@ -440,7 +479,7 @@ export function gateNewCards(
 		}
 		return depthOf(a) - depthOf(b) || a.dueAt - b.dueAt;
 	});
-	if (!progressive) return { cards: sorted, blockers };
+	if (!progressive) return { cards: groupForcedRuns(sorted, runs), blockers };
 
 	const freshKeys = new Set(fresh.map((c) => c.fenKey));
 	const unlocked = new Set<string>();
@@ -466,7 +505,7 @@ export function gateNewCards(
 		unlocked.add(c.fenKey);
 		out.push(c);
 	}
-	return { cards: out, blockers };
+	return { cards: groupForcedRuns(out, runs), blockers };
 }
 
 /** gateNewCards without the blockers. Exported for unit testing; pure. */
@@ -475,9 +514,10 @@ export function orderNewCards(
 	cardByKey: Map<string, Card>,
 	tree: { depth: Map<string, number>; parent: Map<string, string> },
 	progressive: boolean,
-	reach?: Map<string, number>
+	reach?: Map<string, number>,
+	runs?: ForcedRuns
 ): Card[] {
-	return gateNewCards(fresh, cardByKey, tree, progressive, reach).cards;
+	return gateNewCards(fresh, cardByKey, tree, progressive, reach, runs).cards;
 }
 
 /**
@@ -502,7 +542,8 @@ export function planDueCards(
 	nodes: Map<string, RepertoireNode>,
 	all: Card[],
 	now: number,
-	reach?: Map<string, number>
+	reach?: Map<string, number>,
+	runs: ForcedRuns = forcedRuns(nodes, rep.rootFenKey, rep.color)
 ): { reviews: Card[]; relearn: Card[]; fresh: Card[] } {
 	const isTrainable = trainableFilter(rep, nodes);
 	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
@@ -513,7 +554,8 @@ export function planDueCards(
 		new Map(eligible.map((c) => [c.fenKey, c])),
 		shortestPathTree(nodes, rep.rootFenKey),
 		rep.progressiveUnlock !== false,
-		reach
+		reach,
+		runs
 	);
 	const relearn = eligible
 		.filter((c) => c.dueAt > now && gate.blockers.has(c.fenKey))
@@ -546,6 +588,35 @@ export async function countDrillDue(
 		moves += 1;
 	}
 	return moves + ideas.length;
+}
+
+/**
+ * Keep each forced run's new moves together (issue #86): a run member whose
+ * predecessor in the run is also in `cards` moves up to right after it, so
+ * the run unlocks — and fits the session budget — as one unit. Pure.
+ */
+export function groupForcedRuns(cards: Card[], runs?: ForcedRuns): Card[] {
+	if (!runs || runs.next.size === 0) return cards;
+	const byKey = new Map(cards.map((c) => [c.fenKey, c]));
+	const out: Card[] = [];
+	const placed = new Set<string>();
+	for (const c of cards) {
+		if (placed.has(c.fenKey)) continue;
+		const prev = runs.prev.get(c.fenKey);
+		if (prev !== undefined && byKey.has(prev)) continue; // emitted after prev
+		out.push(c);
+		placed.add(c.fenKey);
+		for (const k of runAfter(runs, c.fenKey)) {
+			const f = byKey.get(k);
+			if (!f || placed.has(k)) break;
+			out.push(f);
+			placed.add(k);
+		}
+	}
+	// A member whose predecessor was dropped above (can't happen for a
+	// well-formed run, but never lose a card).
+	for (const c of cards) if (!placed.has(c.fenKey)) out.push(c);
+	return out;
 }
 
 /**
@@ -643,6 +714,7 @@ export async function buildSegment(
 	// would otherwise yield an empty session when nothing below is due.
 	// Grading still updates FSRS as normal; only the selection ignores due.
 	const withinDepth = depthFilter(rep, nodes, rep.drillMaxMoves);
+	const runs = forcedRuns(nodes, rep.rootFenKey, rep.color);
 	let pool: Card[];
 	const reach =
 		settings.drillPrioritizeCommon !== false
@@ -659,7 +731,8 @@ export async function buildSegment(
 				new Map(all.map((c) => [c.fenKey, c])),
 				shortestPathTree(nodes, rep.rootFenKey),
 				false,
-				reach
+				reach,
+				runs
 			)
 		];
 	} else {
@@ -673,7 +746,7 @@ export async function buildSegment(
 		// then gated on their path. Cards to relearn go first so the moves
 		// they hold back unlock as soon as possible.
 		const poolCap = settings.drillSessionCap * 5;
-		const plan = planDueCards(rep, nodes, await listCards(rep.id), Date.now(), reach);
+		const plan = planDueCards(rep, nodes, await listCards(rep.id), Date.now(), reach, runs);
 		const skip = options?.skipMoves;
 		const keep = (c: Card) => !skip?.has(moveId(c));
 		pool = [
@@ -692,7 +765,9 @@ export async function buildSegment(
 			settings.drillSessionCap,
 			settings.dailyNewCardCap,
 			lineHead,
-			isTrainable
+			isTrainable,
+			runs,
+			withinDepth
 		);
 		// Line-walk preserves the candidate-led ordering verbatim — the queue
 		// is already a sequence of full per-line walks. Skip the line-first
@@ -713,6 +788,20 @@ export async function buildSegment(
 
 	const due = pickBalancedDueCards(pool, settings.drillSessionCap, settings.dailyNewCardCap);
 	const dueOriginalKeys = new Set<string>(due.map((c) => c.fenKey));
+	// Forced runs (issue #86) come whole: add the rest of each picked card's
+	// run (already-introduced moves only — new ones need the line walk to be
+	// taught). They grade as line-walk steps, outside `dueOriginalKeys`.
+	const picked = new Set(dueOriginalKeys);
+	const scope = startFenKey ? reachableFenKeys(nodes, startFenKey) : null;
+	for (const c of [...due]) {
+		for (const k of [...runBefore(runs, c.fenKey), ...runAfter(runs, c.fenKey)]) {
+			if (picked.has(k) || (scope && !scope.has(k))) continue;
+			const stored = await getCard(rep.id, k);
+			if (!stored?.lastReview || !isTrainable(stored) || !withinDepth(stored)) continue;
+			picked.add(k);
+			due.push(stored);
+		}
+	}
 	const sorted = sortByLineOrder(due, rep, nodes, true, startFenKey);
 	return {
 		rep,
