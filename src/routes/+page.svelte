@@ -5,7 +5,7 @@
 	import { ArrowRight, Plus, AlertTriangle, RotateCcw, BookOpen, Play, Zap } from 'lucide-svelte';
 
 	import { listRepertoires } from '$lib/storage/repertoires';
-	import { countCards } from '$lib/storage/cards';
+	import { listUniqueCards } from '$lib/storage/cards';
 	import { countDrillDue } from '$lib/drill/buildSegment';
 	import { filterActiveMistakes, listMistakes } from '$lib/storage/mistakes';
 	import { nodesMap } from '$lib/storage/nodes';
@@ -25,12 +25,12 @@
 
 	async function loadDashboard(initial: boolean) {
 		reps = await listRepertoires();
+		// A move several repertoires share has one progress record, so it is
+		// counted once, not once per repertoire that contains it.
+		const counted = new Set<string>();
 		let due = 0;
-		let cards = 0;
-		for (const r of reps) {
-			due += await countDrillDue(r);
-			cards += await countCards(r.id);
-		}
+		for (const r of reps) due += await countDrillDue(r, Date.now(), counted);
+		const cards = (await listUniqueCards()).length;
 		totalDue = due;
 		totalCards = cards;
 		pending = await filterActiveMistakes(await listMistakes({ status: 'pending' }));
