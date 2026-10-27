@@ -21,7 +21,11 @@
 	import Board from '$lib/chess/Board.svelte';
 	import { edgeFromUci, edgeFromSan, fenAfterMove, legalDests } from '$lib/chess/position';
 	import { colorToMove, fenKeyFromFen } from '$lib/chess/fen';
-	import { pathToFenKey, furthestNonBranchingFenKey } from '$lib/tree/traversal';
+	import {
+		pathToFenKey,
+		furthestNonBranchingFenKey,
+		disabledLineFenKeys
+	} from '$lib/tree/traversal';
 	import { upsertCard, getCard, deferSubtree } from '$lib/storage/cards';
 	import { upsertIdeaCard } from '$lib/storage/ideaCards';
 	import { getMiddlegameGuide } from '$lib/storage/middlegameGuides';
@@ -704,17 +708,22 @@
 		gradedSquare = dest;
 
 		const node = currentSegment.nodes.get(currentEntry.card.fenKey);
-		// A move the user disabled (issue #99) is neither right nor wrong: it's
-		// their own prep, shelved. Say so and ask for an active move, without
-		// grading the attempt.
-		if (node?.children.some((e) => e.disabled && e.san === edge.san)) {
-			void runShelvedSequence(currentEntry);
-			return;
-		}
 		const liveSans = liveChildren(node).map((e) => e.san);
 		const accepted = new Set<string>(
 			liveSans.length > 0 ? liveSans : [currentEntry.card.expectedSan]
 		);
+		// A move into a line the user disabled (issues #99, #108) is neither
+		// right nor wrong: it's their own prep, shelved. That's the disabled
+		// move itself, or any move order that lands in the disabled line.
+		// Say so and ask for an active move, without grading the attempt.
+		if (
+			!accepted.has(edge.san) &&
+			(node?.children.some((e) => e.disabled && e.san === edge.san) ||
+				disabledLineOf(currentSegment).has(fenKeyFromFen(currentFen)))
+		) {
+			void runShelvedSequence(currentEntry);
+			return;
+		}
 		if (accepted.has(edge.san)) {
 			moveQuality = 'correct';
 			phase = 'correct';
@@ -1211,6 +1220,16 @@
 			runsBySegment.set(seg, runs);
 		}
 		return runs;
+	}
+
+	const disabledLineBySegment = new WeakMap<DrillSegment, Set<string>>();
+	function disabledLineOf(seg: DrillSegment): Set<string> {
+		let keys = disabledLineBySegment.get(seg);
+		if (!keys) {
+			keys = disabledLineFenKeys(seg.nodes, seg.rep.rootFenKey);
+			disabledLineBySegment.set(seg, keys);
+		}
+		return keys;
 	}
 
 	const trainableBySegment = new WeakMap<DrillSegment, (c: Card) => boolean>();
@@ -2287,7 +2306,7 @@
 						<p class="mt-3 font-mono text-sm text-[var(--color-parchment-400)]">{userPlayedSan}</p>
 					{/if}
 					<p class="mt-3 font-serif text-sm text-[var(--color-parchment-500)] italic">
-						You disabled this move. Play an active one; this try doesn't count against you.
+						That's a line you disabled. Play an active one; this try doesn't count against you.
 					</p>
 				</div>
 			{:else if phase === 'refuted'}

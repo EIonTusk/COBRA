@@ -5,7 +5,8 @@ import {
 	furthestNonBranchingFenKey,
 	countDescendantEdges,
 	reachableFenKeys,
-	liveReachableFenKeys
+	liveReachableFenKeys,
+	disabledLineFenKeys
 } from './traversal';
 
 function node(fenKey: string, children: Edge[]): RepertoireNode {
@@ -248,5 +249,28 @@ describe('liveReachableFenKeys', () => {
 		m.set('a', node('a', [edge('e5', 'b')]));
 		m.set('b', node('b', []));
 		expect([...liveReachableFenKeys(m, 'r')].sort()).toEqual([...reachableFenKeys(m, 'r')].sort());
+	});
+});
+
+describe('disabledLineFenKeys', () => {
+	it('holds positions reachable only through a disabled edge (#108)', () => {
+		// r → a → b → { c, d(disabled) → e }
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a')]));
+		m.set('a', node('a', [edge('e5', 'b')]));
+		m.set('b', node('b', [edge('Nc6', 'c'), edge('d6', 'd', true)]));
+		m.set('c', node('c', []));
+		m.set('d', node('d', [edge('Nf3', 'e')]));
+		m.set('e', node('e', []));
+		expect([...disabledLineFenKeys(m, 'r')].sort()).toEqual(['d', 'e']);
+	});
+
+	it('leaves out a position that a live line also reaches', () => {
+		const m = new Map<string, RepertoireNode>();
+		m.set('r', node('r', [edge('e4', 'a'), edge('d4', 'b', true)]));
+		m.set('a', node('a', [edge('d5', 't')]));
+		m.set('b', node('b', [edge('e5', 't')]));
+		m.set('t', node('t', []));
+		expect([...disabledLineFenKeys(m, 'r')]).toEqual(['b']);
 	});
 });

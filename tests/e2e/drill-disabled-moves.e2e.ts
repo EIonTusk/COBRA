@@ -502,3 +502,127 @@ test('playing a disabled move shows "Disabled line" and is not graded (#99)', as
 	);
 	expect(after.dueAt).toBeGreaterThan(Date.now());
 });
+
+/**
+ * Issue #108: a move that isn't disabled itself but lands in a disabled line
+ * by another move order is also "Disabled line", not a graded miss.
+ *
+ * 2.Bb5 Nc6 3.Nf3 is disabled (at its head, 2.Bb5). At Q = after 2.Nf3 Nc6
+ * the prepared move is 3.Bc4; playing 3.Bb5 there reaches the same position
+ * as the disabled 2.Bb5 Nc6 3.Nf3.
+ */
+const TRANSPOSE_PGN = `[Event "Disabled transposition"]
+[White "?"]
+[Black "?"]
+[Result "*"]
+
+1. e4 e5 2. Nf3 (2. Bb5 Nc6 3. Nf3) 2... Nc6 3. Bc4 *
+`;
+
+const AFTER_E5 = P;
+const Q = 'r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R';
+
+/** Disable 2.Bb5; only Q's card is due. */
+async function seedTransposition(page: Page, repId: string): Promise<{ qKey: string }> {
+	return page.evaluate(async (rid) => {
+		const db: IDBDatabase = await new Promise((resolve, reject) => {
+			const req = indexedDB.open('openingtrainer');
+			req.onsuccess = () => resolve(req.result);
+			req.onerror = () => reject(req.error);
+		});
+		const get = <T>(store: string, key: IDBValidKey): Promise<T> =>
+			new Promise((resolve, reject) => {
+				const req = db.transaction(store).objectStore(store).get(key);
+				req.onsuccess = () => resolve(req.result as T);
+				req.onerror = () => reject(req.error);
+			});
+		type Node = { children: { san: string; toFenKey: string; disabled?: boolean }[] };
+		const rep = await get<{ rootFenKey: string }>('repertoires', rid);
+		const root = await get<Node>('nodes', [rid, rep.rootFenKey]);
+		const afterE4 = await get<Node>('nodes', [
+			rid,
+			root.children.find((e) => e.san === 'e4')!.toFenKey
+		]);
+		const aKey = afterE4.children.find((e) => e.san === 'e5')!.toFenKey;
+		const aNode = await get<Node & Record<string, unknown>>('nodes', [rid, aKey]);
+		aNode.children.find((e) => e.san === 'Bb5')!.disabled = true;
+		const afterNf3 = await get<Node>('nodes', [
+			rid,
+			aNode.children.find((e) => e.san === 'Nf3')!.toFenKey
+		]);
+		const qKey = afterNf3.children.find((e) => e.san === 'Nc6')!.toFenKey;
+
+		const now = Date.now();
+		const day = 864e5;
+		const schedule = async (fenKey: string, dueIn: number): Promise<Record<string, unknown>> => {
+			const slot = await get<{ expectedSan: string }>('cards', [rid, fenKey]);
+			if (!slot) throw new Error(`no card at ${fenKey}`);
+			return {
+				fenKey,
+				expectedSan: slot.expectedSan,
+				fsrs: {
+					due: new Date(now + dueIn),
+					stability: 10,
+					difficulty: 5,
+					elapsed_days: 5,
+					scheduled_days: 5,
+					reps: 3,
+					lapses: 0,
+					state: 2, // Review
+					last_review: new Date(now - 5 * day),
+					learning_steps: 0
+				},
+				dueAt: now + dueIn,
+				lastReview: now - 5 * day,
+				lastRating: 3 // Rating.Good
+			};
+		};
+		const cards = [
+			await schedule(rep.rootFenKey, 20 * day),
+			await schedule(aKey, 20 * day),
+			await schedule(qKey, -3600_000)
+		];
+
+		const tx = db.transaction(['nodes', 'move_progress'], 'readwrite');
+		tx.objectStore('nodes').put(aNode);
+		for (const c of cards) tx.objectStore('move_progress').put(c);
+		await new Promise((res) => (tx.oncomplete = res));
+		db.close();
+		return { qKey };
+	}, repId);
+}
+
+test('a move that transposes into a disabled line shows "Disabled line" and is not graded (#108)', async ({
+	page
+}) => {
+	test.setTimeout(120_000);
+	const repId = await importPgn(page, 'Disabled transposition', TRANSPOSE_PGN);
+	const { qKey } = await seedTransposition(page, repId);
+	const before = (await readCards(page, repId)).find((c) => c.fenKey === qKey)!;
+	expect(before.expectedSan).toBe('Bc4');
+
+	await page.goto(`/repertoire/${repId}/drill`);
+	const drv = boardDriver(page);
+	await expect(page.locator('.cg-wrap')).toBeVisible({ timeout: 15_000 });
+	await page.locator('cg-board').scrollIntoViewIfNeeded();
+	const leadIn = new Map([
+		[START, 'e2e4'],
+		[AFTER_E5, 'g1f3']
+	]);
+	const reachQ = await drv.drive(leadIn, (placement) => placement === Q, 5);
+	expect(reachQ.end, `prompts before Q: ${reachQ.prompts.join(' | ')}`).toBe('stopped');
+
+	// 3.Bb5 isn't prepared at Q, but it lands in the disabled 2.Bb5 line.
+	expect(await drv.play('f1b5')).toBe(true);
+	await expect(page.getByText('Disabled line', { exact: true })).toBeVisible({ timeout: 5_000 });
+	await expect(page.getByText(/that's a line you disabled/i)).toBeVisible();
+	const during = (await readCards(page, repId)).find((c) => c.fenKey === qKey)!;
+	expect(during, 'the shelved attempt must not write the card').toEqual(before);
+
+	expect(await drv.waitPrompt()).toBe('pending');
+	expect(await drv.readPlacement(), 'board resets to Q').toBe(Q);
+	await expect(page.getByText(/· try 2/)).not.toBeVisible();
+
+	expect(await drv.play('f1c4')).toBe(true);
+	await expect(page.getByText('Correct', { exact: true })).toBeVisible({ timeout: 5_000 });
+});

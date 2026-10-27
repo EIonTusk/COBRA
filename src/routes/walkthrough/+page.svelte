@@ -3,6 +3,7 @@
 	import { parseSan as _parseSan, makeSanAndPlay as _makeSanAndPlay } from 'chessops/san';
 	import { makeFen as _makeFen } from 'chessops/fen';
 	import { makeUci as _makeUci } from 'chessops/util';
+	import { liveMoves as _liveMoves } from '$lib/tree/liveMoves';
 
 	// These helpers are defined in the module block so Svelte doesn't mistake
 	// them for runtime reactive state.
@@ -14,7 +15,7 @@
 			fenAfter: string;
 			fenKeyBefore: string;
 			fenKeyAfter: string;
-			annotation: 'match' | 'deviation' | 'past-tree' | 'opponent';
+			annotation: import('$lib/walkthrough/annotate').Annotation;
 			expectedSan?: string;
 		}>;
 		headers: Map<string, string>;
@@ -32,7 +33,7 @@
 			fenAfter: string;
 			fenKeyBefore: string;
 			fenKeyAfter: string;
-			annotation: 'match' | 'deviation' | 'past-tree' | 'opponent';
+			annotation: import('$lib/walkthrough/annotate').Annotation;
 			expectedSan?: string;
 		}> = [];
 		for (const node of game.moves.mainline()) {
@@ -76,9 +77,9 @@
 					depth++;
 					continue;
 				}
-				const node = rep.nodes.get(p.fenKeyBefore);
-				if (!node || node.children.length === 0) break;
-				if (!node.children.find((e) => e.san === p.san)) break;
+				// Only live moves count: a disabled line isn't the user's prep.
+				const live = _liveMoves(rep.nodes.get(p.fenKeyBefore));
+				if (!live.some((e) => e.san === p.san)) break;
 				depth++;
 			}
 			if (depth > bestDepth) {
@@ -105,6 +106,7 @@
 		Check,
 		X as XIcon,
 		Circle,
+		Ban,
 		ExternalLink,
 		Keyboard
 	} from 'lucide-svelte';
@@ -122,6 +124,8 @@
 	import { colorToMove, STARTPOS_FEN } from '$lib/chess/fen';
 	import { edgeFromUci, fenAfterMove, legalDests } from '$lib/chess/position';
 	import { findBranchPoint, fenForKeyInRep } from '$lib/walkthrough/repBranches';
+	import { annotatePlies, type Annotation } from '$lib/walkthrough/annotate';
+	import { liveMoves } from '$lib/tree/liveMoves';
 	import { describeGameEnd } from '$lib/walkthrough/endState';
 	import type { RecommendedGame } from '$lib/walkthrough/recommend';
 	import {
@@ -142,8 +146,6 @@
 	} from '$lib/drill/grade';
 	import { probeMoveEvals } from '$lib/drill/probe';
 	import type { AppSettings, Color, Repertoire, RepertoireNode } from '$lib/types';
-
-	type Annotation = 'match' | 'deviation' | 'past-tree' | 'opponent';
 
 	interface PlyEntry {
 		san: string;
@@ -262,9 +264,9 @@
 		for (const rep of reps) {
 			const branchKey = findBranchPoint(rep);
 			if (!branchKey) continue;
-			const node = rep.nodes.get(branchKey);
-			if (!node || node.children.length < 2) continue;
-			for (const edge of node.children) {
+			const live = liveMoves(rep.nodes.get(branchKey));
+			if (live.length < 2) continue;
+			for (const edge of live) {
 				const named = lineOpeningNames.get(edge.toFenKey);
 				const base = named ?? edge.san;
 				const label = includeRepName ? `${base} · ${rep.name}` : base;
@@ -294,9 +296,9 @@
 		for (const rep of reps) {
 			const branchKey = findBranchPoint(rep);
 			if (!branchKey) continue;
-			const node = rep.nodes.get(branchKey);
-			if (!node || node.children.length < 2) continue;
-			for (const edge of node.children) branches.push({ rep, toFenKey: edge.toFenKey });
+			const live = liveMoves(rep.nodes.get(branchKey));
+			if (live.length < 2) continue;
+			for (const edge of live) branches.push({ rep, toFenKey: edge.toFenKey });
 		}
 		if (branches.length === 0) return;
 		const cached = await getPositionOpenings(branches.map((b) => b.toFenKey));
@@ -455,9 +457,14 @@
 		// answer the user is meant to find themselves.
 		if (!selfplay && ply > 0) {
 			const p = plies[ply - 1];
-			if (p && p.annotation === 'deviation' && p.expectedSan && selectedRep) {
+			if (
+				p &&
+				(p.annotation === 'deviation' || p.annotation === 'disabled') &&
+				p.expectedSan &&
+				selectedRep
+			) {
 				const node = selectedRep.nodes.get(p.fenKeyBefore);
-				const expected = node?.children.find((e) => e.san === p.expectedSan);
+				const expected = liveMoves(node).find((e) => e.san === p.expectedSan);
 				if (expected) {
 					shapes.push({
 						orig: expected.uci.slice(0, 2) as Key,
@@ -730,26 +737,12 @@
 	/** Re-grade every ply against the currently selected repertoire. */
 	function recomputeAnnotations() {
 		if (plies.length === 0) return;
-		const rep = selectedRep;
-		plies = plies.map((p) => {
-			const stm = colorToMove(p.fenKeyBefore);
-			if (!rep || stm !== rep.color) {
-				return { ...p, annotation: 'opponent' as Annotation, expectedSan: undefined };
-			}
-			const node = rep.nodes.get(p.fenKeyBefore);
-			if (!node || node.children.length === 0) {
-				return { ...p, annotation: 'past-tree' as Annotation, expectedSan: undefined };
-			}
-			const matching = node.children.find((e) => e.san === p.san);
-			if (matching) {
-				return { ...p, annotation: 'match' as Annotation, expectedSan: p.san };
-			}
-			return {
-				...p,
-				annotation: 'deviation' as Annotation,
-				expectedSan: node.children[0].san
-			};
-		});
+		const graded = annotatePlies(plies, selectedRep);
+		plies = plies.map((p, i) => ({
+			...p,
+			annotation: graded[i].annotation,
+			expectedSan: graded[i].expectedSan
+		}));
 	}
 
 	// Re-grade when the user switches repertoire. Track only `selectedRep` —
@@ -954,7 +947,8 @@
 		for (const p of plies) {
 			if (p.annotation === 'match') match++;
 			else if (p.annotation === 'deviation') dev++;
-			else if (p.annotation === 'past-tree') past++;
+			// A disabled line is saved but not active prep, so it's past it.
+			else if (p.annotation === 'past-tree' || p.annotation === 'disabled') past++;
 		}
 		return { match, dev, past };
 	});
@@ -1365,7 +1359,8 @@
 										p.annotation === 'match' &&
 											'underline decoration-[var(--color-olive-400)] decoration-[1.5px] underline-offset-4',
 										p.annotation === 'deviation' &&
-											'underline decoration-[var(--color-oxblood-300)] decoration-wavy underline-offset-4'
+											'underline decoration-[var(--color-oxblood-300)] decoration-wavy underline-offset-4',
+										p.annotation === 'disabled' && 'line-through opacity-70'
 									)}
 								>
 									{p.san}
@@ -1493,6 +1488,17 @@
 									<XIcon class="mb-0.5 inline size-3.5" /> Off-book.
 									{#if !selfplay}
 										Your line here:
+										<span class="font-mono text-[var(--color-brass-300)] not-italic"
+											>{current.expectedSan}</span
+										>
+									{/if}
+								</p>
+							{:else if current.annotation === 'disabled'}
+								<p class="mt-2 font-serif text-sm text-[var(--color-parchment-400)] italic">
+									<Ban class="mb-0.5 inline size-3.5" /> This move belongs to a disabled line — saved,
+									but not in your active repertoire.
+									{#if !selfplay && current.expectedSan}
+										Your active move here:
 										<span class="font-mono text-[var(--color-brass-300)] not-italic"
 											>{current.expectedSan}</span
 										>
