@@ -171,6 +171,25 @@ export function liveReachableFenKeys(
 }
 
 /**
+ * Positions in the repertoire that are reachable only through a disabled
+ * edge: the body of a disabled line (issue #108). Telling them apart from
+ * positions outside the tree lets a trainer say "that's a disabled line"
+ * even when the user reaches one by a move order other than the disabled
+ * move itself.
+ */
+export function disabledLineFenKeys(
+	nodes: Map<string, RepertoireNode>,
+	rootKey: string
+): Set<string> {
+	const live = liveReachableFenKeys(nodes, rootKey);
+	const out = new Set<string>();
+	for (const key of reachableFenKeys(nodes, rootKey)) {
+		if (!live.has(key)) out.add(key);
+	}
+	return out;
+}
+
+/**
  * Auto-detected starting position for game analysis: walk the trunk
  * down from the root while each node has exactly one child, stopping
  * at the first node that branches (2+ children) or dead-ends (leaf).
