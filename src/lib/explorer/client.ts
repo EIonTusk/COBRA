@@ -8,12 +8,15 @@
  *
  * Lichess rate-limits the explorer hard (issue #88), so every request goes
  * through one scheduler here:
- *  - Cache: in-memory LRU plus a 24 h IndexedDB cache, keyed by position —
+ *  - Cache: in-memory LRU plus an IndexedDB cache, keyed by position —
  *    the FEN's move counters are ignored, so transpositions and returning to
  *    a position reuse the result. Standard Lichess-database queries are
  *    fetched once at the largest size any caller uses and trimmed per
  *    caller, so the builder panel, board hints, missing-moves scan and
- *    coverage share one request per position.
+ *    coverage share one request per position. Rows count as fresh for 24 h;
+ *    callers that only rank by game counts (the gap search) pass a longer
+ *    `maxAgeMs` and reuse rows up to MAX_STALE_MS old, since opening
+ *    statistics barely move in a month and a request saved is worth more.
  *  - Identical requests in flight or queued share one network call.
  *  - One request at a time, at least MIN_GAP_MS apart; `foreground`
  *    requests (what the user is looking at) go ahead of queued
@@ -82,12 +85,19 @@ export interface TopGameEntry {
 const LICHESS_URL = 'https://explorer.lichess.ovh/lichess';
 const MASTERS_URL = 'https://explorer.lichess.ovh/masters';
 const PLAYER_URL = 'https://explorer.lichess.ovh/player';
-const CACHE_CAP = 300;
+// Large on purpose: an entry is a few KB, and every hit is a request that
+// doesn't count against the rate limit.
+const CACHE_CAP = 3000;
 const cache = new Map<string, ExplorerResponse>();
 
 // Persistent cache TTL. Explorer results are statistical — a day-stale read
 // is perfectly fine.
 const IDB_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * Oldest persisted row any caller may still accept (`FetchOptions.maxAgeMs`);
+ * rows are kept in IndexedDB this long before pruning.
+ */
+export const MAX_STALE_MS = 30 * 24 * 60 * 60 * 1000;
 let idbPrunedAt = 0;
 
 /** Minimum spacing between two network requests to the explorer. */
@@ -124,6 +134,11 @@ export interface FetchOptions {
 	priority?: 'foreground' | 'background';
 	/** Abort to drop the request if it hasn't been sent yet. */
 	signal?: AbortSignal;
+	/**
+	 * Oldest persisted (IndexedDB) result this caller accepts, in ms.
+	 * Defaults to 24 h; capped at MAX_STALE_MS.
+	 */
+	maxAgeMs?: number;
 }
 
 /**
@@ -202,7 +217,10 @@ export async function fetchExplorer(
 	// look it up again (a request can finish while the IndexedDB read below
 	// is pending, so both checks run again after it).
 	if (!jobsByKey.has(key)) {
-		const persisted = await readPersistedCache(key);
+		const persisted = await readPersistedCache(
+			key,
+			Math.min(opts.maxAgeMs ?? IDB_TTL_MS, MAX_STALE_MS)
+		);
 		if (persisted) {
 			store(key, persisted);
 			return forCaller(query, persisted);
@@ -419,17 +437,17 @@ function storageModule(): Promise<typeof import('$lib/storage/db')> {
 	return dbModule;
 }
 
-async function readPersistedCache(key: string): Promise<ExplorerResponse | null> {
+async function readPersistedCache(key: string, maxAgeMs: number): Promise<ExplorerResponse | null> {
 	try {
 		const { getDB, pruneExplorerCache } = await storageModule();
 		const db = await getDB();
 		const row = await db.get('explorer_stats', key);
 		if (!row) return null;
-		if (Date.now() - row.fetchedAt > IDB_TTL_MS) return null;
+		if (Date.now() - row.fetchedAt > maxAgeMs) return null;
 		// Prune old rows at most once an hour.
 		if (Date.now() - idbPrunedAt > 60 * 60 * 1000) {
 			idbPrunedAt = Date.now();
-			void pruneExplorerCache(IDB_TTL_MS);
+			void pruneExplorerCache(MAX_STALE_MS);
 		}
 		return row.data as ExplorerResponse;
 	} catch {

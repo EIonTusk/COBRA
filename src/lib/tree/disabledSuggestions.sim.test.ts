@@ -5,13 +5,10 @@
 // moves get disabled, and a fake opening explorer reports random game counts
 // for every legal move. Then:
 //
-//  - the builder's "missing move" search (collectMissingMoves) suggests a
-//    move exactly at the live-reachable opponent positions that lack it, and
-//    never inside a disabled line;
-//  - "Next missing" on a line (firstMissingOnLine) never suggests past the
-//    first disabled move on that line, and otherwise matches the earliest
-//    gap on the line;
 //  - the walkthrough's branch point is reached through live moves only.
+//
+// The builder's gap search ("Find gap") is checked against disabled lines in
+// gapIndex.sim.test.ts, with explorer counts that add up the way real ones do.
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { Chess } from 'chessops/chess';
 import { parseFen, makeFen } from 'chessops/fen';
@@ -33,7 +30,6 @@ vi.mock('$lib/explorer/client', () => ({
 	})
 }));
 
-import { collectMissingMoves, firstMissingOnLine } from './missing';
 import { findBranchPoint } from '$lib/walkthrough/repBranches';
 
 function rng(seed: number) {
@@ -103,35 +99,6 @@ function randomRep(rand: () => number, color: Color, plies: number, disable: num
 	return nodes;
 }
 
-const GOAL = 50;
-
-/** What the missing-move search should report, computed independently. */
-function expectedMissing(nodes: Map<string, RepertoireNode>, color: Color, threshold: number) {
-	const out = new Set<string>();
-	for (const key of liveReachableFenKeys(nodes, START)) {
-		if (colorToMove(key) === color) continue;
-		const node = nodes.get(key);
-		if (!node) continue;
-		const saved = new Set(node.children.map((e) => e.uci));
-		for (const m of explorerMock.responses.get(key)?.moves ?? []) {
-			if (m.white + m.draws + m.black >= threshold && !saved.has(m.uci)) out.add(`${key}|${m.uci}`);
-		}
-	}
-	return out;
-}
-
-/** Random root-to-leaf walks over all saved moves, disabled ones included. */
-function randomPath(nodes: Map<string, RepertoireNode>, rand: () => number) {
-	const path = [{ fenKey: START, fen: fenFromKey(START) }];
-	let node = nodes.get(START);
-	while (node && node.children.length > 0 && path.length < 40) {
-		const e = node.children[Math.floor(rand() * node.children.length)];
-		path.push({ fenKey: e.toFenKey, fen: fenFromKey(e.toFenKey) });
-		node = nodes.get(e.toFenKey);
-	}
-	return path;
-}
-
 describe(
 	'disabled moves stay out of move suggestions (random repertoires)',
 	{ timeout: 120_000 },
@@ -152,63 +119,7 @@ describe(
 						nodes = randomRep(rand, color, 7, 0.25);
 						live = liveReachableFenKeys(nodes, START);
 					}
-					const rootTotal = explorerMock.responses
-						.get(START)!
-						.moves.reduce((s, m) => s + m.white + m.draws + m.black, 0);
-					const threshold = rootTotal / GOAL;
-					// 1. The whole-tree search: exactly the live gaps.
-					const found = await collectMissingMoves(
-						nodes,
-						START,
-						fenFromKey(START),
-						color,
-						GOAL,
-						fenFromKey,
-						{
-							token: '',
-							maxProbes: 100_000
-						}
-					);
-					for (const m of found)
-						expect(live.has(m.fromFenKey), `suggested in a disabled line`).toBe(true);
-					expect(new Set(found.map((m) => `${m.fromFenKey}|${m.uci}`))).toEqual(
-						expectedMissing(nodes, color, threshold)
-					);
-
-					// 2. "Next missing" on random lines, many through disabled moves.
-					let throughDisabled = 0;
-					for (let i = 0; i < 25; i++) {
-						const path = randomPath(nodes, rand);
-						let cut = path.length;
-						for (let j = 1; j < path.length; j++) {
-							const via = nodes
-								.get(path[j - 1].fenKey)!
-								.children.find((e) => e.toFenKey === path[j].fenKey);
-							if (via?.disabled) {
-								cut = j;
-								break;
-							}
-						}
-						if (cut < path.length) throughDisabled++;
-						const miss = await firstMissingOnLine(nodes, path, color, GOAL, { token: '' });
-						// Expected: the earliest opponent position before the cut with a gap.
-						let want: string | null = null;
-						for (let j = 0; j < cut && !want; j++) {
-							const key = path[j].fenKey;
-							if (colorToMove(key) === color) continue;
-							const saved = new Set(nodes.get(key)!.children.map((e) => e.uci));
-							const gap = (explorerMock.responses.get(key)?.moves ?? []).some(
-								(m) => m.white + m.draws + m.black >= threshold && !saved.has(m.uci)
-							);
-							if (gap) want = key;
-						}
-						expect(miss?.fromFenKey ?? null).toBe(want);
-						if (miss)
-							expect(path.slice(0, cut).some((p) => p.fenKey === miss.fromFenKey)).toBe(true);
-					}
-					expect(throughDisabled).toBeGreaterThan(0);
-
-					// 3. The walkthrough's branch point is on a live, unique-move trunk.
+					// The walkthrough's branch point is on a live, unique-move trunk.
 					const bp = findBranchPoint({ nodes, rootFenKey: START });
 					expect(bp).not.toBeNull();
 					expect(live.has(bp!)).toBe(true);
