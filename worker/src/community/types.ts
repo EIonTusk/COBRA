@@ -93,6 +93,8 @@ export interface PublicationSummary {
 	visibility: 'public' | 'unlisted';
 	/** Lichess username, or null when the author chose to stay anonymous. */
 	author: string | null;
+	/** Whether the author chose to show their username. */
+	showAuthor: boolean;
 	status: 'active' | 'hidden' | 'removed';
 	version: number;
 	positionCount: number;

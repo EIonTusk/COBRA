@@ -581,6 +581,41 @@ You can share a Dossier report the same way — the `/dossier` page has a
 _Share report_ button that encodes the scan result into a viewable
 link.
 
+### Share with the community
+
+From a repertoire's dashboard, open the settings menu and pick
+**Publish to community**. Give it a title, a description and a few
+tags, then choose:
+
+- **Public** (listed, searchable, and counted in community statistics)
+  or **Unlisted** (only people with the link can open it).
+- Whether to show your Lichess username or appear as _anonymous_.
+- Whether to include your comments and your idea cards (prompt and
+  answer only). The dialog lets you review every piece of text before
+  it goes out.
+
+Only the tree is published: moves, and the comments and idea-card text
+you chose. **Your training progress, mistakes and shelved lines never
+leave your device.** The app builds the published tree from an
+allow-list, and the server rejects any upload that carries anything
+else.
+
+Publishing again creates a new version; **Unpublish** takes it down at
+once (copies people already imported stay theirs). Publishing needs a
+Lichess sign-in; browsing doesn't.
+
+The **Community** page lists published repertoires. Search by opening
+name or ECO code (a 1.e4 repertoire that reaches the Najdorf shows up
+for "Najdorf"), filter by colour, preview the whole tree with its
+comments, and **Import a copy** to train. Moves you already train
+elsewhere keep your progress; everything else starts fresh. Anyone
+signed in can report a publication; three reports hide it until a
+moderator reviews it.
+
+Community openings use the same hosted backend as Cloudflare sync, so
+they are available when the build ships one (or you set a Worker URL in
+Settings).
+
 ### Sync a repertoire with a Lichess study
 
 From a repertoire's dashboard: **Lichess sync**

@@ -6,6 +6,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import type { Db } from '../db';
 
 type Value = string | number | null;
 
@@ -77,8 +78,8 @@ export class TestD1 {
 	}
 }
 
-/** The test D1 typed as the real binding, for handing to the Worker. */
-export function testD1(): { d1: TestD1; DB: D1Database } {
+/** The test D1 typed as the binding the community routes take. */
+export function testD1(): { d1: TestD1; DB: Db } {
 	const d1 = new TestD1();
-	return { d1, DB: d1 as unknown as D1Database };
+	return { d1, DB: d1 as unknown as Db };
 }

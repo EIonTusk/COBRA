@@ -68,14 +68,45 @@ export async function decodeShare(encoded: string): Promise<ShareBundle> {
  * re-shared tree is new material to the recipient, not prepared prep.
  */
 export async function importShareBundle(bundle: ShareBundle): Promise<Repertoire> {
-	const newId = crypto.randomUUID();
 	const now = Date.now();
+	return writeImportedRepertoire(
+		bundle.repertoire,
+		bundle.nodes,
+		bundle.cards.map((c) => ({ fenKey: c.fenKey, expectedSan: c.expectedSan })),
+		bundle.ideaCards.map((ic) => ({
+			fenKey: ic.fenKey,
+			prompt: ic.prompt,
+			answer: ic.answer,
+			createdAt: ic.createdAt
+		})),
+		now
+	);
+}
+
+/**
+ * Write an imported tree as a brand-new repertoire under a fresh id, so an
+ * import never overwrites an existing local rep. Shared by share-link and
+ * community imports. Nobody else's training state is imported: each move
+ * keeps the recipient's own progress if they already train it in another
+ * repertoire (issue #97), otherwise it starts fresh, and idea cards start
+ * fresh too.
+ */
+export async function writeImportedRepertoire(
+	source: Repertoire,
+	nodes: RepertoireNode[],
+	slots: Array<{ fenKey: string; expectedSan: string }>,
+	ideaCards: Array<{ fenKey: string; prompt: string; answer?: string; createdAt?: number }>,
+	now: number = Date.now()
+): Promise<Repertoire> {
+	const newId = crypto.randomUUID();
 	const rep: Repertoire = {
-		...bundle.repertoire,
+		...source,
 		id: newId,
 		createdAt: now,
 		updatedAt: now,
-		coverageSnapshot: null
+		coverageSnapshot: null,
+		// A copy is not the sender's publication.
+		communityPublication: null
 	};
 	// Defensive: regenerate rootFenKey so we don't inherit a malformed
 	// one from an older version of the encoder.
@@ -90,26 +121,27 @@ export async function importShareBundle(bundle: ShareBundle): Promise<Repertoire
 		'readwrite'
 	);
 	await tx.objectStore('repertoires').put(rep);
-	for (const n of bundle.nodes) {
+	for (const n of nodes) {
 		await tx.objectStore('nodes').put({ ...n, repertoireId: newId });
 	}
-	// The sender's progress isn't imported, but the recipient's own is kept:
-	// a move they already train in another repertoire stays learned (issue
-	// #97). Only moves new to them get a fresh record.
 	const progress = tx.objectStore('move_progress');
-	for (const c of bundle.cards) {
-		await tx.objectStore('cards').put({ ...toSlot(c), repertoireId: newId });
+	for (const c of slots) {
+		await tx
+			.objectStore('cards')
+			.put(toSlot({ repertoireId: newId, fenKey: c.fenKey, expectedSan: c.expectedSan }));
 		if (!(await progress.get(progressKey(c.fenKey, c.expectedSan)))) {
 			await progress.put(freshProgress(c.fenKey, c.expectedSan, now));
 		}
 	}
-	for (const ic of bundle.ideaCards) {
+	for (const ic of ideaCards) {
 		await tx.objectStore('idea_cards').put({
-			...ic,
 			repertoireId: newId,
+			fenKey: ic.fenKey,
+			prompt: ic.prompt,
+			answer: ic.answer,
 			fsrs: createEmptyCard(new Date(now)),
 			dueAt: now,
-			lastReview: undefined
+			createdAt: ic.createdAt ?? now
 		});
 	}
 	await tx.done;

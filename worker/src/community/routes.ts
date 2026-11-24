@@ -18,6 +18,7 @@
  * moves, comments and idea-card text are ever stored. Training progress,
  * mistakes and sync blobs never reach these tables.
  */
+import type { Db, Stmt } from './db';
 import { positionHash } from './hash';
 import { treeOpenings } from './openings';
 import { TreeError, treeMovePairs, validateTree } from './tree';
@@ -30,7 +31,7 @@ import {
 } from './types';
 
 export interface CommunityEnv {
-	DB: D1Database;
+	DB: Db;
 	/** Comma-separated Lichess user ids allowed to moderate. */
 	ADMIN_USER_IDS?: string;
 	LICHESS_API?: string;
@@ -383,7 +384,7 @@ async function updatePublication(
 
 	let version = before.current_version;
 	let newTree = oldTree;
-	const stmts: D1PreparedStatement[] = [];
+	const stmts: Stmt[] = [];
 	let counts = {
 		position_count: before.position_count,
 		move_count: before.move_count,
@@ -715,7 +716,7 @@ async function reindex(
 	oldTree: CommunityTreeV1 | null,
 	newTree: CommunityTreeV1 | null
 ): Promise<void> {
-	const stmts: D1PreparedStatement[] = [
+	const stmts: Stmt[] = [
 		env.DB.prepare(`DELETE FROM publication_fts WHERE publication_id = ?1`).bind(after.id)
 	];
 	if (listed(after)) {
@@ -796,7 +797,7 @@ async function reindex(
 	await env.DB.batch(stmts);
 }
 
-function purgeStatements(env: CommunityEnv, id: string): D1PreparedStatement[] {
+function purgeStatements(env: CommunityEnv, id: string): Stmt[] {
 	return [
 		env.DB.prepare(`DELETE FROM publication_versions WHERE publication_id = ?1`).bind(id),
 		env.DB.prepare(`DELETE FROM publication_imports WHERE publication_id = ?1`).bind(id),
@@ -837,6 +838,7 @@ function summary(p: PubRow): PublicationSummary {
 		openings: JSON.parse(p.openings) as Array<[string, string]>,
 		visibility: p.visibility,
 		author: p.show_author ? (p.username ?? null) : null,
+		showAuthor: !!p.show_author,
 		status: p.status,
 		version: p.current_version,
 		positionCount: p.position_count,
