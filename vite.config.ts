@@ -118,6 +118,16 @@ export default defineConfig({
 					environment: 'node',
 					include: ['src/**/*.sim.test.ts']
 				}
+			},
+			{
+				// The Cloudflare Worker's logic (worker/src), run against an
+				// in-memory D1 over node:sqlite with the real schema.sql.
+				extends: './vite.config.ts',
+				test: {
+					name: 'worker',
+					environment: 'node',
+					include: ['worker/src/**/*.test.ts']
+				}
 			}
 		]
 	}
