@@ -1,5 +1,5 @@
 -- COBRA sync backend — D1 schema (Cloudflare).
--- Apply with:  wrangler d1 execute cobra-sync --file=./schema.sql
+-- Apply with:  wrangler d1 execute cobra-sync --remote --file=./schema.sql
 -- See ../docs/sync-backend-plan.md §3.3 for the rationale.
 
 -- Per-user housekeeping + quota. user_id is the Lichess account id, established
