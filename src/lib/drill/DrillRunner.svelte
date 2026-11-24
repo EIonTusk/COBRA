@@ -26,6 +26,7 @@
 		furthestNonBranchingFenKey,
 		disabledLineFenKeys
 	} from '$lib/tree/traversal';
+	import { planLeadIn } from './leadIn';
 	import { upsertCard, getCard, deferSubtree } from '$lib/storage/cards';
 	import { upsertIdeaCard } from '$lib/storage/ideaCards';
 	import { getMiddlegameGuide } from '$lib/storage/middlegameGuides';
@@ -604,19 +605,6 @@
 			return;
 		}
 
-		// Re-queued intro-pass cards skip the lead-in: the user already
-		// watched the line walk through once on the first pass, so making
-		// them sit through it again would be the "all lines visualised"
-		// anti-pattern the line walk is meant to avoid.
-		if (introducedKeys.has(ck(entry.segIdx, entry.card.fenKey))) {
-			snapFen(targetFen);
-			userLastMove = undefined;
-			correctEdges = acceptedEdgesFor(entry, currentFen);
-			correctEdge = correctEdges[0] ?? null;
-			phase = 'pending';
-			return;
-		}
-
 		const pathFromRoot = livePath(seg.nodes, rep.rootFenKey, entry.card.fenKey);
 		if (!pathFromRoot || pathFromRoot.length === 0) {
 			snapFen(targetFen);
@@ -627,19 +615,30 @@
 			return;
 		}
 
-		// Tail-only animation: if the board is already on a position on the
-		// path to the target (e.g. we just chained), only animate the
-		// remaining plies instead of rewinding to the root.
-		let startIdx = 0;
-		const curKey = currentFen ? fenKeyFromFen(currentFen) : null;
-		if (curKey && curKey !== rep.rootFenKey) {
-			for (let i = 0; i < pathFromRoot.length; i++) {
-				if (pathFromRoot[i].toFenKey === curKey) {
-					startIdx = i + 1;
-					break;
-				}
+		// Plan the lead-in from what the board shows now, never from whether
+		// the card was seen before: a card asked again later in the session
+		// (a deferred Train pass, a re-queue) usually finds the board on an
+		// unrelated line, and snapping there skips the moves the user needs
+		// to see to place the position.
+		const plan = planLeadIn(
+			seg.nodes,
+			pathFromRoot,
+			rep.rootFenKey,
+			entry.card.fenKey,
+			currentFen ? fenKeyFromFen(currentFen) : null
+		);
+		if (plan.kind === 'stay' || plan.kind === 'rewind') {
+			if (plan.kind === 'rewind') {
+				snapFen(targetFen);
+				const last = pathFromRoot[pathFromRoot.length - 1];
+				userLastMove = [last.uci.slice(0, 2) as Key, last.uci.slice(2, 4) as Key];
 			}
+			correctEdges = acceptedEdgesFor(entry, currentFen);
+			correctEdge = correctEdges[0] ?? null;
+			phase = 'pending';
+			return;
 		}
+		let startIdx = plan.kind === 'tail' ? plan.from : 0;
 
 		// Honour the "open at starting position" preference. In line-walk
 		// mode the fast-forward is suppressed: the line walk already drops
