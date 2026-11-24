@@ -7,7 +7,7 @@ name: Deploy COBRA sync Worker
 #
 # DORMANT until you opt in: set repo variable CLOUDFLARE_DEPLOY=true and add the
 # secrets CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID. First-time setup (D1
-# database id in wrangler.toml, schema apply, `wrangler secret put JWT_SECRET`)
+# database id in wrangler.toml, `wrangler secret put JWT_SECRET`)
 # is manual — see worker/README.md.
 
 on:
@@ -26,6 +26,17 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
+
+      # Bring the D1 schema up to date before the new code goes live. Every
+      # statement in schema.sql is CREATE ... IF NOT EXISTS, so re-running it
+      # on each deploy only adds what is new and never touches existing data.
+      - name: Apply D1 schema
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: worker
+          command: d1 execute cobra-sync --remote --file=./schema.sql
 
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3

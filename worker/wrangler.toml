@@ -26,3 +26,7 @@ ALLOWED_ORIGIN = "*"
 
 # Secrets (do NOT put these here) — set with:
 #   wrangler secret put JWT_SECRET      # random 32+ byte string for signing app JWTs
+#   wrangler secret put ADMIN_USER_IDS  # comma-separated Lichess ids who moderate community openings
+#
+# After pulling a schema change, re-apply schema.sql (`npm run schema`): every
+# statement is CREATE ... IF NOT EXISTS, so it only adds the new tables.

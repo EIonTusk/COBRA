@@ -41,6 +41,9 @@ jobs:
       - name: Drill simulation tests
         run: npm run test:sim
 
+      - name: Worker tests
+        run: npm run test:worker
+
   e2e:
     runs-on: ubuntu-latest
     # Browsers + system deps are pre-installed in the image, so we never run

@@ -16,6 +16,7 @@
 		Play,
 		Download,
 		ExternalLink,
+		Globe,
 		LineChart,
 		Lightbulb,
 		Link as LinkIcon,
@@ -54,6 +55,7 @@
 	import { countDuePlanCards, countPlanCards } from '$lib/storage/planCards';
 	import { nodesMap } from '$lib/storage/nodes';
 	import { buildShareBundle, encodeShare } from '$lib/storage/share';
+	import PublishDialog from '$lib/community/PublishDialog.svelte';
 	import { computeCoverage, COVERAGE_GOALS } from '$lib/tree/coverage';
 	import { getSettings, effectiveLichessToken } from '$lib/storage/settings';
 	import { backfillMoveFrequencies, frequencyCoverage } from '$lib/explorer/moveFrequency';
@@ -84,6 +86,7 @@
 	let gearMenuOpen = $state(false);
 	let shareStatus = $state<string | null>(null);
 	let shareBusy = $state(false);
+	let publishOpen = $state(false);
 	let sparGames = $state<SparGame[]>([]);
 	let sparReconciling = $state(false);
 
@@ -661,6 +664,23 @@
 						>
 							<Share2 class="size-3.5 text-[var(--color-parchment-400)]" />
 							<span>Copy share link</span>
+						</button>
+						<button
+							type="button"
+							role="menuitem"
+							data-testid="publish-community"
+							onclick={() => {
+								gearMenuOpen = false;
+								publishOpen = true;
+							}}
+							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)]"
+						>
+							<Globe class="size-3.5 text-[var(--color-parchment-400)]" />
+							<span>
+								{rep.communityPublication
+									? `Community · published v${rep.communityPublication.version}`
+									: 'Publish to community'}
+							</span>
 						</button>
 						<a
 							role="menuitem"
@@ -1367,6 +1387,13 @@
 				</a>
 			</div>
 		{/if}
+
+		<PublishDialog
+			open={publishOpen}
+			{rep}
+			onClose={() => (publishOpen = false)}
+			onChanged={(next) => (rep = next)}
+		/>
 
 		{#if shareStatus}
 			<p

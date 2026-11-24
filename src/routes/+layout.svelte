@@ -33,6 +33,11 @@
 			match: (p: string) => p.startsWith('/library') || p.startsWith('/repertoire')
 		},
 		{
+			href: `${base}/community`,
+			label: 'Community',
+			match: (p: string) => p.startsWith('/community')
+		},
+		{
 			href: `${base}/walkthrough`,
 			label: 'Walkthrough',
 			match: (p: string) => p.startsWith('/walkthrough')

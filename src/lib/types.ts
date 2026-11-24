@@ -70,6 +70,25 @@ export interface Repertoire {
 	 * shallowest-first without the path check.
 	 */
 	progressiveUnlock?: boolean;
+	/**
+	 * Set once this repertoire is published to the community: which
+	 * publication it is and the version last published from this device.
+	 * Lets the repertoire page offer "Publish update" and "Unpublish".
+	 */
+	communityPublication?: CommunityPublicationLink | null;
+	/**
+	 * Set on a repertoire imported from a community publication, so a later
+	 * version can be offered as an update (phase 3) and a republish is
+	 * credited as "based on" the original.
+	 */
+	communitySource?: { publicationId: string; version: number } | null;
+}
+
+export interface CommunityPublicationLink {
+	publicationId: string;
+	version: number;
+	publishedAt: number;
+	visibility: 'public' | 'unlisted';
 }
 
 /**

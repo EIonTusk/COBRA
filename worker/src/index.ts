@@ -13,11 +13,14 @@
  *   GET  /sync?kind&repId            Authorization: Bearer <app-jwt>  (one scope)
  *   GET  /sync?since=<cursor>        Authorization: Bearer <app-jwt>  (changed scopes)
  *   POST /sync           Authorization: Bearer <app-jwt>             (push, atomic CAS)
+ *   /community/...       Community openings — see src/community/routes.ts
  *
  * Conflict model: the push UPDATE only wins when its revision is strictly newer
  * (`WHERE excluded.revision > blobs.revision`); a no-op change count returns 409
  * with the current row so the client raises SyncConflictError.
  */
+
+import { communityCron, handleCommunity } from './community/routes';
 
 export interface Env {
 	DB: D1Database;
@@ -27,6 +30,8 @@ export interface Env {
 	ALLOWED_ORIGIN?: string;
 	/** Override for tests/self-host. Defaults to https://lichess.org. */
 	LICHESS_API?: string;
+	/** Comma-separated Lichess user ids who moderate community openings. */
+	ADMIN_USER_IDS?: string;
 }
 
 const R2_THRESHOLD = 700_000; // bytes of blob string above which we offload to R2
@@ -49,6 +54,8 @@ export default {
 			if (url.pathname === '/sync' && req.method === 'POST') {
 				return cors(env, await handlePush(req, env));
 			}
+			const community = await handleCommunity(req, env, url, (r) => requireUser(r, env));
+			if (community) return cors(env, community);
 			return cors(env, json({ error: 'not found' }, 404));
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : 'internal error';
@@ -65,6 +72,7 @@ export default {
 		await env.DB.prepare(`DELETE FROM blobs WHERE deleted_at IS NOT NULL AND deleted_at < ?1`)
 			.bind(cutoff)
 			.run();
+		await communityCron(env);
 	}
 };
 
@@ -373,7 +381,7 @@ function json(body: unknown, status = 200): Response {
 function cors(env: Env, res: Response): Response {
 	const h = new Headers(res.headers);
 	h.set('Access-Control-Allow-Origin', env.ALLOWED_ORIGIN ?? '*');
-	h.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+	h.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
 	h.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
 	h.set('Vary', 'Origin');
 	return new Response(res.body, { status: res.status, headers: h });

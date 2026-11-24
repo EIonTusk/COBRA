@@ -23,7 +23,8 @@
 		"format": "prettier --write .",
 		"test:unit": "vitest --project unit",
 		"test:sim": "vitest --run --project sim",
-		"test": "npm run test:unit -- --run && npm run test:sim && npm run test:e2e",
+		"test:worker": "vitest --run --project worker",
+		"test": "npm run test:unit -- --run && npm run test:sim && npm run test:worker && npm run test:e2e",
 		"test:e2e": "playwright test"
 	},
 	"devDependencies": {

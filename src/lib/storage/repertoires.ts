@@ -1,5 +1,11 @@
 import { ensureStore, getDB } from './db';
-import type { Repertoire, Color, RepertoireNode, LichessStudyLink } from '$lib/types';
+import type {
+	Repertoire,
+	Color,
+	RepertoireNode,
+	LichessStudyLink,
+	CommunityPublicationLink
+} from '$lib/types';
 import { STARTPOS_FEN, fenKeyFromFen } from '$lib/chess/fen';
 import { markRepDirty } from '$lib/sync/dirtyMark';
 import { recordRepTombstone } from './settings';
@@ -108,6 +114,20 @@ export async function setDrillMaxMoves(id: string, maxMoves: number | null): Pro
 	const rep = await db.get('repertoires', id);
 	if (!rep) return;
 	rep.drillMaxMoves = maxMoves && maxMoves > 0 ? Math.floor(maxMoves) : null;
+	rep.updatedAt = Date.now();
+	await db.put('repertoires', JSON.parse(JSON.stringify(rep)));
+	markRepDirty(id);
+}
+
+/** Record (or clear) this repertoire's community publication. */
+export async function setCommunityPublication(
+	id: string,
+	link: CommunityPublicationLink | null
+): Promise<void> {
+	const db = await getDB();
+	const rep = await db.get('repertoires', id);
+	if (!rep) return;
+	rep.communityPublication = link;
 	rep.updatedAt = Date.now();
 	await db.put('repertoires', JSON.parse(JSON.stringify(rep)));
 	markRepDirty(id);
