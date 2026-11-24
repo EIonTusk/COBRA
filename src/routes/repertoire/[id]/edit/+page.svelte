@@ -70,18 +70,18 @@
 	import {
 		pathToFenKey,
 		furthestNonBranchingFenKey,
-		countDescendantEdges,
-		liveReachableFenKeys
+		countDescendantEdges
 	} from '$lib/tree/traversal';
-	import {
-		collectMissingMoves,
-		collectSaveableLeaves,
-		firstMissingOnLine,
-		type MissingMove
-	} from '$lib/tree/missing';
+	import { collectSaveableLeaves, type MissingMove } from '$lib/tree/missing';
+	import { GapIndex } from '$lib/tree/gapIndex';
 	import { buildTreeRows } from '$lib/tree/treeView';
 	import MoveTree from '$lib/tree/MoveTree.svelte';
-	import { fetchExplorer, peekExplorer } from '$lib/explorer/client';
+	import {
+		fetchExplorer,
+		peekExplorer,
+		ExplorerRateLimited,
+		explorerCooldownMs
+	} from '$lib/explorer/client';
 	import { captureMoveFrequencies } from '$lib/explorer/moveFrequency';
 	import { generateMiddlegameGuide, type GenerateProgress } from '$lib/middlegame/generate';
 	import {
@@ -174,10 +174,10 @@
 	);
 	let jumpStatus = $state<string | null>(null);
 	let jumpBusy = $state(false);
-	// On narrow viewports the three "…missing" buttons get rolled up into a
-	// single "Find missing" dropdown so they don't push the board below the
-	// fold. Desktop still shows them as individual buttons.
+	// Mobile "Actions" menu (holds the Find gap entries plus Spar, import…).
 	let findMissingOpen = $state(false);
+	// Desktop "Find gap" dropdown: the same three gap entries.
+	let findGapOpen = $state(false);
 
 	// Opponent-prep walk-through. Populated from sessionStorage when the
 	// editor is opened with `?prep=walk&gapIdx=N`. The banner (near the top
@@ -201,15 +201,25 @@
 	let walkPayload = $state<WalkPayload | null>(null);
 	let walkIndex = $state(0);
 
-	// Cached list of uncovered threshold-popular opponent moves, sorted by
-	// games desc. Populated by a background probe so "Biggest/Most popular
-	// missing" clicks can answer instantly instead of re-probing every time.
-	// Kept in sync locally: as edges are added (commitMove) or saved
-	// (flushPending), matching entries are removed; after a save the cache is
-	// refreshed in the background to pick up newly-reachable positions.
-	let missingCache = $state<MissingMove[]>([]);
-	let missingCacheLoading = $state(false);
-	let missingCacheToken = 0;
+	// "Find gap": uncovered opponent moves above the repertoire's 1-in-N
+	// threshold, found by a best-first search that keeps every explorer
+	// answer it gets (see gapIndex.ts). It reads the tree on every query, so
+	// saves, disables and imports need no rescan. Rebuilt only when the
+	// explorer filters or token change.
+	type GapKind = 'line' | 'offLine' | 'overall';
+	type GapPreview =
+		| { state: 'idle' | 'loading' | 'none' }
+		| { state: 'found'; gap: MissingMove }
+		| { state: 'error'; message: string };
+	const GAP_KINDS: GapKind[] = ['line', 'offLine', 'overall'];
+	let gapIndex: GapIndex | null = null;
+	let gapIndexKey = '';
+	let gapPreviews = $state<Record<GapKind, GapPreview>>({
+		line: { state: 'idle' },
+		offLine: { state: 'idle' },
+		overall: { state: 'idle' }
+	});
+	let gapPreviewAbort: AbortController | null = null;
 	let empiricalGaps = $state<EmpiricalGap[]>([]);
 	// User-performance aggregate at the current position, keyed by played
 	// SAN. Reloaded whenever the current fenKey changes. Drives the
@@ -920,9 +930,6 @@
 				}
 			}
 		}
-		// Warm the missing-moves cache so the Biggest/Most-popular buttons
-		// respond instantly on first click.
-		void refreshMissingCache();
 
 		// Pull the cached dossier, if any, and derive the fingerprint +
 		// openingFit pair the Explorer uses for style advice. Failures here
@@ -1056,7 +1063,6 @@
 			// doesn't close a saveable line, so it shouldn't bump "+N this
 			// session". The mover's side is the side-to-move at `fromKey`.
 			if (colorToMove(fromKey) === rep.color) movesSinceSave += 1;
-			evictCoveredFromCache(fromKey, edge.uci);
 		}
 		const newFen = fenAfterMove(fromFen, edge);
 		const orig = edge.uci.slice(0, 2) as Key;
@@ -1085,9 +1091,6 @@
 		// In the background: normally answered from the explorer cache, but a
 		// slow or rate-limited explorer must never hold up the save itself.
 		void captureFrequenciesForSaved(saved);
-		// Save has closed some gaps and may have opened deeper ones; kick
-		// off a background refresh so subsequent clicks stay instant.
-		void refreshMissingCache();
 	}
 
 	/**
@@ -1195,11 +1198,6 @@
 		await setEdgeDisabled(rep.id, fromKey, child.toFenKey, next);
 		nodes = await nodesMap(rep.id);
 		await touchRepertoire(rep.id);
-		// Missing-move suggestions only come from live lines (#99): drop cached
-		// ones a disable just shelved, then re-probe (re-enabling adds some back).
-		const live = liveReachableFenKeys(nodes, rep.rootFenKey);
-		missingCache = missingCache.filter((m) => live.has(m.fromFenKey));
-		void refreshMissingCache();
 	}
 
 	/**
@@ -1480,195 +1478,172 @@
 			// Don't bump movesSinceSave — this is the opponent's move, the
 			// user hasn't actually finished a line yet. The counter only
 			// advances when they play their own reply next.
-			evictCoveredFromCache(missing.fromFenKey, missing.uci);
 		}
 	}
 
-	function fenFromKey(key: string): string {
-		const parts = key.split(' ');
-		return parts.length === 4 ? `${key} 0 1` : key;
-	}
-
 	/**
-	 * Kick off a background probe of the whole tree and replace the missing-
-	 * move cache with the result. Uses a monotonic token so overlapping
-	 * refreshes (e.g. rapid saves) don't clobber newer results with older
-	 * ones. Silent on failure — the cache just stays as-is.
+	 * The gap index for the current repertoire and explorer filters, built on
+	 * first use. Null without a coverage goal or a Lichess token.
 	 */
-	async function refreshMissingCache() {
-		if (!rep || !settings) return;
-		if (!rep.coverageGoal || rep.coverageGoal <= 0) return;
+	function currentGapIndex(): GapIndex | null {
+		if (!rep || !settings || !rep.coverageGoal || rep.coverageGoal <= 0) return null;
 		const token = effectiveLichessToken(settings);
-		if (!token) return;
-		const mine = ++missingCacheToken;
-		missingCacheLoading = true;
-		try {
-			const list = await collectMissingMoves(
-				nodes,
-				rep.rootFenKey,
-				rep.rootFen,
-				rep.color,
-				rep.coverageGoal,
-				fenFromKey,
-				{
-					speeds: settings.explorerSpeeds,
-					ratings: settings.explorerRatings,
-					token
-				}
-			);
-			if (mine === missingCacheToken) missingCache = list;
-		} catch {
-			/* silent — cache stays stale */
-		} finally {
-			if (mine === missingCacheToken) missingCacheLoading = false;
-		}
-	}
-
-	/**
-	 * Drop any cache entries that are no longer missing because an edge now
-	 * covers them. Call from `commitMove` / `flushPending` so the cache stays
-	 * consistent with the tree even before a background refresh completes.
-	 */
-	function evictCoveredFromCache(fromFenKey: string, uci: string) {
-		if (missingCache.length === 0) return;
-		missingCache = missingCache.filter((m) => !(m.fromFenKey === fromFenKey && m.uci === uci));
-	}
-
-	/**
-	 * "Next missing" — walk the current line from the root down to where the
-	 * user is sitting, probe the explorer at each opponent-turn position, and
-	 * jump to the first uncovered threshold-popular move. Closest-to-root
-	 * wins so the earliest hole on the line gets addressed first.
-	 */
-	async function jumpNextMissing() {
-		if (!rep || !settings || jumpBusy) return;
-		if (!rep.coverageGoal || rep.coverageGoal <= 0) {
-			jumpStatus = 'Set a coverage goal (1-in-N) on the repertoire to use missing-move jumps.';
-			setTimeout(() => (jumpStatus = null), 3500);
-			return;
-		}
-		const token = effectiveLichessToken(settings);
-		if (!token) {
-			jumpStatus = 'Connect Lichess (or paste a token) in Settings to probe missing moves.';
-			setTimeout(() => (jumpStatus = null), 3500);
-			return;
-		}
-		// Path from root → current: start with the root, then each history
-		// step's resulting position.
-		const path: { fenKey: string; fen: string }[] = [{ fenKey: rep.rootFenKey, fen: rep.rootFen }];
-		for (const step of history) {
-			path.push({ fenKey: step.fenKey, fen: step.fen });
-		}
-		jumpBusy = true;
-		jumpStatus = 'Probing current line…';
-		try {
-			const miss = await firstMissingOnLine(nodes, path, rep.color, rep.coverageGoal, {
+		if (!token) return null;
+		const key = JSON.stringify([
+			rep.id,
+			rep.rootFenKey,
+			settings.explorerSpeeds,
+			settings.explorerRatings,
+			token
+		]);
+		if (!gapIndex || key !== gapIndexKey) {
+			const r = rep;
+			gapIndex = new GapIndex({
+				rootFenKey: r.rootFenKey,
+				rootFen: r.rootFen,
+				color: r.color,
+				token,
 				speeds: settings.explorerSpeeds,
 				ratings: settings.explorerRatings,
-				token
+				getNodes: () => nodes,
+				getPending: () => pendingEdges.map((p) => ({ fromKey: p.fromKey, uci: p.edge.uci }))
 			});
-			if (!miss) {
-				jumpStatus = 'No missing threshold-popular moves on this line.';
-				setTimeout(() => (jumpStatus = null), 3000);
-				return;
-			}
-			jumpStatus = `${miss.san} — ${miss.games.toLocaleString()} games`;
-			setTimeout(() => (jumpStatus = null), 3000);
-			jumpToMissing(miss);
-		} finally {
-			jumpBusy = false;
+			gapIndexKey = key;
 		}
+		return gapIndex;
+	}
+
+	/** Root → board position, as fen keys. */
+	function boardLine(): string[] {
+		return [rep!.rootFenKey, ...history.map((s) => s.fenKey)];
+	}
+
+	function findGap(kind: GapKind, signal?: AbortSignal): Promise<MissingMove | null> {
+		const index = currentGapIndex();
+		if (!index || !rep?.coverageGoal) return Promise.resolve(null);
+		const goal = rep.coverageGoal;
+		// The user opened the menu or clicked: they're waiting on this.
+		const opts = { signal, priority: 'foreground' as const };
+		if (kind === 'line') return index.nextOnLine(goal, boardLine(), opts);
+		if (kind === 'offLine') return index.biggest(goal, { ...opts, exclude: new Set(boardLine()) });
+		return index.biggest(goal, opts);
+	}
+
+	function gapErrorMessage(e: unknown): string {
+		if (e instanceof ExplorerRateLimited) {
+			const s = Math.max(1, Math.ceil(explorerCooldownMs() / 1000));
+			return `Lichess rate limit, try again in ${s} s`;
+		}
+		return "Couldn't reach the Lichess explorer";
+	}
+
+	function isAbort(e: unknown): boolean {
+		return e instanceof DOMException && e.name === 'AbortError';
 	}
 
 	/**
-	 * "Biggest missing" — like most-popular missing, but skips any opponent-
-	 * turn position that sits on the current line. "Next missing" already
-	 * handles current-line gaps, so this button surfaces the biggest hole
-	 * *elsewhere* in the tree.
+	 * Fill in each Find gap entry's answer while the menu is open. Entries
+	 * run one after another and share every explorer answer, so the second
+	 * and third are usually free. Closing the menu stops the search.
 	 */
-	async function jumpBiggestMissing() {
-		if (!rep || !settings || jumpBusy) return;
-		if (!rep.coverageGoal || rep.coverageGoal <= 0) {
-			jumpStatus = 'Set a coverage goal (1-in-N) on the repertoire to use missing-move jumps.';
-			setTimeout(() => (jumpStatus = null), 3500);
+	async function refreshGapPreviews() {
+		gapPreviewAbort?.abort();
+		if (!currentGapIndex()) {
+			gapPreviews = {
+				line: { state: 'idle' },
+				offLine: { state: 'idle' },
+				overall: { state: 'idle' }
+			};
 			return;
 		}
-		const token = effectiveLichessToken(settings);
-		if (!token) {
-			jumpStatus = 'Connect Lichess (or paste a token) in Settings to probe missing moves.';
-			setTimeout(() => (jumpStatus = null), 3500);
-			return;
-		}
-		const excludeFenKeys = new Set<string>([rep.rootFenKey, ...history.map((s) => s.fenKey)]);
-		const cached = missingCache.find((m) => !excludeFenKeys.has(m.fromFenKey));
-		if (cached) {
-			jumpStatus = `${cached.san} — ${cached.games.toLocaleString()} games`;
-			setTimeout(() => (jumpStatus = null), 3000);
-			jumpToMissing(cached);
-			// Line up the next candidate in the background so the next click
-			// is instant too.
-			void refreshMissingCache();
-			return;
-		}
-		// Cache miss (either never populated or empty after saves). Fall back
-		// to a direct probe and populate the cache with the result.
-		jumpBusy = true;
-		jumpStatus = missingCacheLoading ? 'Still probing…' : 'Probing tree…';
-		try {
-			await refreshMissingCache();
-			const miss = missingCache.find((m) => !excludeFenKeys.has(m.fromFenKey));
-			if (!miss) {
-				jumpStatus = 'No missing threshold-popular moves outside this line.';
-				setTimeout(() => (jumpStatus = null), 3000);
+		const ctrl = new AbortController();
+		gapPreviewAbort = ctrl;
+		gapPreviews = {
+			line: { state: 'loading' },
+			offLine: { state: 'loading' },
+			overall: { state: 'loading' }
+		};
+		for (const kind of GAP_KINDS) {
+			try {
+				const gap = await findGap(kind, ctrl.signal);
+				if (ctrl.signal.aborted) return;
+				gapPreviews[kind] = gap ? { state: 'found', gap } : { state: 'none' };
+			} catch (e) {
+				if (ctrl.signal.aborted || isAbort(e)) return;
+				const message = gapErrorMessage(e);
+				// A rate limit fails every remaining entry the same way.
+				for (const k of GAP_KINDS) {
+					if (gapPreviews[k].state === 'loading') gapPreviews[k] = { state: 'error', message };
+				}
 				return;
 			}
-			jumpStatus = `${miss.san} — ${miss.games.toLocaleString()} games`;
-			setTimeout(() => (jumpStatus = null), 3000);
-			jumpToMissing(miss);
-		} finally {
-			jumpBusy = false;
 		}
 	}
 
+	function stopGapPreviews() {
+		gapPreviewAbort?.abort();
+		gapPreviewAbort = null;
+	}
+
+	function toggleGapMenu() {
+		findGapOpen = !findGapOpen;
+		if (findGapOpen) void refreshGapPreviews();
+		else stopGapPreviews();
+	}
+
+	function toggleActionsMenu() {
+		findMissingOpen = !findMissingOpen;
+		if (findMissingOpen) void refreshGapPreviews();
+		else stopGapPreviews();
+	}
+
+	function closeGapMenus() {
+		findGapOpen = false;
+		findMissingOpen = false;
+		stopGapPreviews();
+	}
+
+	const GAP_NONE: Record<GapKind, string> = {
+		line: 'No gap on this line or below it.',
+		offLine: 'No gap off this line.',
+		overall: 'No gap in this repertoire.'
+	};
+
 	/**
-	 * "Most popular missing" — BFS the whole tree, probe opponent-turn nodes,
-	 * and jump to the single most-played uncovered move above the repertoire
-	 * threshold.
+	 * Jump to a gap: "Next gap on this line" (earliest gap from the root to
+	 * the board, then the biggest below it), "Biggest gap off this line", or
+	 * "Biggest gap overall".
 	 */
-	async function jumpMostImportant() {
+	async function jumpToGap(kind: GapKind) {
+		closeGapMenus();
 		if (!rep || !settings || jumpBusy) return;
 		if (!rep.coverageGoal || rep.coverageGoal <= 0) {
-			jumpStatus = 'Set a coverage goal (1-in-N) on the repertoire to use missing-move jumps.';
+			jumpStatus = 'Set a coverage goal (1-in-N) on the repertoire to find gaps.';
 			setTimeout(() => (jumpStatus = null), 3500);
 			return;
 		}
-		const token = effectiveLichessToken(settings);
-		if (!token) {
-			jumpStatus = 'Connect Lichess (or paste a token) in Settings to rank by popularity.';
+		if (!effectiveLichessToken(settings)) {
+			jumpStatus = 'Connect Lichess (or paste a token) in Settings to find gaps.';
 			setTimeout(() => (jumpStatus = null), 3500);
-			return;
-		}
-		const cached = missingCache[0];
-		if (cached) {
-			jumpStatus = `${cached.san} — ${cached.games.toLocaleString()} games`;
-			setTimeout(() => (jumpStatus = null), 3000);
-			jumpToMissing(cached);
-			void refreshMissingCache();
 			return;
 		}
 		jumpBusy = true;
-		jumpStatus = missingCacheLoading ? 'Still probing…' : 'Probing tree…';
+		jumpStatus = 'Looking for gaps…';
 		try {
-			await refreshMissingCache();
-			const miss = missingCache[0];
-			if (!miss) {
-				jumpStatus = 'No missing threshold-popular moves found.';
+			// Asked afresh (the board may have moved since the menu opened);
+			// free when the menu already worked it out, as every answer is kept.
+			const gap = await findGap(kind);
+			if (!gap) {
+				jumpStatus = GAP_NONE[kind];
 				setTimeout(() => (jumpStatus = null), 3000);
 				return;
 			}
-			jumpStatus = `${miss.san} — ${miss.games.toLocaleString()} games`;
+			jumpStatus = `${gap.san} · ${gap.games.toLocaleString()} games`;
 			setTimeout(() => (jumpStatus = null), 3000);
-			jumpToMissing(miss);
+			await jumpToMissing(gap);
+		} catch (e) {
+			jumpStatus = gapErrorMessage(e);
+			setTimeout(() => (jumpStatus = null), 4000);
 		} finally {
 			jumpBusy = false;
 		}
@@ -1770,9 +1745,9 @@
 			treeOpen = false;
 			return;
 		}
-		if (e.key === 'Escape' && findMissingOpen) {
+		if (e.key === 'Escape' && (findMissingOpen || findGapOpen)) {
 			e.preventDefault();
-			findMissingOpen = false;
+			closeGapMenus();
 			return;
 		}
 		if (e.key === 'Escape' && importPgnOpen) {
@@ -1973,12 +1948,11 @@
 					`None of the ${merged.skippedLines} line(s) start from this repertoire's opening position, so nothing was imported.`
 				);
 			}
-			// Refresh the tree + missing-move cache so the merged branches are
-			// visible and the probes account for them. Mark the rep touched so
+			// Refresh the tree so the merged branches are visible (the gap
+			// search reads it on its next query). Mark the rep touched so
 			// the auto-push on exit picks the change up.
 			nodes = await nodesMap(rep.id);
 			await touchRepertoire(rep.id);
-			void refreshMissingCache();
 			importPgnResult = merged;
 		} catch (err) {
 			importPgnError = err instanceof Error ? err.message : 'Import failed';
@@ -2441,6 +2415,46 @@
 	}
 </script>
 
+<!-- The Find gap entries: shared by the desktop "Find gap" dropdown and the
+	 mobile Actions menu. Each row previews its answer while the menu is open. -->
+{#snippet gapMenuItems(first: number)}
+	{#each [{ kind: 'line', label: 'Next gap on this line', Icon: Compass, hint: 'Earliest gap from the start to here, then the biggest below' }, { kind: 'offLine', label: 'Biggest gap off this line', Icon: Flame, hint: 'Most-played gap anywhere except the line you are on' }, { kind: 'overall', label: 'Biggest gap overall', Icon: Star, hint: 'Most-played gap in the whole repertoire' }] as const as item, n (item.kind)}
+		{@const preview = gapPreviews[item.kind]}
+		<button
+			type="button"
+			role="menuitem"
+			disabled={jumpBusy || !tokenConfigured}
+			title={tokenConfigured
+				? item.hint
+				: 'Requires a Lichess connection — paste a token in Settings to enable.'}
+			onclick={() => void jumpToGap(item.kind)}
+			style:--i={String(first + n)}
+			class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
+		>
+			<item.Icon class="size-3.5 shrink-0 text-[var(--color-parchment-400)]" />
+			<span class="flex-1">{item.label}</span>
+			<span
+				class="shrink-0 font-mono text-[10px] text-[var(--color-parchment-500)] tabular-nums"
+				data-testid="gap-preview-{item.kind}"
+			>
+				{#if !tokenConfigured}
+					needs Lichess
+				{:else if !rep?.coverageGoal}
+					set a goal
+				{:else if preview.state === 'found'}
+					{preview.gap.san} · {preview.gap.games.toLocaleString()}
+				{:else if preview.state === 'loading'}
+					checking…
+				{:else if preview.state === 'none'}
+					none
+				{:else if preview.state === 'error'}
+					{preview.message}
+				{/if}
+			</span>
+		</button>
+	{/each}
+{/snippet}
+
 <svelte:window on:keydown={handleKey} />
 
 {#if loading}
@@ -2475,7 +2489,7 @@
 			<div class="relative ml-auto lg:hidden">
 				<button
 					type="button"
-					onclick={() => (findMissingOpen = !findMissingOpen)}
+					onclick={toggleActionsMenu}
 					disabled={jumpBusy}
 					aria-haspopup="menu"
 					aria-expanded={findMissingOpen}
@@ -2484,7 +2498,7 @@
 						? 'bg-[var(--color-ink-800)] text-[var(--color-parchment-100)]'
 						: 'text-[var(--color-parchment-300)] hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]'}"
 				>
-					<span>{jumpBusy ? 'Probing…' : 'Actions'}</span>
+					<span>{jumpBusy ? 'Looking…' : 'Actions'}</span>
 					<ChevronDown
 						class="size-3 transition-transform duration-200 ease-out {findMissingOpen
 							? 'rotate-180'
@@ -2496,7 +2510,7 @@
 						type="button"
 						aria-label="Close menu"
 						class="fixed inset-0 z-30"
-						onclick={() => (findMissingOpen = false)}
+						onclick={closeGapMenus}
 					></button>
 					<div
 						role="menu"
@@ -2517,7 +2531,7 @@
 							<!-- eslint-disable svelte/no-navigation-without-resolve -->
 							<a
 								href={lichessReturnHref}
-								onclick={() => (findMissingOpen = false)}
+								onclick={closeGapMenus}
 								style:--i="0"
 								class="flex items-center gap-2 border-b border-[var(--color-ink-800)] bg-[var(--color-ink-800)]/40 px-3 py-2 font-mono text-[10px] tracking-wider text-[var(--color-parchment-300)] uppercase transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]"
 							>
@@ -2526,69 +2540,7 @@
 								<span>Lichess offline — sign in to enable</span>
 							</a>
 						{/if}
-						<button
-							type="button"
-							role="menuitem"
-							disabled={jumpBusy || !tokenConfigured}
-							title={tokenConfigured
-								? undefined
-								: 'Requires a Lichess connection — paste a token in Settings to enable.'}
-							onclick={() => {
-								findMissingOpen = false;
-								void jumpNextMissing();
-							}}
-							style:--i="1"
-							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
-						>
-							<Compass class="size-3.5 text-[var(--color-parchment-400)]" />
-							<span
-								>Next missing <span class="text-[var(--color-parchment-500)]"
-									>· {tokenConfigured ? 'on this line' : 'needs Lichess'}</span
-								></span
-							>
-						</button>
-						<button
-							type="button"
-							role="menuitem"
-							disabled={jumpBusy || !tokenConfigured}
-							title={tokenConfigured
-								? undefined
-								: 'Requires a Lichess connection — paste a token in Settings to enable.'}
-							onclick={() => {
-								findMissingOpen = false;
-								void jumpBiggestMissing();
-							}}
-							style:--i="2"
-							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
-						>
-							<Flame class="size-3.5 text-[var(--color-parchment-400)]" />
-							<span
-								>Biggest missing <span class="text-[var(--color-parchment-500)]"
-									>· {tokenConfigured ? 'elsewhere' : 'needs Lichess'}</span
-								></span
-							>
-						</button>
-						<button
-							type="button"
-							role="menuitem"
-							disabled={jumpBusy || !tokenConfigured}
-							title={tokenConfigured
-								? undefined
-								: 'Requires a Lichess connection — paste a token in Settings to enable.'}
-							onclick={() => {
-								findMissingOpen = false;
-								void jumpMostImportant();
-							}}
-							style:--i="3"
-							class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--color-parchment-200)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-50)] disabled:opacity-60"
-						>
-							<Star class="size-3.5 text-[var(--color-parchment-400)]" />
-							<span
-								>Most popular missing{#if !tokenConfigured}<span
-										class="ml-1 text-[var(--color-parchment-500)]">· needs Lichess</span
-									>{/if}</span
-							>
-						</button>
+						{@render gapMenuItems(1)}
 						{#if topGap}
 							<!-- Doesn't need Lichess (driven by the local
 								 empirical-gaps store), so this stays
@@ -2600,7 +2552,7 @@
 								type="button"
 								role="menuitem"
 								onclick={() => {
-									findMissingOpen = false;
+									closeGapMenus();
 									openImportPgn();
 								}}
 								style:--i="7"
@@ -2617,7 +2569,7 @@
 								type="button"
 								role="menuitem"
 								onclick={() => {
-									findMissingOpen = false;
+									closeGapMenus();
 									jumpTopEmpiricalGap();
 								}}
 								style:--i="4"
@@ -2643,7 +2595,7 @@
 								? undefined
 								: 'Requires a Lichess connection — paste a token in Settings to enable.'}
 							onclick={() => {
-								findMissingOpen = false;
+								closeGapMenus();
 								openBotDialog();
 							}}
 							style:--i="6"
@@ -2661,7 +2613,7 @@
 							role="menuitem"
 							disabled={!currentIsPinnable}
 							onclick={() => {
-								findMissingOpen = false;
+								closeGapMenus();
 								trainFromCurrent();
 							}}
 							style:--i="7"
@@ -2683,7 +2635,7 @@
 							role="menuitem"
 							disabled={!currentIsPinnedGate && !currentIsPinnable}
 							onclick={() => {
-								findMissingOpen = false;
+								closeGapMenus();
 								void togglePinAtCurrent();
 							}}
 							style:--i="8"
@@ -2710,7 +2662,7 @@
 							role="menuitemcheckbox"
 							aria-checked={boardHintsEnabled}
 							onclick={() => {
-								findMissingOpen = false;
+								closeGapMenus();
 								boardHintsEnabled = !boardHintsEnabled;
 							}}
 							style:--i="9"
@@ -2801,7 +2753,7 @@
 			<!-- Action bar: mobile order 6 (under the board toolbar + candidates
 				 + line + engine); desktop row 1 spanning both columns.
 				 On mobile it holds secondary actions only (Spar, Gap, status);
-				 the primary "Find missing" dropdown + save pill live in the
+				 the primary "Find gap" entries (Actions menu) + save pill live in the
 				 board toolbar right under the board for tap-reach. -->
 			<div
 				class="order-6 flex flex-wrap items-center gap-2 lg:order-none lg:col-span-3 lg:row-start-1"
@@ -2826,50 +2778,46 @@
 						<span>Lichess offline — sign in to enable</span>
 					</a>
 				{/if}
-				<!-- Desktop: individual buttons, hidden on mobile. The three
-					 "missing" probes and Spar all hit Lichess; we disable
-					 them when no token is configured and explain why in the
-					 tooltip so the user can fix it from Settings rather than
-					 hunt for the cause. -->
-				<Button
-					class="hidden lg:inline-flex"
-					variant="secondary"
-					size="sm"
-					onclick={jumpNextMissing}
-					disabled={jumpBusy || !tokenConfigured}
-					title={tokenConfigured
-						? "Probe the current line and jump to the earliest opponent move above the coverage threshold you haven't answered"
-						: 'Requires a Lichess connection — paste a token in Settings to enable.'}
-				>
-					<Compass class="size-3.5" />
-					<span>{jumpBusy ? 'Probing…' : 'Next missing'}</span>
-				</Button>
-				<Button
-					class="hidden lg:inline-flex"
-					variant="secondary"
-					size="sm"
-					onclick={jumpBiggestMissing}
-					disabled={jumpBusy || !tokenConfigured}
-					title={tokenConfigured
-						? 'Probe the tree, skipping the current line, and jump to the biggest uncovered opponent move elsewhere'
-						: 'Requires a Lichess connection — paste a token in Settings to enable.'}
-				>
-					<Flame class="size-3.5" />
-					<span>{jumpBusy ? 'Probing…' : 'Biggest missing'}</span>
-				</Button>
-				<Button
-					class="hidden lg:inline-flex"
-					variant="secondary"
-					size="sm"
-					onclick={jumpMostImportant}
-					disabled={jumpBusy || !tokenConfigured}
-					title={tokenConfigured
-						? "Probe the whole tree and jump to the single most-played opponent move above the coverage threshold that you haven't answered"
-						: 'Requires a Lichess connection — paste a token in Settings to enable.'}
-				>
-					<Star class="size-3.5" />
-					<span>{jumpBusy ? 'Ranking…' : 'Most popular missing'}</span>
-				</Button>
+				<!-- Desktop buttons, hidden on mobile. Find gap and Spar both
+					 hit Lichess; we disable them when no token is configured
+					 and explain why in the tooltip so the user can fix it
+					 from Settings rather than hunt for the cause. -->
+				<div class="relative hidden lg:block">
+					<Button
+						variant="secondary"
+						size="sm"
+						onclick={toggleGapMenu}
+						disabled={jumpBusy || !tokenConfigured}
+						aria-haspopup="menu"
+						aria-expanded={findGapOpen}
+						title={tokenConfigured
+							? "Jump to an opponent move above your coverage goal that you haven't answered"
+							: 'Requires a Lichess connection — paste a token in Settings to enable.'}
+					>
+						<Compass class="size-3.5" />
+						<span>{jumpBusy ? 'Looking…' : 'Find gap'}</span>
+						<ChevronDown
+							class="size-3 transition-transform duration-200 ease-out {findGapOpen
+								? 'rotate-180'
+								: ''}"
+						/>
+					</Button>
+					{#if findGapOpen}
+						<button
+							type="button"
+							aria-label="Close menu"
+							class="fixed inset-0 z-30"
+							onclick={closeGapMenus}
+						></button>
+						<div
+							role="menu"
+							class="ot-menu-pop stagger-menu absolute top-full left-0 z-40 mt-1 w-80 overflow-hidden rounded-[4px] border border-[var(--color-ink-700)] shadow-[var(--shadow-lg)]"
+							style:background-color="var(--color-ink-900)"
+						>
+							{@render gapMenuItems(0)}
+						</div>
+					{/if}
+				</div>
 				<Button
 					class="hidden lg:inline-flex"
 					variant="secondary"
@@ -3155,7 +3103,7 @@
 			<!--
 				Board toolbar — mobile only (`lg:hidden`), order 2: sits
 				directly under the board and before the candidates, so nav +
-				`Find missing` + save stay in reach without scrolling past
+				`Actions` + save stay in reach without scrolling past
 				the candidate list. On desktop these controls live in the
 				top action bar and the line panel.
 			-->
