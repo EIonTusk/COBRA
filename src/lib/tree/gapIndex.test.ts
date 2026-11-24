@@ -126,7 +126,13 @@ describe('GapIndex.biggest', () => {
 		data.set(ROOT, [mv('e4', 'e2e4', 6000), mv('d4', 'd2d4', 1000), mv('c4', 'c2c4', 3000)]);
 		const { idx } = index(baseTree(), data);
 		const gap = await idx.biggest(100);
-		expect(gap).toMatchObject({ fromFenKey: ROOT, san: 'c4', games: 3000, depth: 0 });
+		expect(gap).toMatchObject({
+			fromFenKey: ROOT,
+			san: 'c4',
+			games: 3000,
+			positionGames: 10000,
+			depth: 0
+		});
 	});
 
 	it('never probes user-to-move positions, nor positions below the threshold', async () => {

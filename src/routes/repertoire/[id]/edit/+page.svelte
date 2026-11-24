@@ -1603,6 +1603,13 @@
 		stopGapPreviews();
 	}
 
+	/** The gap move's share of the games at its position, e.g. "62%". */
+	function gapShare(gap: MissingMove): string {
+		if (!gap.positionGames) return `${gap.games.toLocaleString()} games`;
+		const pct = (100 * gap.games) / gap.positionGames;
+		return pct < 1 ? `${pct.toFixed(1)}%` : `${Math.round(pct)}%`;
+	}
+
 	const GAP_NONE: Record<GapKind, string> = {
 		line: 'No gap on this line or below it.',
 		offLine: 'No gap off this line.',
@@ -1638,7 +1645,7 @@
 				setTimeout(() => (jumpStatus = null), 3000);
 				return;
 			}
-			jumpStatus = `${gap.san} · ${gap.games.toLocaleString()} games`;
+			jumpStatus = `${gap.san} · ${gap.games.toLocaleString()} games${gap.positionGames ? ` · ${gapShare(gap)} of this position` : ''}`;
 			setTimeout(() => (jumpStatus = null), 3000);
 			await jumpToMissing(gap);
 		} catch (e) {
@@ -2442,7 +2449,7 @@
 				{:else if !rep?.coverageGoal}
 					set a goal
 				{:else if preview.state === 'found'}
-					{preview.gap.san} · {preview.gap.games.toLocaleString()}
+					{preview.gap.san} · {gapShare(preview.gap)}
 				{:else if preview.state === 'loading'}
 					checking…
 				{:else if preview.state === 'none'}

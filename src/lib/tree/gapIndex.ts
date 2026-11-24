@@ -265,6 +265,7 @@ export class GapIndex {
 			uci: pick.uci,
 			san: pick.san,
 			games: pick.games,
+			positionGames: stats.total,
 			afterFenKey,
 			depth
 		};

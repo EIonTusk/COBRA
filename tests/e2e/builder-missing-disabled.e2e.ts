@@ -92,7 +92,7 @@ test('Find gap skips a line disabled in the builder (#99)', async ({ page }) => 
 	// Let the search see both gaps while 2.Nf3 is live (the menu previews its
 	// answers), so the disable below has to be reflected in what it knows.
 	await page.getByRole('button', { name: 'Find gap' }).click();
-	await expect(page.getByTestId('gap-preview-overall')).toHaveText(/Nc6 · 5,000/);
+	await expect(page.getByTestId('gap-preview-overall')).toHaveText(/Nc6 · 100%/);
 	await page.keyboard.press('Escape');
 
 	await nf3.click({ button: 'right' });

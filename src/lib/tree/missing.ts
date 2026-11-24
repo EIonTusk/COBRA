@@ -85,6 +85,8 @@ export interface MissingMove {
 	san: string;
 	/** How many games played this move on Lichess. */
 	games: number;
+	/** Games that reached `fromFenKey`; `games / positionGames` is the move's share there. */
+	positionGames?: number;
 	/** FEN key after the opponent plays this move (where we'd need to reply). */
 	afterFenKey: string;
 	/** Depth from root (number of plies). */
