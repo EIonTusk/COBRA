@@ -583,6 +583,17 @@ export interface AppSettings {
 	 * study/challenge token never leaves the client; device-local, never synced.
 	 */
 	syncIdentityToken?: LichessOAuthToken | null;
+	/**
+	 * First-launch welcome page (/welcome) was shown and finished or skipped.
+	 * Set as soon as the user acts on it, so an abandoned Lichess sign-in
+	 * never brings it back on the next launch.
+	 */
+	welcomeSeen?: boolean;
+	/**
+	 * The user ticked "sync" on the welcome page and is part-way through the
+	 * Lichess sign-ins; /welcome turns sync on once they are done.
+	 */
+	welcomeSyncPending?: boolean;
 	lastMistakeScanAt?: number;
 	/**
 	 * Created-at timestamp of the most recent Lichess game already scanned

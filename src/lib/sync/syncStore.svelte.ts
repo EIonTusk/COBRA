@@ -212,9 +212,11 @@ class SyncStore {
 	 * Lichess study, or authenticating with the Cloudflare Worker), and decides
 	 * whether to push local data up or pull remote data down based on `mode`.
 	 * Caller (Settings UI) shows a chooser when the remote already has data.
+	 * `'auto'` (first-run welcome page) needs no chooser: it pulls (merging
+	 * per record) when the remote already has data, else pushes local data up.
 	 */
 	async enable(opts: {
-		mode: 'push-local' | 'pull-remote' | 'fresh';
+		mode: 'push-local' | 'pull-remote' | 'fresh' | 'auto';
 	}): Promise<{ remoteHasData: boolean }> {
 		const s = await getSettings();
 		const resolved = resolveBackend(s.sync);
@@ -260,8 +262,10 @@ class SyncStore {
 		};
 		await saveSettings({ ...s, sync: next }, { skipDirtyMark: true });
 
-		if (opts.mode === 'pull-remote' && remoteHasData) {
+		if ((opts.mode === 'pull-remote' || opts.mode === 'auto') && remoteHasData) {
 			await this.pullAll();
+		} else if (opts.mode === 'auto') {
+			await this.pushAll();
 		} else if (opts.mode === 'push-local') {
 			await this.pushAll();
 		} else if (opts.mode === 'fresh') {

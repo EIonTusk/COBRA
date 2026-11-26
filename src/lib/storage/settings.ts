@@ -105,15 +105,19 @@ export function defaultSettings(): AppSettings {
  */
 export function sanitizeSettingsForSync(
 	s: AppSettings
-): Omit<AppSettings, 'lichessApiToken' | 'lichessOAuth' | 'syncIdentityToken' | 'sync'> {
+): Omit<
+	AppSettings,
+	'lichessApiToken' | 'lichessOAuth' | 'syncIdentityToken' | 'sync' | 'welcomeSyncPending'
+> {
 	const copy = JSON.parse(JSON.stringify(s)) as AppSettings;
 	delete (copy as Partial<AppSettings>).lichessApiToken;
 	delete (copy as Partial<AppSettings>).lichessOAuth;
 	delete (copy as Partial<AppSettings>).syncIdentityToken;
 	delete (copy as Partial<AppSettings>).sync;
+	delete (copy as Partial<AppSettings>).welcomeSyncPending;
 	return copy as Omit<
 		AppSettings,
-		'lichessApiToken' | 'lichessOAuth' | 'syncIdentityToken' | 'sync'
+		'lichessApiToken' | 'lichessOAuth' | 'syncIdentityToken' | 'sync' | 'welcomeSyncPending'
 	>;
 }
 

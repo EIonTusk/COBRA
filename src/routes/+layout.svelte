@@ -14,6 +14,7 @@
 	import UpdateBanner from '$lib/pwa/UpdateBanner.svelte';
 	import { sync } from '$lib/sync/syncStore.svelte';
 	import { getSettings, saveSettings } from '$lib/storage/settings';
+	import { shouldShowWelcome } from '$lib/welcome';
 	import { scanAllAccounts, collectAccountsFromSettings } from '$lib/lichess/mistakeScan';
 	import { applySoundSettings } from '$lib/ui/sounds';
 	import { getEngine } from '$lib/stockfish/engine';
@@ -332,6 +333,11 @@
 		autoscanTriggered = true;
 		try {
 			const s = await getSettings();
+			// First launch without a Lichess account: open the welcome page
+			// once. Only from the home page, so shared links and the OAuth
+			// callback are never hijacked.
+			const atHome = page.url.pathname === `${base}/` || page.url.pathname === base;
+			if (atHome && shouldShowWelcome(s)) void goto(resolve('/welcome'));
 			applySoundSettings(s);
 			appearance.setBoard(s.boardTheme);
 			appearance.setPieces(s.pieceSet);
