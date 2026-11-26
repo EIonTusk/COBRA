@@ -417,10 +417,11 @@
 	const syncError = $derived(sync.error);
 	const syncTelemetry = $derived(sync.telemetry);
 	const syncBackend = $derived(sync.backend);
-	const syncHasDefaultUrl = $derived(sync.defaultCloudflareUrl != null);
+	const syncHostedAvailable = sync.hostedAvailable;
+	const syncUsesWorker = $derived(syncBackend === 'cobra' || syncBackend === 'custom');
 	const syncIdentityUser = $derived(settings?.syncIdentityToken?.username ?? null);
 	const syncIdentityConnected = $derived(!!settings?.syncIdentityToken?.accessToken);
-	let cfUrl = $state(sync.cloudflareUrl ?? '');
+	let customUrl = $state(sync.customUrl ?? '');
 	let syncBusyLocal = $state(false);
 
 	const lichessReadyForSync = $derived.by(() => {
@@ -1286,39 +1287,35 @@
 					<span class="eyebrow text-[var(--color-parchment-500)]">Multi-device</span>
 				</div>
 				<p class="mb-5 max-w-md font-serif text-sm text-[var(--color-parchment-400)] italic">
-					Mirror this device's repertoires, drill progress, mistakes, and dossier into a private
-					Lichess study. Sign in on another device with the same Lichess account, enable Sync there,
-					and the two stay in step. Off by default — your data only leaves this browser when you
-					turn it on.
+					Mirror this device's repertoires, drill progress, mistakes, and dossier to the COBRA DB, a
+					private Lichess study, or your own database. Sign in on another device with the same
+					Lichess account, enable Sync there with the same backend, and the two stay in step. Off by
+					default — your data only leaves this browser when you turn it on.
 				</p>
 
-				{#if !lichessReadyForSync}
-					<div
-						class="ink-panel mb-4 p-4 font-serif text-sm leading-relaxed text-[var(--color-parchment-300)]"
-					>
-						Connect Lichess (above, with study scopes) before enabling Sync. The feature uses a
-						private study under your Lichess account as the storage backend — there's no separate
-						COBRA server.
-					</div>
-				{:else if !syncEnabled}
+				{#if !syncEnabled}
 					<div class="ink-panel mb-4 p-4">
 						<div class="eyebrow mb-2">Backend</div>
 						<div class="flex flex-col gap-2 font-serif text-sm text-[var(--color-parchment-200)]">
-							<label class="flex cursor-pointer items-start gap-2">
+							<label
+								class="flex items-start gap-2"
+								class:cursor-pointer={syncHostedAvailable}
+								class:opacity-60={!syncHostedAvailable}
+							>
 								<input
 									type="radio"
 									name="sync-backend"
-									checked={syncBackend === 'cloudflare'}
-									onchange={() =>
-										sync.configureBackend('cloudflare', syncHasDefaultUrl ? undefined : cfUrl)}
+									checked={syncBackend === 'cobra'}
+									disabled={!syncHostedAvailable}
+									onchange={() => sync.configureBackend('cobra')}
 									class="mt-0.5 accent-[var(--color-brass-300)]"
 								/>
 								<span
-									>COBRA DB (via Cloudflare)
+									>COBRA DB
 									<span class="text-[var(--color-parchment-500)] italic"
-										>{syncHasDefaultUrl
-											? '— recommended; no size limit, synced via COBRA’s hosted database.'
-											: '— no size limit; needs your own Worker URL (self-host).'}</span
+										>{syncHostedAvailable
+											? '— recommended; no size limit, stored in COBRA’s hosted database.'
+											: '— not available in this build.'}</span
 									></span
 								>
 							</label>
@@ -1337,16 +1334,32 @@
 									></span
 								>
 							</label>
-							{#if syncBackend === 'cloudflare'}
-								{#if !syncHasDefaultUrl}
-									<input
-										type="url"
-										placeholder="https://cobra-sync.<account>.workers.dev"
-										bind:value={cfUrl}
-										onblur={() => sync.configureBackend('cloudflare', cfUrl)}
-										class="mt-1 w-full rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-xs text-[var(--color-parchment-100)]"
-									/>
-								{/if}
+							<label class="flex cursor-pointer items-start gap-2">
+								<input
+									type="radio"
+									name="sync-backend"
+									checked={syncBackend === 'custom'}
+									onchange={() => sync.configureBackend('custom', customUrl)}
+									class="mt-0.5 accent-[var(--color-brass-300)]"
+								/>
+								<span
+									>Your own database
+									<span class="text-[var(--color-parchment-500)] italic"
+										>— a COBRA Worker you host yourself.</span
+									></span
+								>
+							</label>
+							{#if syncBackend === 'custom'}
+								<input
+									type="url"
+									placeholder="https://cobra-sync.<account>.workers.dev"
+									aria-label="Your database address"
+									bind:value={customUrl}
+									onblur={() => sync.configureBackend('custom', customUrl)}
+									class="mt-1 w-full rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-xs text-[var(--color-parchment-100)]"
+								/>
+							{/if}
+							{#if syncUsesWorker}
 								<div class="mt-1 flex flex-wrap items-center gap-2">
 									{#if syncIdentityConnected}
 										<span class="font-serif text-xs text-[var(--color-parchment-400)] italic">
@@ -1377,13 +1390,25 @@
 							{/if}
 						</div>
 					</div>
+				{/if}
+
+				{#if syncBackend === 'lichess' && !lichessReadyForSync}
+					<div
+						class="ink-panel mb-4 p-4 font-serif text-sm leading-relaxed text-[var(--color-parchment-300)]"
+					>
+						Connect Lichess (above, with study scopes) before enabling Lichess study sync. It stores
+						your data in a private study under your Lichess account.
+					</div>
+				{:else if !syncEnabled}
 					<div class="ink-panel mb-4 flex flex-wrap items-center justify-between gap-3 p-4">
 						<div class="flex-1">
 							<div class="eyebrow mb-1">Status</div>
 							<p class="font-serif text-sm text-[var(--color-parchment-400)] italic">
-								{syncBackend === 'cloudflare'
-									? 'Disabled. Enabling will sync via the COBRA DB (Cloudflare).'
-									: 'Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA Sync".'}
+								{syncBackend === 'cobra'
+									? 'Disabled. Enabling will sync via the COBRA DB.'
+									: syncBackend === 'custom'
+										? 'Disabled. Enabling will sync via your own database.'
+										: 'Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA Sync".'}
 							</p>
 						</div>
 						<Button
@@ -1392,8 +1417,9 @@
 							onclick={enableSync}
 							disabled={syncBusyLocal ||
 								syncBusy ||
-								(syncBackend === 'cloudflare' &&
-									((!cfUrl && !syncHasDefaultUrl) || !syncIdentityConnected))}
+								(syncBackend === 'cobra' && !syncHostedAvailable) ||
+								(syncBackend === 'custom' && !customUrl.trim()) ||
+								(syncUsesWorker && !syncIdentityConnected)}
 						>
 							{syncBusyLocal ? 'Working…' : 'Enable Sync'}
 						</Button>

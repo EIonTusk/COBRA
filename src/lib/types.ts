@@ -500,17 +500,24 @@ export interface ScanAccount {
  * higher remote revision triggers the conflict prompt instead of a
  * silent overwrite.
  */
-export type SyncBackend = 'lichess' | 'cloudflare';
+export type SyncBackend = 'cobra' | 'lichess' | 'custom';
 
 export interface SyncSettings {
 	enabled: boolean;
 	/**
-	 * Which sync transport is active. `'lichess'` (default) stores blobs in a
-	 * private Lichess study; `'cloudflare'` uses a hosted Worker + D1 backend
-	 * (issue #68 — no per-chapter size ceiling). Chosen before enabling.
+	 * Which sync transport is active, chosen before enabling. `'cobra'` is the
+	 * hosted COBRA DB (Worker + D1, address baked in at build time and never
+	 * stored), `'lichess'` a private Lichess study, `'custom'` the user's own
+	 * Worker at `customWorkerUrl`. Read through `resolveBackend()`
+	 * (`$lib/sync/backend`), which also maps the legacy `'cloudflare'` value.
 	 */
-	backend?: SyncBackend;
-	/** Worker origin when `backend === 'cloudflare'`. */
+	backend?: SyncBackend | 'cloudflare';
+	/** The user's own Worker origin, used when `backend === 'custom'`. */
+	customWorkerUrl?: string;
+	/**
+	 * @deprecated Legacy Worker origin from the single "Cloudflare" option.
+	 * Read only for migration by `resolveBackend()`; never written.
+	 */
 	cloudflareUrl?: string;
 	studyId?: string;
 	deviceId?: string;

@@ -165,4 +165,25 @@ describe('CloudflareTransport', () => {
 		expect(pulled).toBeNull();
 		expect(w.authCalls()).toBeGreaterThanOrEqual(1);
 	});
+
+	it('surfaces the Worker error message when sign-in fails', async () => {
+		const failing = vi.fn(async () =>
+			jsonRes({ error: 'D1_ERROR: no such table: users' }, 500)
+		) as unknown as typeof fetch;
+		await expect(transport(failing).connect()).rejects.toThrow(
+			'Sync sign-in failed: HTTP 500 (D1_ERROR: no such table: users)'
+		);
+	});
+
+	it('fails a pull on a non-JSON error page instead of reading it as empty', async () => {
+		const w = makeFakeWorker();
+		const broken = vi.fn(async (url: string, init?: RequestInit) => {
+			if (new URL(url).pathname === '/sync') return new Response('Bad gateway', { status: 502 });
+			return (w.fetchImpl as unknown as (u: string, i?: RequestInit) => Promise<Response>)(
+				url,
+				init
+			);
+		}) as unknown as typeof fetch;
+		await expect(transport(broken).pullAll()).rejects.toThrow('Sync pull failed: HTTP 502');
+	});
 });

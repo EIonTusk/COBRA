@@ -612,9 +612,8 @@ elsewhere keep your progress; everything else starts fresh. Anyone
 signed in can report a publication; three reports hide it until a
 moderator reviews it.
 
-Community openings use the same hosted backend as Cloudflare sync, so
-they are available when the build ships one (or you set a Worker URL in
-Settings).
+Community openings use the COBRA DB, so they are available when the
+build ships it (or when you sync to your own database).
 
 ### Sync a repertoire with a Lichess study
 
@@ -643,17 +642,22 @@ default. Your data still lives in the browser; sync is only a
 transport, so the app keeps working offline and needs no account
 beyond Lichess.
 
-Two backends to choose from:
+Three backends to choose from:
 
+- **COBRA DB** (default) — the hosted backend, with no size limit.
+  It authenticates with a _scopeless_ Lichess token (identity only —
+  it can't touch your Lichess account) and keeps each user's data
+  isolated. Just connect your sync identity and enable. Official
+  builds get its address from the `COBRA_SYNC_URL` repository
+  variable at build time; builds without it don't offer this option.
 - **Lichess study** — zero setup; your data rides inside a private
   Lichess study under your account. Great for smaller repertoires, but
   Lichess caps each study chapter's size, so very large repertoires
   can outgrow it.
-- **Cloudflare (hosted)** — a small hosted backend with no size limit.
-  It authenticates with a _scopeless_ Lichess token (identity only —
-  it can't touch your Lichess account) and keeps each user's data
-  isolated. If the build ships a default backend you just connect and
-  enable; self-hosters can run their own (see `worker/`).
+- **Your own database** — the same backend, self-hosted: deploy the
+  Worker in `worker/` and enter its address. Open `/health` on your
+  Worker to check the setup: it reports missing database tables (run
+  `npm run schema`) and a missing `JWT_SECRET`.
 
 Pulls merge per-record — the more recent review wins per card, edges
 union — so drilling on two devices the same day doesn't lose progress;

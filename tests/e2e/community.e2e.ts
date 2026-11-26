@@ -93,7 +93,10 @@ async function signIn(page: Page, user: string) {
 			const g = store.get('root');
 			g.onsuccess = () => resolve(g.result);
 		});
-		store.put({ ...row, sync: { ...((row.sync as object) ?? {}), cloudflareUrl: worker } });
+		store.put({
+			...row,
+			sync: { ...((row.sync as object) ?? {}), backend: 'custom', customWorkerUrl: worker }
+		});
 		await new Promise((resolve) => (tx.oncomplete = resolve));
 		db.close();
 	}, WORKER);
