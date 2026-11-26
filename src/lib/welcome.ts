@@ -15,7 +15,7 @@ export type WelcomeStep = 'intro' | 'identity' | 'enable' | 'done';
 
 export function welcomeStep(s: AppSettings, hostedAvailable: boolean): WelcomeStep {
 	if (!effectiveLichessToken(s)) return 'intro';
-	if (!s.welcomeSyncPending) return 'done';
+	if (!s.syncEnablePending) return 'done';
 	if (hostedAvailable && !s.syncIdentityToken?.accessToken) return 'identity';
 	return 'enable';
 }

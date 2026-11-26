@@ -26,13 +26,13 @@ describe('welcomeStep', () => {
 	});
 
 	it('asks for the sync sign-in before turning on COBRA DB', () => {
-		const s = settings({ lichessOAuth: token(), welcomeSyncPending: true });
+		const s = settings({ lichessOAuth: token(), syncEnablePending: true });
 		expect(welcomeStep(s, true)).toBe('identity');
 		expect(welcomeStep({ ...s, syncIdentityToken: token() }, true)).toBe('enable');
 	});
 
 	it('needs no second sign-in when sync goes to a Lichess study', () => {
-		const s = settings({ lichessOAuth: token(), welcomeSyncPending: true });
+		const s = settings({ lichessOAuth: token(), syncEnablePending: true });
 		expect(welcomeStep(s, false)).toBe('enable');
 	});
 });

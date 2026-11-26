@@ -200,6 +200,14 @@
 		storedBaselines = await listStoredBaselines();
 		setRuntimeBaselines(storedBaselines);
 
+		// Back from the sync sign-in that Enable Sync started: finish turning
+		// sync on. A cancelled sign-in just clears the flag.
+		if (s.syncEnablePending) {
+			await sync.init();
+			await setSyncEnablePending(false);
+			if (s.syncIdentityToken?.accessToken && !sync.enabled) void enableSync();
+		}
+
 		// Hash-anchor scroll fixup: the page body is gated by `{#if settings}`,
 		// so the target section (e.g. `#lichess`) doesn't exist on first paint.
 		// SvelteKit's built-in scroll-on-navigate has already given up by the
@@ -419,7 +427,6 @@
 	const syncBackend = $derived(sync.backend);
 	const syncHostedAvailable = sync.hostedAvailable;
 	const syncUsesWorker = $derived(syncBackend === 'cobra' || syncBackend === 'custom');
-	const syncIdentityUser = $derived(settings?.syncIdentityToken?.username ?? null);
 	const syncIdentityConnected = $derived(!!settings?.syncIdentityToken?.accessToken);
 	let customUrl = $state(sync.customUrl ?? '');
 	let syncBusyLocal = $state(false);
@@ -444,8 +451,30 @@
 		}
 	}
 
+	/** Persist the "finish turning sync on after the sign-in" flag without
+	 *  making unrelated unsaved edits look saved (or saved ones look dirty). */
+	async function setSyncEnablePending(pending: boolean) {
+		const stored = await getSettings();
+		await saveSettings({ ...stored, syncEnablePending: pending }, { skipDirtyMark: true });
+		if (settings) settings = { ...settings, syncEnablePending: pending };
+		if (savedSnapshot) {
+			savedSnapshot = JSON.stringify({ ...JSON.parse(savedSnapshot), syncEnablePending: pending });
+		}
+	}
+
+	/**
+	 * One button for turning sync on. COBRA DB and your own database sign in
+	 * with a separate scopeless Lichess token, so when that is missing we get
+	 * it first: Lichess asks for approval, returns here, and onMount finishes
+	 * the job.
+	 */
 	async function enableSync() {
 		if (!settings) return;
+		if (syncUsesWorker && !syncIdentityConnected) {
+			await setSyncEnablePending(true);
+			await startOAuth([], `${base}/settings#sync`, 'identity');
+			return;
+		}
 		syncBusyLocal = true;
 		try {
 			// First: probe-only enable so we can tell whether remote already
@@ -458,10 +487,15 @@
 				throw e;
 			});
 			if (remoteHasData) {
+				const where =
+					syncBackend === 'lichess'
+						? 'A COBRA Sync study with chapters already exists on Lichess.'
+						: syncBackend === 'cobra'
+							? 'The COBRA DB already has synced data for your account.'
+							: 'Your database already has synced data for your account.';
 				const useRemote = await confirmDialog({
-					title: 'Existing data on Lichess',
-					message:
-						'A COBRA Sync study with chapters already exists on Lichess. Pull that data down (replaces local), or overwrite the remote with this device?',
+					title: 'Existing synced data',
+					message: `${where} Pull that data down (replaces local), or overwrite the remote with this device?`,
 					confirmLabel: 'Pull remote',
 					cancelLabel: 'Overwrite remote'
 				});
@@ -1062,35 +1096,6 @@
 										class="mt-1 w-full rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-xs text-[var(--color-parchment-100)]"
 									/>
 								{/if}
-								{#if syncUsesWorker}
-									<div class="mt-1 flex flex-wrap items-center gap-2">
-										{#if syncIdentityConnected}
-											<span class="font-serif text-xs text-[var(--color-parchment-400)] italic">
-												Sync identity connected{syncIdentityUser ? ` as ${syncIdentityUser}` : ''}.
-											</span>
-											<Button
-												variant="ghost"
-												size="sm"
-												onclick={() =>
-													startOAuth([], lichessReturnTo ?? `${base}/settings#sync`, 'identity')}
-											>
-												Reconnect
-											</Button>
-										{:else}
-											<Button
-												variant="secondary"
-												size="sm"
-												onclick={() =>
-													startOAuth([], lichessReturnTo ?? `${base}/settings#sync`, 'identity')}
-											>
-												Connect sync identity
-											</Button>
-											<span class="font-serif text-xs text-[var(--color-parchment-500)] italic">
-												A scopeless Lichess token — the backend can't act on your Lichess account.
-											</span>
-										{/if}
-									</div>
-								{/if}
 							</div>
 						</div>
 					{/if}
@@ -1112,6 +1117,9 @@
 										: syncBackend === 'custom'
 											? 'Disabled. Enabling will sync via your own database.'
 											: 'Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA Sync".'}
+									{#if syncUsesWorker && !syncIdentityConnected}
+										Lichess first asks you to approve a sign-in that only proves who you are.
+									{/if}
 								</p>
 							</div>
 							<Button
@@ -1121,8 +1129,7 @@
 								disabled={syncBusyLocal ||
 									syncBusy ||
 									(syncBackend === 'cobra' && !syncHostedAvailable) ||
-									(syncBackend === 'custom' && !customUrl.trim()) ||
-									(syncUsesWorker && !syncIdentityConnected)}
+									(syncBackend === 'custom' && !customUrl.trim())}
 							>
 								{syncBusyLocal ? 'Working…' : 'Enable Sync'}
 							</Button>

@@ -37,11 +37,14 @@
 		}
 		step = next;
 		if (next === 'enable') await turnOnSync();
+		// Straight on to the second approval: the screen explains it, and the
+		// button stays as a fallback if the redirect is blocked.
+		if (next === 'identity') await connectSyncIdentity();
 	}
 
 	async function connectLichess(): Promise<void> {
 		busy = true;
-		await update({ welcomeSeen: true, welcomeSyncPending: wantSync });
+		await update({ welcomeSeen: true, syncEnablePending: wantSync });
 		await startOAuth([...ALL_SCOPES], RETURN_TO);
 		busy = false;
 	}
@@ -53,7 +56,7 @@
 	}
 
 	async function skip(): Promise<void> {
-		await update({ welcomeSeen: true, welcomeSyncPending: false });
+		await update({ welcomeSeen: true, syncEnablePending: false });
 		await goto(resolve('/'));
 	}
 
@@ -62,7 +65,7 @@
 		try {
 			await sync.configureBackend(sync.hostedAvailable ? 'cobra' : 'lichess');
 			await sync.enable({ mode: 'auto' });
-			await update({ welcomeSyncPending: false });
+			await update({ syncEnablePending: false });
 			step = 'ready';
 		} catch (e) {
 			errorMessage = e instanceof Error ? e.message : String(e);
@@ -119,8 +122,8 @@
 	{:else if step === 'identity'}
 		<h1 class="mb-4 font-serif text-3xl">One more approval</h1>
 		<p class="mb-6 font-serif text-sm text-[var(--color-parchment-300)]">
-			Lichess is connected. To sync, Lichess asks once more, this time for a sign-in that only
-			proves who you are. The COBRA DB never gets a token that can act on your Lichess account.
+			Lichess is connected. For sync, Lichess asks once more, for a sign-in that only proves who you
+			are, so the COBRA DB never gets a token that can act on your Lichess account.
 		</p>
 		<div class="flex flex-wrap items-center gap-3">
 			<Button variant="primary" onclick={connectSyncIdentity} disabled={busy}>

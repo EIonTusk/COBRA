@@ -229,7 +229,7 @@ class SyncStore {
 			const baseUrl = resolved.workerUrl ?? workerMissing(backend);
 			const idToken = s.syncIdentityToken?.accessToken;
 			if (!idToken) {
-				throw new Error('Connect a sync identity (Settings) before enabling sync.');
+				throw new Error('Sync sign-in is missing. Press Enable Sync in Settings to sign in.');
 			}
 			const transport = new CloudflareTransport({
 				baseUrl,
@@ -690,7 +690,10 @@ class SyncStore {
 		if (usesWorker(resolved.backend)) {
 			const baseUrl = resolved.workerUrl ?? workerMissing(resolved.backend);
 			const idToken = settings.syncIdentityToken?.accessToken;
-			if (!idToken) throw new Error('Connect a sync identity (Settings) for Cloudflare sync.');
+			if (!idToken)
+				throw new Error(
+					'Sync sign-in is missing. Turn sync off and on again in Settings to sign in.'
+				);
 			const key = `${baseUrl} ${idToken} ${this.#deviceId}`;
 			if (!this.#cfTransport || this.#cfKey !== key) {
 				this.#cfTransport = new CloudflareTransport({

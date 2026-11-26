@@ -590,10 +590,11 @@ export interface AppSettings {
 	 */
 	welcomeSeen?: boolean;
 	/**
-	 * The user ticked "sync" on the welcome page and is part-way through the
-	 * Lichess sign-ins; /welcome turns sync on once they are done.
+	 * The user asked to turn sync on (the welcome page checkbox, or Enable
+	 * Sync in Settings) and is part-way through the Lichess sign-ins. The page
+	 * the sign-in returns to finishes turning sync on. Device-local.
 	 */
-	welcomeSyncPending?: boolean;
+	syncEnablePending?: boolean;
 	lastMistakeScanAt?: number;
 	/**
 	 * Created-at timestamp of the most recent Lichess game already scanned
