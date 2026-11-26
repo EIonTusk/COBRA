@@ -200,6 +200,14 @@
 		storedBaselines = await listStoredBaselines();
 		setRuntimeBaselines(storedBaselines);
 
+		// Back from the sync sign-in that Enable Sync started: finish turning
+		// sync on. A cancelled sign-in just clears the flag.
+		if (s.syncEnablePending) {
+			await sync.init();
+			await setSyncEnablePending(false);
+			if (s.syncIdentityToken?.accessToken && !sync.enabled) void enableSync();
+		}
+
 		// Hash-anchor scroll fixup: the page body is gated by `{#if settings}`,
 		// so the target section (e.g. `#lichess`) doesn't exist on first paint.
 		// SvelteKit's built-in scroll-on-navigate has already given up by the
@@ -417,10 +425,10 @@
 	const syncError = $derived(sync.error);
 	const syncTelemetry = $derived(sync.telemetry);
 	const syncBackend = $derived(sync.backend);
-	const syncHasDefaultUrl = $derived(sync.defaultCloudflareUrl != null);
-	const syncIdentityUser = $derived(settings?.syncIdentityToken?.username ?? null);
+	const syncHostedAvailable = sync.hostedAvailable;
+	const syncUsesWorker = $derived(syncBackend === 'cobra' || syncBackend === 'custom');
 	const syncIdentityConnected = $derived(!!settings?.syncIdentityToken?.accessToken);
-	let cfUrl = $state(sync.cloudflareUrl ?? '');
+	let customUrl = $state(sync.customUrl ?? '');
 	let syncBusyLocal = $state(false);
 
 	const lichessReadyForSync = $derived.by(() => {
@@ -443,8 +451,30 @@
 		}
 	}
 
+	/** Persist the "finish turning sync on after the sign-in" flag without
+	 *  making unrelated unsaved edits look saved (or saved ones look dirty). */
+	async function setSyncEnablePending(pending: boolean) {
+		const stored = await getSettings();
+		await saveSettings({ ...stored, syncEnablePending: pending }, { skipDirtyMark: true });
+		if (settings) settings = { ...settings, syncEnablePending: pending };
+		if (savedSnapshot) {
+			savedSnapshot = JSON.stringify({ ...JSON.parse(savedSnapshot), syncEnablePending: pending });
+		}
+	}
+
+	/**
+	 * One button for turning sync on. COBRA DB and your own database sign in
+	 * with a separate scopeless Lichess token, so when that is missing we get
+	 * it first: Lichess asks for approval, returns here, and onMount finishes
+	 * the job.
+	 */
 	async function enableSync() {
 		if (!settings) return;
+		if (syncUsesWorker && !syncIdentityConnected) {
+			await setSyncEnablePending(true);
+			await startOAuth([], `${base}/settings#sync`, 'identity');
+			return;
+		}
 		syncBusyLocal = true;
 		try {
 			// First: probe-only enable so we can tell whether remote already
@@ -457,10 +487,15 @@
 				throw e;
 			});
 			if (remoteHasData) {
+				const where =
+					syncBackend === 'lichess'
+						? 'A COBRA Sync study with chapters already exists on Lichess.'
+						: syncBackend === 'cobra'
+							? 'The COBRA DB already has synced data for your account.'
+							: 'Your database already has synced data for your account.';
 				const useRemote = await confirmDialog({
-					title: 'Existing data on Lichess',
-					message:
-						'A COBRA Sync study with chapters already exists on Lichess. Pull that data down (replaces local), or overwrite the remote with this device?',
+					title: 'Existing synced data',
+					message: `${where} Pull that data down (replaces local), or overwrite the remote with this device?`,
 					confirmLabel: 'Pull remote',
 					cancelLabel: 'Overwrite remote'
 				});
@@ -797,245 +832,513 @@
 
 			<Separator />
 
-			<!-- Lichess section -->
-			<section id="lichess" class="scroll-mt-24" style:--i="4">
-				<div class="mb-4 flex items-baseline gap-3">
-					<h2 class="font-serif text-2xl">Lichess</h2>
-					<span class="eyebrow text-[var(--color-parchment-500)]">Explorer &amp; account</span>
+			<!-- Accounts & sync: the Lichess sign-in, multi-device sync, and the
+			     accounts the mistake scan sweeps, grouped so setup lives in one place. -->
+			<div
+				id="accounts"
+				class="relative scroll-mt-24 space-y-12 rounded-[6px] border border-[var(--color-ink-700)] px-4 pt-8 pb-6 sm:px-6"
+				style:--i="4"
+			>
+				<div
+					class="eyebrow absolute -top-2 left-3 bg-[var(--color-ink-950)] px-2 text-[var(--color-brass-300)]"
+				>
+					Accounts &amp; sync
 				</div>
 
-				<div class="ink-panel mb-5 flex items-start justify-between gap-3 p-4">
-					<div class="flex-1">
-						<div class="eyebrow mb-1">Connected account</div>
-						{#if tokenIsFresh(settings.lichessOAuth)}
-							<p class="font-mono text-sm">
-								<span class="text-[var(--color-olive-300)]">●</span>
-								{settings.lichessOAuth?.username ?? 'Connected'}
-							</p>
-							<p class="mt-1 font-serif text-xs text-[var(--color-parchment-500)] italic">
-								Used for the explorer, for fetching your games, and — with study access granted —
-								for syncing repertoires to Lichess studies.
-							</p>
-							{#if !tokenHasStudyScopes(settings.lichessOAuth)}
-								<p class="mt-2 font-serif text-xs text-[var(--color-brass-300)] italic">
-									Study sync is not authorised on the current token. Reconnect to enable linking
-									repertoires to private studies.
-								</p>
-							{/if}
-							{#if !tokenHasChallengeScopes(settings.lichessOAuth)}
-								<p class="mt-2 font-serif text-xs text-[var(--color-brass-300)] italic">
-									Bot challenges (Stockfish / Maia) need additional scopes. Reconnect to enable
-									them.
-								</p>
-							{/if}
-						{:else}
-							<p class="font-serif text-sm text-[var(--color-parchment-400)] italic">
-								Not connected. Sign in for the explorer, autobuild, and study sync.
-							</p>
-						{/if}
+				<!-- Lichess section -->
+				<section id="lichess" class="scroll-mt-24" style:--i="4">
+					<div class="mb-4 flex items-baseline gap-3">
+						<h2 class="font-serif text-2xl">Lichess</h2>
+						<span class="eyebrow text-[var(--color-parchment-500)]">Explorer &amp; account</span>
 					</div>
-					{#if tokenIsFresh(settings.lichessOAuth)}
-						{#if !tokenHasStudyScopes(settings.lichessOAuth) || !tokenHasChallengeScopes(settings.lichessOAuth)}
+
+					<div class="ink-panel mb-5 flex items-start justify-between gap-3 p-4">
+						<div class="flex-1">
+							<div class="eyebrow mb-1">Connected account</div>
+							{#if tokenIsFresh(settings.lichessOAuth)}
+								<p class="font-mono text-sm">
+									<span class="text-[var(--color-olive-300)]">●</span>
+									{settings.lichessOAuth?.username ?? 'Connected'}
+								</p>
+								<p class="mt-1 font-serif text-xs text-[var(--color-parchment-500)] italic">
+									Used for the explorer, for fetching your games, and — with study access granted —
+									for syncing repertoires to Lichess studies.
+								</p>
+								{#if !tokenHasStudyScopes(settings.lichessOAuth)}
+									<p class="mt-2 font-serif text-xs text-[var(--color-brass-300)] italic">
+										Study sync is not authorised on the current token. Reconnect to enable linking
+										repertoires to private studies.
+									</p>
+								{/if}
+								{#if !tokenHasChallengeScopes(settings.lichessOAuth)}
+									<p class="mt-2 font-serif text-xs text-[var(--color-brass-300)] italic">
+										Bot challenges (Stockfish / Maia) need additional scopes. Reconnect to enable
+										them.
+									</p>
+								{/if}
+							{:else}
+								<p class="font-serif text-sm text-[var(--color-parchment-400)] italic">
+									Not connected. Sign in for the explorer, autobuild, and study sync.
+								</p>
+							{/if}
+						</div>
+						{#if tokenIsFresh(settings.lichessOAuth)}
+							{#if !tokenHasStudyScopes(settings.lichessOAuth) || !tokenHasChallengeScopes(settings.lichessOAuth)}
+								<Button
+									variant="primary"
+									size="sm"
+									onclick={() =>
+										startOAuth([...ALL_SCOPES], lichessReturnTo ?? `${base}/settings#lichess`)}
+								>
+									Reconnect
+								</Button>
+							{/if}
+							<Button
+								variant="outline"
+								size="sm"
+								onclick={async () => {
+									await disconnectOAuth();
+									settings = await getSettings();
+									savedSnapshot = JSON.stringify(settings);
+								}}
+							>
+								Disconnect
+							</Button>
+						{:else}
 							<Button
 								variant="primary"
 								size="sm"
-								onclick={() =>
-									startOAuth([...ALL_SCOPES], lichessReturnTo ?? `${base}/settings#lichess`)}
+								onclick={() => startOAuth([...ALL_SCOPES], lichessReturnTo)}
 							>
-								Reconnect
+								Connect Lichess
 							</Button>
 						{/if}
-						<Button
-							variant="outline"
-							size="sm"
-							onclick={async () => {
-								await disconnectOAuth();
-								settings = await getSettings();
-								savedSnapshot = JSON.stringify(settings);
-							}}
-						>
-							Disconnect
-						</Button>
-					{:else}
-						<Button
-							variant="primary"
-							size="sm"
-							onclick={() => startOAuth([...ALL_SCOPES], lichessReturnTo)}
-						>
-							Connect Lichess
-						</Button>
-					{/if}
-				</div>
+					</div>
 
-				<div>
-					<Label for="lichess-token">Or paste a personal API token</Label>
-					<!--
-						Render as type="text" — not type="password" — so Firefox's
-						password manager doesn't claim it as a credential (and
-						stops flagging nearby number inputs as the "username"
-						slot). Visual masking comes from the CSS class below,
-						which uses `-webkit-text-security` (supported in current
-						Chromium and Firefox). Click the eye toggle to reveal.
-					-->
-					<div class="relative">
-						<Input
-							id="lichess-token"
-							name="cobra-api-key"
-							type="text"
-							autocomplete="off"
-							data-form-type="other"
-							data-lpignore="true"
-							data-1p-ignore="true"
-							bind:value={settings.lichessApiToken}
-							placeholder="lip_..."
-							class={cn('pr-16 font-mono text-[13px]', !showToken && 'cobra-token-masked')}
-						/>
-						<button
-							type="button"
-							onclick={() => (showToken = !showToken)}
-							class="eyebrow absolute top-1/2 right-2 -translate-y-1/2 rounded px-2 py-1 text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]"
-							aria-label={showToken ? 'Hide token' : 'Show token'}
-						>
-							{showToken ? 'Hide' : 'Show'}
-						</button>
-					</div>
-					<p
-						class="mt-2 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
-					>
-						Used only when no OAuth account is connected. Generate one at
-						<a
-							href="https://lichess.org/account/oauth/token/create?description=Opening+Trainer"
-							target="_blank"
-							rel="noopener"
-							class="inline-flex items-center gap-0.5 text-[var(--color-brass-300)] underline underline-offset-2 hover:text-[var(--color-brass-200)]"
-						>
-							lichess.org<ExternalLink class="size-2.5" />
-						</a>
-						— no scopes needed. Stored only in this browser.
-					</p>
-				</div>
-				<div class="mt-5 grid gap-5 sm:grid-cols-2">
 					<div>
-						<Label for="speeds">Game speeds</Label>
-						<MultiSelect
-							id="speeds"
-							options={SPEED_OPTIONS}
-							selected={settings.explorerSpeeds}
-							onchange={(next) => (settings!.explorerSpeeds = next)}
-							placeholder="Any speed"
-						/>
-					</div>
-					<div>
-						<Label for="ratings">Rating brackets</Label>
-						<MultiSelect
-							id="ratings"
-							options={RATING_OPTIONS}
-							selected={settings.explorerRatings}
-							onchange={(next) => (settings!.explorerRatings = next)}
-							placeholder="Any rating"
-						/>
-					</div>
-				</div>
-
-				<label
-					class="mt-6 flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
-				>
-					<input
-						type="checkbox"
-						checked={settings.useLichessServerEval !== false}
-						onchange={(e) =>
-							(settings!.useLichessServerEval = (e.currentTarget as HTMLInputElement).checked)}
-						class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
-					/>
-					<div class="min-w-0 flex-1">
-						<div class="flex items-baseline gap-2">
-							<span class="font-serif text-sm text-[var(--color-parchment-100)]"
-								>Use Lichess-side engine evals when available</span
+						<Label for="lichess-token">Or paste a personal API token</Label>
+						<!--
+							Render as type="text" — not type="password" — so Firefox's
+							password manager doesn't claim it as a credential (and
+							stops flagging nearby number inputs as the "username"
+							slot). Visual masking comes from the CSS class below,
+							which uses `-webkit-text-security` (supported in current
+							Chromium and Firefox). Click the eye toggle to reveal.
+						-->
+						<div class="relative">
+							<Input
+								id="lichess-token"
+								name="cobra-api-key"
+								type="text"
+								autocomplete="off"
+								data-form-type="other"
+								data-lpignore="true"
+								data-1p-ignore="true"
+								bind:value={settings.lichessApiToken}
+								placeholder="lip_..."
+								class={cn('pr-16 font-mono text-[13px]', !showToken && 'cobra-token-masked')}
+							/>
+							<button
+								type="button"
+								onclick={() => (showToken = !showToken)}
+								class="eyebrow absolute top-1/2 right-2 -translate-y-1/2 rounded px-2 py-1 text-[var(--color-parchment-400)] transition-colors hover:bg-[var(--color-ink-800)] hover:text-[var(--color-parchment-100)]"
+								aria-label={showToken ? 'Hide token' : 'Show token'}
 							>
+								{showToken ? 'Hide' : 'Show'}
+							</button>
 						</div>
 						<p
-							class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+							class="mt-2 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
 						>
-							For Lichess games that have already been analysed on the site (the "Request computer
-							analysis" button), Cobra adopts Lichess's per-move evals and skips the local Stockfish
-							pass on those moves. Moves without server evals fall back to local analysis unchanged.
-							No effect on chess.com games.
+							Used only when no OAuth account is connected. Generate one at
+							<a
+								href="https://lichess.org/account/oauth/token/create?description=Opening+Trainer"
+								target="_blank"
+								rel="noopener"
+								class="inline-flex items-center gap-0.5 text-[var(--color-brass-300)] underline underline-offset-2 hover:text-[var(--color-brass-200)]"
+							>
+								lichess.org<ExternalLink class="size-2.5" />
+							</a>
+							— no scopes needed. Stored only in this browser.
 						</p>
 					</div>
-				</label>
-			</section>
+					<div class="mt-5 grid gap-5 sm:grid-cols-2">
+						<div>
+							<Label for="speeds">Game speeds</Label>
+							<MultiSelect
+								id="speeds"
+								options={SPEED_OPTIONS}
+								selected={settings.explorerSpeeds}
+								onchange={(next) => (settings!.explorerSpeeds = next)}
+								placeholder="Any speed"
+							/>
+						</div>
+						<div>
+							<Label for="ratings">Rating brackets</Label>
+							<MultiSelect
+								id="ratings"
+								options={RATING_OPTIONS}
+								selected={settings.explorerRatings}
+								onchange={(next) => (settings!.explorerRatings = next)}
+								placeholder="Any rating"
+							/>
+						</div>
+					</div>
 
-			<Separator />
-
-			<!-- Accounts for mistake scanning -->
-			<section style:--i="4b">
-				<div class="mb-4 flex items-baseline gap-3">
-					<h2 class="font-serif text-2xl">Additional accounts</h2>
-					<span class="eyebrow text-[var(--color-parchment-500)]"> Lichess &amp; chess.com </span>
-				</div>
-				<p class="mb-4 max-w-md font-serif text-sm text-[var(--color-parchment-400)] italic">
-					Usernames swept by the hourly mistake auto-scan — across both platforms. Your connected
-					Lichess account is pinned at the top; add more below.
-				</p>
-
-				{#if displayedScanAccounts.length > 0}
-					<ul
-						class="mb-4 divide-y divide-[var(--color-ink-800)] border-y border-[var(--color-ink-800)]"
+					<label
+						class="mt-6 flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
 					>
-						{#each displayedScanAccounts as a (`${a.source}:${a.username}`)}
-							<li
-								in:slide={{ duration: 220 }}
-								animate:flip={{ duration: 220 }}
-								class="flex items-center gap-3 py-2"
-							>
-								<span
-									class="flex w-5 shrink-0 items-center justify-center"
-									class:text-[var(--color-brass-300)]={a.source === 'lichess'}
-									aria-label={a.source === 'lichess' ? 'Lichess' : 'chess.com'}
-									title={a.source === 'lichess' ? 'Lichess' : 'chess.com'}
+						<input
+							type="checkbox"
+							checked={settings.useLichessServerEval !== false}
+							onchange={(e) =>
+								(settings!.useLichessServerEval = (e.currentTarget as HTMLInputElement).checked)}
+							class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
+						/>
+						<div class="min-w-0 flex-1">
+							<div class="flex items-baseline gap-2">
+								<span class="font-serif text-sm text-[var(--color-parchment-100)]"
+									>Use Lichess-side engine evals when available</span
 								>
-									<SourceIcon source={a.source} />
-								</span>
-								<span class="flex-1 truncate font-mono text-sm">{a.username}</span>
-								{#if a.pinned}
-									<span class="eyebrow text-[var(--color-olive-300)]">Connected</span>
-								{:else}
-									<button
-										type="button"
-										onclick={() => removeScanAccount(a)}
-										class="eyebrow text-[var(--color-parchment-500)] transition-colors hover:text-[var(--color-oxblood-300)]"
-									>
-										Remove
-									</button>
-								{/if}
-							</li>
-						{/each}
-					</ul>
-				{/if}
+							</div>
+							<p
+								class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+							>
+								For Lichess games that have already been analysed on the site (the "Request computer
+								analysis" button), Cobra adopts Lichess's per-move evals and skips the local
+								Stockfish pass on those moves. Moves without server evals fall back to local
+								analysis unchanged. No effect on chess.com games.
+							</p>
+						</div>
+					</label>
+				</section>
 
-				<div class="flex flex-wrap items-end gap-2">
-					<SourceUsernameInput
-						id="new-scan-account"
-						class="flex-1"
-						bind:source={newAccountSource}
-						bind:username={newAccountUsername}
-						onkeydown={(e: KeyboardEvent) => {
-							if (e.key === 'Enter') {
-								e.preventDefault();
-								addScanAccount();
-							}
-						}}
-					/>
-					<Button
-						variant="secondary"
-						size="sm"
-						onclick={addScanAccount}
-						disabled={!newAccountUsername.trim()}
-					>
-						Add
-					</Button>
-				</div>
-			</section>
+				<Separator />
+
+				<!-- Sync (Beta) section -->
+				<section id="sync" class="scroll-mt-24" style:--i="4d">
+					<div class="mb-4 flex items-baseline gap-3">
+						<h2 class="font-serif text-2xl">Sync</h2>
+						<Badge variant="brass">Beta</Badge>
+						<span class="eyebrow text-[var(--color-parchment-500)]">Multi-device</span>
+					</div>
+					<p class="mb-5 max-w-md font-serif text-sm text-[var(--color-parchment-400)] italic">
+						Mirror this device's repertoires, drill progress, mistakes, and dossier to the COBRA DB,
+						a private Lichess study, or your own database. Sign in on another device with the same
+						Lichess account, enable Sync there with the same backend, and the two stay in step. Off
+						by default — your data only leaves this browser when you turn it on.
+					</p>
+
+					{#if !syncEnabled}
+						<div class="ink-panel mb-4 p-4">
+							<div class="eyebrow mb-2">Backend</div>
+							<div class="flex flex-col gap-2 font-serif text-sm text-[var(--color-parchment-200)]">
+								<label
+									class="flex items-start gap-2"
+									class:cursor-pointer={syncHostedAvailable}
+									class:opacity-60={!syncHostedAvailable}
+								>
+									<input
+										type="radio"
+										name="sync-backend"
+										checked={syncBackend === 'cobra'}
+										disabled={!syncHostedAvailable}
+										onchange={() => sync.configureBackend('cobra')}
+										class="mt-0.5 accent-[var(--color-brass-300)]"
+									/>
+									<span
+										>COBRA DB
+										<span class="text-[var(--color-parchment-500)] italic"
+											>{syncHostedAvailable
+												? '— recommended; no size limit, stored in COBRA’s hosted database.'
+												: '— not available in this build.'}</span
+										></span
+									>
+								</label>
+								<label class="flex cursor-pointer items-start gap-2">
+									<input
+										type="radio"
+										name="sync-backend"
+										checked={syncBackend === 'lichess'}
+										onchange={() => sync.configureBackend('lichess')}
+										class="mt-0.5 accent-[var(--color-brass-300)]"
+									/>
+									<span
+										>Lichess study
+										<span class="text-[var(--color-parchment-500)] italic"
+											>— zero setup; stored in a private Lichess study (best for smaller
+											repertoires).</span
+										></span
+									>
+								</label>
+								<label class="flex cursor-pointer items-start gap-2">
+									<input
+										type="radio"
+										name="sync-backend"
+										checked={syncBackend === 'custom'}
+										onchange={() => sync.configureBackend('custom', customUrl)}
+										class="mt-0.5 accent-[var(--color-brass-300)]"
+									/>
+									<span
+										>Your own database
+										<span class="text-[var(--color-parchment-500)] italic"
+											>— a COBRA Worker you host yourself.</span
+										></span
+									>
+								</label>
+								{#if syncBackend === 'custom'}
+									<input
+										type="url"
+										placeholder="https://cobra-sync.<account>.workers.dev"
+										aria-label="Your database address"
+										bind:value={customUrl}
+										onblur={() => sync.configureBackend('custom', customUrl)}
+										class="mt-1 w-full rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-xs text-[var(--color-parchment-100)]"
+									/>
+								{/if}
+							</div>
+						</div>
+					{/if}
+
+					{#if syncBackend === 'lichess' && !lichessReadyForSync}
+						<div
+							class="ink-panel mb-4 p-4 font-serif text-sm leading-relaxed text-[var(--color-parchment-300)]"
+						>
+							Connect Lichess (above, with study scopes) before enabling Lichess study sync. It
+							stores your data in a private study under your Lichess account.
+						</div>
+					{:else if !syncEnabled}
+						<div class="ink-panel mb-4 flex flex-wrap items-center justify-between gap-3 p-4">
+							<div class="flex-1">
+								<div class="eyebrow mb-1">Status</div>
+								<p class="font-serif text-sm text-[var(--color-parchment-400)] italic">
+									{syncBackend === 'cobra'
+										? 'Disabled. Enabling will sync via the COBRA DB.'
+										: syncBackend === 'custom'
+											? 'Disabled. Enabling will sync via your own database.'
+											: 'Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA Sync".'}
+									{#if syncUsesWorker && !syncIdentityConnected}
+										Lichess first asks you to approve a sign-in that only proves who you are.
+									{/if}
+								</p>
+							</div>
+							<Button
+								variant="primary"
+								size="sm"
+								onclick={enableSync}
+								disabled={syncBusyLocal ||
+									syncBusy ||
+									(syncBackend === 'cobra' && !syncHostedAvailable) ||
+									(syncBackend === 'custom' && !customUrl.trim())}
+							>
+								{syncBusyLocal ? 'Working…' : 'Enable Sync'}
+							</Button>
+						</div>
+					{:else}
+						<div class="ink-panel mb-4 grid gap-3 p-4">
+							<div class="grid grid-cols-2 gap-3 font-mono text-xs">
+								<div>
+									<div class="eyebrow mb-1">Last push</div>
+									<div class="text-[var(--color-parchment-200)]">
+										{fmtAgo(syncLastPushAt)}
+									</div>
+								</div>
+								<div>
+									<div class="eyebrow mb-1">Last pull</div>
+									<div class="text-[var(--color-parchment-200)]">
+										{fmtAgo(syncLastPullAt)}
+									</div>
+								</div>
+								<div>
+									<div class="eyebrow mb-1">Pending</div>
+									<div class="text-[var(--color-parchment-200)]">
+										{syncDirtyCount === 0 ? 'nothing dirty' : `${syncDirtyCount} pending`}
+									</div>
+								</div>
+								<div>
+									<div class="eyebrow mb-1">Study</div>
+									<div class="truncate text-[var(--color-parchment-200)]">
+										{#if syncStudyId}
+											<a
+												href="https://lichess.org/study/{syncStudyId}"
+												target="_blank"
+												rel="noopener"
+												class="text-[var(--color-brass-300)] underline underline-offset-2 hover:text-[var(--color-brass-200)]"
+												>{syncStudyId}</a
+											>
+										{:else}
+											—
+										{/if}
+									</div>
+								</div>
+							</div>
+							{#if syncError}
+								<p class="text-xs text-[var(--color-oxblood-300)]">{syncError}</p>
+							{/if}
+							<div class="flex flex-wrap gap-2">
+								<Button
+									variant="primary"
+									size="sm"
+									onclick={syncNow}
+									disabled={syncBusyLocal || syncBusy}
+								>
+									{syncBusyLocal || syncBusy ? 'Working…' : 'Sync now'}
+								</Button>
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={disableSync}
+									disabled={syncBusyLocal || syncBusy}
+								>
+									Disable
+								</Button>
+								<Button
+									variant="ghost"
+									size="sm"
+									onclick={disconnectAndForget}
+									disabled={syncBusyLocal || syncBusy}
+								>
+									Disconnect &amp; forget
+								</Button>
+							</div>
+						</div>
+
+						<label
+							class="flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
+						>
+							<input
+								type="checkbox"
+								checked={syncTelemetry}
+								onchange={(e) => sync.setTelemetry((e.currentTarget as HTMLInputElement).checked)}
+								class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
+							/>
+							<div class="min-w-0 flex-1">
+								<span class="font-serif text-sm text-[var(--color-parchment-100)]"
+									>Also sync scan history (telemetry)</span
+								>
+								<p
+									class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
+								>
+									Mistakes, empirical gaps, spar games and position WDL. Off by default — this data
+									is bulky and regenerable by re-scanning, and excluding it keeps large repertoires
+									under Lichess's per-chapter size limit. Your authored tree (moves, cards, ideas)
+									always syncs regardless.
+								</p>
+							</div>
+						</label>
+					{/if}
+
+					<details class="ink-panel p-4 font-serif text-sm text-[var(--color-parchment-400)]">
+						<summary
+							class="cursor-pointer text-[var(--color-parchment-200)] transition-colors hover:text-[var(--color-parchment-50)]"
+						>
+							What's actually synced, and what stays on this device?
+						</summary>
+						<ul class="mt-3 list-disc space-y-1 pl-5 italic">
+							<li>
+								Always synced: repertoires, FSRS card progress, idea cards, baselines, settings.
+							</li>
+							<li>
+								Synced only with “scan history” enabled above: mistakes, empirical gaps, spar games,
+								position WDL. Off by default — bulky and regenerable by re-scanning.
+							</li>
+							<li>
+								Not synced: Lichess token (stays device-local), explorer + opening name caches
+								(rebuild themselves), in-flight scan checkpoints, the latest dossier scan + masters
+								baseline (too large for Lichess study chapters — re-run a dossier scan on each
+								device to populate them locally).
+							</li>
+							<li>
+								Pulls merge per-record: the more recent review wins per card, edges union, mistake
+								status follows whichever side drilled-or-dismissed it more recently. Concurrent
+								same-day drilling on two devices doesn't lose progress on either side. The header
+								pill shows live sync activity.
+							</li>
+							<li>
+								If two devices push to the same chapter without one pulling first, the second push
+								gets a manual conflict prompt (pull / overwrite / cancel) — that's the only case the
+								merge can't resolve silently.
+							</li>
+							<li>
+								Data lives in a private Lichess study under your account. Lichess staff can see
+								private study contents. If that's a problem, don't enable this.
+							</li>
+						</ul>
+					</details>
+				</section>
+
+				<Separator />
+
+				<!-- Accounts for mistake scanning -->
+				<section style:--i="4b">
+					<div class="mb-4 flex items-baseline gap-3">
+						<h2 class="font-serif text-2xl">Additional accounts</h2>
+						<span class="eyebrow text-[var(--color-parchment-500)]"> Lichess &amp; chess.com </span>
+					</div>
+					<p class="mb-4 max-w-md font-serif text-sm text-[var(--color-parchment-400)] italic">
+						Usernames swept by the hourly mistake auto-scan — across both platforms. Your connected
+						Lichess account is pinned at the top; add more below.
+					</p>
+
+					{#if displayedScanAccounts.length > 0}
+						<ul
+							class="mb-4 divide-y divide-[var(--color-ink-800)] border-y border-[var(--color-ink-800)]"
+						>
+							{#each displayedScanAccounts as a (`${a.source}:${a.username}`)}
+								<li
+									in:slide={{ duration: 220 }}
+									animate:flip={{ duration: 220 }}
+									class="flex items-center gap-3 py-2"
+								>
+									<span
+										class="flex w-5 shrink-0 items-center justify-center"
+										class:text-[var(--color-brass-300)]={a.source === 'lichess'}
+										aria-label={a.source === 'lichess' ? 'Lichess' : 'chess.com'}
+										title={a.source === 'lichess' ? 'Lichess' : 'chess.com'}
+									>
+										<SourceIcon source={a.source} />
+									</span>
+									<span class="flex-1 truncate font-mono text-sm">{a.username}</span>
+									{#if a.pinned}
+										<span class="eyebrow text-[var(--color-olive-300)]">Connected</span>
+									{:else}
+										<button
+											type="button"
+											onclick={() => removeScanAccount(a)}
+											class="eyebrow text-[var(--color-parchment-500)] transition-colors hover:text-[var(--color-oxblood-300)]"
+										>
+											Remove
+										</button>
+									{/if}
+								</li>
+							{/each}
+						</ul>
+					{/if}
+
+					<div class="flex flex-wrap items-end gap-2">
+						<SourceUsernameInput
+							id="new-scan-account"
+							class="flex-1"
+							bind:source={newAccountSource}
+							bind:username={newAccountUsername}
+							onkeydown={(e: KeyboardEvent) => {
+								if (e.key === 'Enter') {
+									e.preventDefault();
+									addScanAccount();
+								}
+							}}
+						/>
+						<Button
+							variant="secondary"
+							size="sm"
+							onclick={addScanAccount}
+							disabled={!newAccountUsername.trim()}
+						>
+							Add
+						</Button>
+					</div>
+				</section>
+			</div>
 
 			<Separator />
 
@@ -1274,261 +1577,6 @@
 						<Button variant="ghost" size="sm" onclick={() => playIncorrect()}>Test error</Button>
 					</div>
 				</div>
-			</section>
-
-			<Separator />
-
-			<!-- Sync (Beta) section -->
-			<section id="sync" class="scroll-mt-24" style:--i="4d">
-				<div class="mb-4 flex items-baseline gap-3">
-					<h2 class="font-serif text-2xl">Sync</h2>
-					<Badge variant="brass">Beta</Badge>
-					<span class="eyebrow text-[var(--color-parchment-500)]">Multi-device</span>
-				</div>
-				<p class="mb-5 max-w-md font-serif text-sm text-[var(--color-parchment-400)] italic">
-					Mirror this device's repertoires, drill progress, mistakes, and dossier into a private
-					Lichess study. Sign in on another device with the same Lichess account, enable Sync there,
-					and the two stay in step. Off by default — your data only leaves this browser when you
-					turn it on.
-				</p>
-
-				{#if !lichessReadyForSync}
-					<div
-						class="ink-panel mb-4 p-4 font-serif text-sm leading-relaxed text-[var(--color-parchment-300)]"
-					>
-						Connect Lichess (above, with study scopes) before enabling Sync. The feature uses a
-						private study under your Lichess account as the storage backend — there's no separate
-						COBRA server.
-					</div>
-				{:else if !syncEnabled}
-					<div class="ink-panel mb-4 p-4">
-						<div class="eyebrow mb-2">Backend</div>
-						<div class="flex flex-col gap-2 font-serif text-sm text-[var(--color-parchment-200)]">
-							<label class="flex cursor-pointer items-start gap-2">
-								<input
-									type="radio"
-									name="sync-backend"
-									checked={syncBackend === 'cloudflare'}
-									onchange={() =>
-										sync.configureBackend('cloudflare', syncHasDefaultUrl ? undefined : cfUrl)}
-									class="mt-0.5 accent-[var(--color-brass-300)]"
-								/>
-								<span
-									>COBRA DB (via Cloudflare)
-									<span class="text-[var(--color-parchment-500)] italic"
-										>{syncHasDefaultUrl
-											? '— recommended; no size limit, synced via COBRA’s hosted database.'
-											: '— no size limit; needs your own Worker URL (self-host).'}</span
-									></span
-								>
-							</label>
-							<label class="flex cursor-pointer items-start gap-2">
-								<input
-									type="radio"
-									name="sync-backend"
-									checked={syncBackend === 'lichess'}
-									onchange={() => sync.configureBackend('lichess')}
-									class="mt-0.5 accent-[var(--color-brass-300)]"
-								/>
-								<span
-									>Lichess study
-									<span class="text-[var(--color-parchment-500)] italic"
-										>— zero setup; stored in a private Lichess study (best for smaller repertoires).</span
-									></span
-								>
-							</label>
-							{#if syncBackend === 'cloudflare'}
-								{#if !syncHasDefaultUrl}
-									<input
-										type="url"
-										placeholder="https://cobra-sync.<account>.workers.dev"
-										bind:value={cfUrl}
-										onblur={() => sync.configureBackend('cloudflare', cfUrl)}
-										class="mt-1 w-full rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] px-3 py-2 font-mono text-xs text-[var(--color-parchment-100)]"
-									/>
-								{/if}
-								<div class="mt-1 flex flex-wrap items-center gap-2">
-									{#if syncIdentityConnected}
-										<span class="font-serif text-xs text-[var(--color-parchment-400)] italic">
-											Sync identity connected{syncIdentityUser ? ` as ${syncIdentityUser}` : ''}.
-										</span>
-										<Button
-											variant="ghost"
-											size="sm"
-											onclick={() =>
-												startOAuth([], lichessReturnTo ?? `${base}/settings#sync`, 'identity')}
-										>
-											Reconnect
-										</Button>
-									{:else}
-										<Button
-											variant="secondary"
-											size="sm"
-											onclick={() =>
-												startOAuth([], lichessReturnTo ?? `${base}/settings#sync`, 'identity')}
-										>
-											Connect sync identity
-										</Button>
-										<span class="font-serif text-xs text-[var(--color-parchment-500)] italic">
-											A scopeless Lichess token — the backend can't act on your Lichess account.
-										</span>
-									{/if}
-								</div>
-							{/if}
-						</div>
-					</div>
-					<div class="ink-panel mb-4 flex flex-wrap items-center justify-between gap-3 p-4">
-						<div class="flex-1">
-							<div class="eyebrow mb-1">Status</div>
-							<p class="font-serif text-sm text-[var(--color-parchment-400)] italic">
-								{syncBackend === 'cloudflare'
-									? 'Disabled. Enabling will sync via the COBRA DB (Cloudflare).'
-									: 'Disabled. Enabling will create (or reuse) a private Lichess study named "COBRA Sync".'}
-							</p>
-						</div>
-						<Button
-							variant="primary"
-							size="sm"
-							onclick={enableSync}
-							disabled={syncBusyLocal ||
-								syncBusy ||
-								(syncBackend === 'cloudflare' &&
-									((!cfUrl && !syncHasDefaultUrl) || !syncIdentityConnected))}
-						>
-							{syncBusyLocal ? 'Working…' : 'Enable Sync'}
-						</Button>
-					</div>
-				{:else}
-					<div class="ink-panel mb-4 grid gap-3 p-4">
-						<div class="grid grid-cols-2 gap-3 font-mono text-xs">
-							<div>
-								<div class="eyebrow mb-1">Last push</div>
-								<div class="text-[var(--color-parchment-200)]">
-									{fmtAgo(syncLastPushAt)}
-								</div>
-							</div>
-							<div>
-								<div class="eyebrow mb-1">Last pull</div>
-								<div class="text-[var(--color-parchment-200)]">
-									{fmtAgo(syncLastPullAt)}
-								</div>
-							</div>
-							<div>
-								<div class="eyebrow mb-1">Pending</div>
-								<div class="text-[var(--color-parchment-200)]">
-									{syncDirtyCount === 0 ? 'nothing dirty' : `${syncDirtyCount} pending`}
-								</div>
-							</div>
-							<div>
-								<div class="eyebrow mb-1">Study</div>
-								<div class="truncate text-[var(--color-parchment-200)]">
-									{#if syncStudyId}
-										<a
-											href="https://lichess.org/study/{syncStudyId}"
-											target="_blank"
-											rel="noopener"
-											class="text-[var(--color-brass-300)] underline underline-offset-2 hover:text-[var(--color-brass-200)]"
-											>{syncStudyId}</a
-										>
-									{:else}
-										—
-									{/if}
-								</div>
-							</div>
-						</div>
-						{#if syncError}
-							<p class="text-xs text-[var(--color-oxblood-300)]">{syncError}</p>
-						{/if}
-						<div class="flex flex-wrap gap-2">
-							<Button
-								variant="primary"
-								size="sm"
-								onclick={syncNow}
-								disabled={syncBusyLocal || syncBusy}
-							>
-								{syncBusyLocal || syncBusy ? 'Working…' : 'Sync now'}
-							</Button>
-							<Button
-								variant="outline"
-								size="sm"
-								onclick={disableSync}
-								disabled={syncBusyLocal || syncBusy}
-							>
-								Disable
-							</Button>
-							<Button
-								variant="ghost"
-								size="sm"
-								onclick={disconnectAndForget}
-								disabled={syncBusyLocal || syncBusy}
-							>
-								Disconnect &amp; forget
-							</Button>
-						</div>
-					</div>
-
-					<label
-						class="flex cursor-pointer items-start gap-3 rounded-[4px] border border-[var(--color-ink-700)] bg-[var(--color-ink-900)] p-3 transition-colors hover:border-[var(--color-ink-600)]"
-					>
-						<input
-							type="checkbox"
-							checked={syncTelemetry}
-							onchange={(e) => sync.setTelemetry((e.currentTarget as HTMLInputElement).checked)}
-							class="mt-0.5 size-4 accent-[var(--color-brass-300)]"
-						/>
-						<div class="min-w-0 flex-1">
-							<span class="font-serif text-sm text-[var(--color-parchment-100)]"
-								>Also sync scan history (telemetry)</span
-							>
-							<p
-								class="mt-1 font-serif text-xs leading-relaxed text-[var(--color-parchment-500)] italic"
-							>
-								Mistakes, empirical gaps, spar games and position WDL. Off by default — this data is
-								bulky and regenerable by re-scanning, and excluding it keeps large repertoires under
-								Lichess's per-chapter size limit. Your authored tree (moves, cards, ideas) always
-								syncs regardless.
-							</p>
-						</div>
-					</label>
-				{/if}
-
-				<details class="ink-panel p-4 font-serif text-sm text-[var(--color-parchment-400)]">
-					<summary
-						class="cursor-pointer text-[var(--color-parchment-200)] transition-colors hover:text-[var(--color-parchment-50)]"
-					>
-						What's actually synced, and what stays on this device?
-					</summary>
-					<ul class="mt-3 list-disc space-y-1 pl-5 italic">
-						<li>
-							Always synced: repertoires, FSRS card progress, idea cards, baselines, settings.
-						</li>
-						<li>
-							Synced only with “scan history” enabled above: mistakes, empirical gaps, spar games,
-							position WDL. Off by default — bulky and regenerable by re-scanning.
-						</li>
-						<li>
-							Not synced: Lichess token (stays device-local), explorer + opening name caches
-							(rebuild themselves), in-flight scan checkpoints, the latest dossier scan + masters
-							baseline (too large for Lichess study chapters — re-run a dossier scan on each device
-							to populate them locally).
-						</li>
-						<li>
-							Pulls merge per-record: the more recent review wins per card, edges union, mistake
-							status follows whichever side drilled-or-dismissed it more recently. Concurrent
-							same-day drilling on two devices doesn't lose progress on either side. The header pill
-							shows live sync activity.
-						</li>
-						<li>
-							If two devices push to the same chapter without one pulling first, the second push
-							gets a manual conflict prompt (pull / overwrite / cancel) — that's the only case the
-							merge can't resolve silently.
-						</li>
-						<li>
-							Data lives in a private Lichess study under your account. Lichess staff can see
-							private study contents. If that's a problem, don't enable this.
-						</li>
-					</ul>
-				</details>
 			</section>
 
 			<Separator />

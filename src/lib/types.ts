@@ -500,17 +500,24 @@ export interface ScanAccount {
  * higher remote revision triggers the conflict prompt instead of a
  * silent overwrite.
  */
-export type SyncBackend = 'lichess' | 'cloudflare';
+export type SyncBackend = 'cobra' | 'lichess' | 'custom';
 
 export interface SyncSettings {
 	enabled: boolean;
 	/**
-	 * Which sync transport is active. `'lichess'` (default) stores blobs in a
-	 * private Lichess study; `'cloudflare'` uses a hosted Worker + D1 backend
-	 * (issue #68 — no per-chapter size ceiling). Chosen before enabling.
+	 * Which sync transport is active, chosen before enabling. `'cobra'` is the
+	 * hosted COBRA DB (Worker + D1, address baked in at build time and never
+	 * stored), `'lichess'` a private Lichess study, `'custom'` the user's own
+	 * Worker at `customWorkerUrl`. Read through `resolveBackend()`
+	 * (`$lib/sync/backend`), which also maps the legacy `'cloudflare'` value.
 	 */
-	backend?: SyncBackend;
-	/** Worker origin when `backend === 'cloudflare'`. */
+	backend?: SyncBackend | 'cloudflare';
+	/** The user's own Worker origin, used when `backend === 'custom'`. */
+	customWorkerUrl?: string;
+	/**
+	 * @deprecated Legacy Worker origin from the single "Cloudflare" option.
+	 * Read only for migration by `resolveBackend()`; never written.
+	 */
 	cloudflareUrl?: string;
 	studyId?: string;
 	deviceId?: string;
@@ -576,6 +583,18 @@ export interface AppSettings {
 	 * study/challenge token never leaves the client; device-local, never synced.
 	 */
 	syncIdentityToken?: LichessOAuthToken | null;
+	/**
+	 * First-launch welcome page (/welcome) was shown and finished or skipped.
+	 * Set as soon as the user acts on it, so an abandoned Lichess sign-in
+	 * never brings it back on the next launch.
+	 */
+	welcomeSeen?: boolean;
+	/**
+	 * The user asked to turn sync on (the welcome page checkbox, or Enable
+	 * Sync in Settings) and is part-way through the Lichess sign-ins. The page
+	 * the sign-in returns to finishes turning sync on. Device-local.
+	 */
+	syncEnablePending?: boolean;
 	lastMistakeScanAt?: number;
 	/**
 	 * Created-at timestamp of the most recent Lichess game already scanned

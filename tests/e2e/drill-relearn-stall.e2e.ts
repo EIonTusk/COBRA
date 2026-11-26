@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { openHome } from './welcome';
 import { Chess } from 'chessops/chess';
 import { makeFen } from 'chessops/fen';
 import { parsePgn } from 'chessops/pgn';
@@ -405,7 +406,7 @@ test('a missed first move is offered for relearning instead of stalling the dril
 	// (the old counter said 5 — the gated new cards — while the drill had 0).
 	expect(await repertoirePageDue(page, repId), 'repertoire page due count').toBe(1);
 
-	await page.goto('/');
+	await openHome(page);
 	await expect(page.getByText(/Quick drill/).first()).toBeVisible({ timeout: 10_000 });
 	await page.waitForTimeout(500);
 	await expect(page.getByText(/Quick drill/).first()).toHaveText(/Quick drill · 1 due/);

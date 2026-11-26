@@ -71,6 +71,7 @@ export class CloudflareTransport implements SyncTransport {
 		const res = await this.#req(
 			`/sync?kind=${encodeURIComponent(kind)}&repId=${encodeURIComponent(repId ?? '')}`
 		);
+		if (!res.ok) throw await workerError('Sync pull failed', res);
 		const { row } = (await res.json()) as { row: WorkerRow | null };
 		if (!row || row.deleted || row.blob == null) return null;
 		return toParsed(row);
@@ -184,7 +185,7 @@ export class CloudflareTransport implements SyncTransport {
 				repId: body.repId || undefined
 			});
 		}
-		if (!res.ok) throw new Error(`Sync push failed: HTTP ${res.status}`);
+		if (!res.ok) throw await workerError('Sync push failed', res);
 		const out = (await res.json()) as { revision?: number };
 		return {
 			chapterId: scopeId(body.kind, body.repId || undefined),
@@ -196,6 +197,7 @@ export class CloudflareTransport implements SyncTransport {
 
 	async #pullSince(cursor: number): Promise<WorkerRow[]> {
 		const res = await this.#req(`/sync?since=${cursor}`);
+		if (!res.ok) throw await workerError('Sync pull failed', res);
 		const { rows } = (await res.json()) as { rows: WorkerRow[] };
 		return rows ?? [];
 	}
@@ -207,7 +209,7 @@ export class CloudflareTransport implements SyncTransport {
 			method: 'POST',
 			headers: { Authorization: `Bearer ${this.#cfg.lichessToken}` }
 		});
-		if (!res.ok) throw new Error(`Sync auth failed: HTTP ${res.status}`);
+		if (!res.ok) throw await workerError('Sync sign-in failed', res);
 		const out = (await res.json()) as { token: string; userId: string };
 		this.#jwt = out.token;
 		this.userId = out.userId;
@@ -230,6 +232,22 @@ export class CloudflareTransport implements SyncTransport {
 		}
 		return res;
 	}
+}
+
+/**
+ * Error for a failed Worker response, carrying the Worker's own `{ error }`
+ * message when it sent one (e.g. "no such table: users" when the database
+ * schema was never applied) instead of a bare status code.
+ */
+export async function workerError(what: string, res: Response): Promise<Error> {
+	let detail = '';
+	try {
+		const body = (await res.json()) as { error?: unknown };
+		if (typeof body?.error === 'string' && body.error) detail = ` (${body.error})`;
+	} catch {
+		// Not JSON (e.g. a proxy or Cloudflare error page): status alone.
+	}
+	return new Error(`${what}: HTTP ${res.status}${detail}`);
 }
 
 function toParsed(row: WorkerRow): ParsedBlob {

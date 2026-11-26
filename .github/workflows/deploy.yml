@@ -40,7 +40,7 @@ jobs:
           COBRA_BASE_PATH: /COBRA
           # Bakes in the default hosted sync backend (Cloudflare Worker) so users
           # don't paste a URL. Set repo variable COBRA_SYNC_URL to the Worker
-          # origin (e.g. https://cobra.eiontusk.workers.dev); empty = no default.
+          # origin (e.g. https://<worker>.<account>.workers.dev); empty = no default.
           COBRA_SYNC_URL: ${{ vars.COBRA_SYNC_URL }}
         run: npm run build
 

@@ -13,6 +13,7 @@
  *   GET  /sync?kind&repId            Authorization: Bearer <app-jwt>  (one scope)
  *   GET  /sync?since=<cursor>        Authorization: Bearer <app-jwt>  (changed scopes)
  *   POST /sync           Authorization: Bearer <app-jwt>             (push, atomic CAS)
+ *   GET  /health         Setup check: database tables + JWT secret (src/health.ts)
  *   /community/...       Community openings — see src/community/routes.ts
  *
  * Conflict model: the push UPDATE only wins when its revision is strictly newer
@@ -21,6 +22,7 @@
  */
 
 import { communityCron, handleCommunity } from './community/routes';
+import { handleHealth } from './health';
 
 export interface Env {
 	DB: D1Database;
@@ -45,6 +47,9 @@ export default {
 		if (req.method === 'OPTIONS') return cors(env, new Response(null, { status: 204 }));
 		const url = new URL(req.url);
 		try {
+			if (url.pathname === '/health' && req.method === 'GET') {
+				return cors(env, await handleHealth(env));
+			}
 			if (url.pathname === '/auth/session' && req.method === 'POST') {
 				return cors(env, await handleAuth(req, env));
 			}

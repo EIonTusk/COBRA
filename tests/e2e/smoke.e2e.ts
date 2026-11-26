@@ -1,14 +1,15 @@
 import { expect, test } from '@playwright/test';
+import { openHome } from './welcome';
 
 test('landing page renders the dashboard', async ({ page }) => {
-	await page.goto('/');
+	await openHome(page);
 	await expect(page.getByRole('heading', { name: /your openings/i })).toBeVisible();
 	await expect(page.getByRole('link', { name: /new repertoire/i }).first()).toBeVisible();
 	await expect(page.getByRole('link', { name: /open library/i }).first()).toBeVisible();
 });
 
 test('theme toggle flips html between dark and light', async ({ page }) => {
-	await page.goto('/');
+	await openHome(page);
 	// mode-watcher picks up the system preference on first paint, so the
 	// initial direction isn't fixed — grab whichever toggle is rendered
 	// and flip twice, asserting the `light` class toggles each time.
@@ -30,7 +31,7 @@ test('theme toggle flips html between dark and light', async ({ page }) => {
 });
 
 test('theme choice survives a reload (mode-watcher persists to localStorage)', async ({ page }) => {
-	await page.goto('/');
+	await openHome(page);
 	const toggle = page.getByRole('button', { name: /switch to (light|dark) theme/i });
 	await expect(toggle).toBeVisible();
 	const beforeLight = ((await page.locator('html').getAttribute('class')) ?? '').includes('light');
@@ -77,4 +78,16 @@ test('settings page loads and shows defaults', async ({ page }) => {
 	await page.goto('/settings');
 	await expect(page.getByRole('heading', { name: /dials/i })).toBeVisible();
 	await expect(page.getByLabel('New cards per session')).toHaveValue('10');
+});
+
+test('first launch offers to connect Lichess, once', async ({ page }) => {
+	await page.goto('/');
+	await expect(page).toHaveURL(/\/welcome$/);
+	await expect(page.getByRole('heading', { name: 'Connect your Lichess account' })).toBeVisible();
+	await expect(page.getByRole('checkbox', { name: /sync my repertoires/i })).toBeChecked();
+	await page.getByRole('button', { name: 'Skip for now' }).click();
+	await expect(page.getByRole('heading', { name: /your openings/i })).toBeVisible();
+	await page.goto('/');
+	await expect(page.getByRole('heading', { name: /your openings/i })).toBeVisible();
+	await expect(page).not.toHaveURL(/\/welcome/);
 });

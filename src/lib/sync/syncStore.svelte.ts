@@ -58,6 +58,7 @@ import type { SyncKind } from './pgnWrap';
 import type { SyncTransport } from './transport';
 import { setDirtyHandler } from './dirtyMark';
 import type { AppSettings, SyncBackend, SyncSettings } from '$lib/types';
+import { HOSTED_WORKER_URL, normalizeWorkerUrl, resolveBackend, usesWorker } from './backend';
 
 export type SyncStatus = 'disabled' | 'idle' | 'pulling' | 'pushing' | 'conflict' | 'error';
 
@@ -75,26 +76,19 @@ export interface ConflictPrompt {
 const DEBOUNCE_MS = 30_000;
 const MIN_PULL_INTERVAL_MS = 5 * 60_000;
 
-// Operator-provided default Cloudflare sync URL, baked in at build time (Vite
-// `define`, fed from process.env.COBRA_SYNC_URL). When set, users don't paste a
-// URL — they share the one hosted Worker, isolated by Lichess identity. Falls
-// back to null for self-host / dev, where the user supplies their own.
-const DEFAULT_SYNC_URL =
-	typeof __COBRA_SYNC_URL__ === 'string' && __COBRA_SYNC_URL__.trim()
-		? __COBRA_SYNC_URL__.trim()
-		: null;
-
 /**
- * Effective backend when the user hasn't explicitly chosen one. Fresh installs
- * default to the hosted COBRA DB (Cloudflare) when a backend URL is baked in;
- * users who already set up Lichess-study sync (it's enabled, or they have a
- * studyId) stay on Lichess so they're never silently switched to another
- * remote. An explicit stored choice always wins.
+ * Store the backend choice in its current shape: an explicit `backend`, the
+ * user's own Worker address (only ever the custom one), and no legacy
+ * `cloudflareUrl`, so older builds' saved copies of the hosted address go away.
  */
-function defaultBackend(sync: SyncSettings | undefined): SyncBackend {
-	if (sync?.backend) return sync.backend;
-	if (DEFAULT_SYNC_URL && !sync?.enabled && !sync?.studyId) return 'cloudflare';
-	return 'lichess';
+function withBackend(
+	sync: SyncSettings,
+	backend: SyncBackend,
+	customUrl: string | null
+): SyncSettings {
+	const next: SyncSettings = { ...sync, backend, customWorkerUrl: customUrl ?? undefined };
+	delete next.cloudflareUrl;
+	return next;
 }
 
 class SyncStore {
@@ -110,10 +104,10 @@ class SyncStore {
 	telemetry = $state<boolean>(false);
 	/** Active transport backend. */
 	backend = $state<SyncBackend>('lichess');
-	/** Worker origin when `backend === 'cloudflare'`. */
-	cloudflareUrl = $state<string | null>(null);
-	/** Operator-baked default Worker URL (build-time); null for self-host/dev. */
-	readonly defaultCloudflareUrl = DEFAULT_SYNC_URL;
+	/** The user's own Worker address (the `'custom'` backend). */
+	customUrl = $state<string | null>(null);
+	/** Whether this build ships the hosted COBRA DB (its address is never exposed). */
+	readonly hostedAvailable = HOSTED_WORKER_URL != null;
 
 	#deviceId: string | null = null;
 	#debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -135,8 +129,9 @@ class SyncStore {
 		this.#deviceId = sync.deviceId ?? null;
 		this.#revisionCache = { ...(sync.lastKnownRevisions ?? {}) };
 		this.telemetry = sync.syncTelemetry === true;
-		this.backend = defaultBackend(sync);
-		this.cloudflareUrl = sync.cloudflareUrl ?? DEFAULT_SYNC_URL;
+		const resolved = resolveBackend(sync);
+		this.backend = resolved.backend;
+		this.customUrl = resolved.customUrl;
 		this.status = this.enabled ? 'idle' : 'disabled';
 		// Register the dirty-mark handler so storage modules' calls land here
 		// regardless of whether sync is currently enabled — the markDirty
@@ -187,15 +182,11 @@ class SyncStore {
 	 * `#transport()` factory pick it up. Only meaningful while disabled — switch
 	 * backends by disabling first, since the two remotes are independent.
 	 */
-	async configureBackend(backend: SyncBackend, cloudflareUrl?: string): Promise<void> {
+	async configureBackend(backend: SyncBackend, customUrl?: string): Promise<void> {
 		this.backend = backend;
-		if (cloudflareUrl !== undefined) this.cloudflareUrl = cloudflareUrl || null;
+		if (customUrl !== undefined) this.customUrl = normalizeWorkerUrl(customUrl);
 		const s = await getSettings();
-		const next: SyncSettings = {
-			...(s.sync ?? { enabled: false }),
-			backend,
-			cloudflareUrl: this.cloudflareUrl ?? undefined
-		};
+		const next = withBackend(s.sync ?? { enabled: false }, backend, this.customUrl);
 		await saveSettings({ ...s, sync: next }, { skipDirtyMark: true });
 	}
 
@@ -221,22 +212,24 @@ class SyncStore {
 	 * Lichess study, or authenticating with the Cloudflare Worker), and decides
 	 * whether to push local data up or pull remote data down based on `mode`.
 	 * Caller (Settings UI) shows a chooser when the remote already has data.
+	 * `'auto'` (first-run welcome page) needs no chooser: it pulls (merging
+	 * per record) when the remote already has data, else pushes local data up.
 	 */
 	async enable(opts: {
-		mode: 'push-local' | 'pull-remote' | 'fresh';
+		mode: 'push-local' | 'pull-remote' | 'fresh' | 'auto';
 	}): Promise<{ remoteHasData: boolean }> {
 		const s = await getSettings();
-		const backend: SyncBackend = defaultBackend(s.sync);
+		const resolved = resolveBackend(s.sync);
+		const backend = resolved.backend;
 		this.#deviceId = this.#deviceId ?? s.sync?.deviceId ?? crypto.randomUUID();
 
 		let remoteHasData: boolean;
 		let studyId = s.sync?.studyId;
-		if (backend === 'cloudflare') {
-			const baseUrl = s.sync?.cloudflareUrl ?? DEFAULT_SYNC_URL;
-			if (!baseUrl) throw new Error('Set the Cloudflare sync URL in Settings before enabling.');
+		if (usesWorker(backend)) {
+			const baseUrl = resolved.workerUrl ?? workerMissing(backend);
 			const idToken = s.syncIdentityToken?.accessToken;
 			if (!idToken) {
-				throw new Error('Connect a sync identity (Settings) before enabling Cloudflare sync.');
+				throw new Error('Sync sign-in is missing. Press Enable Sync in Settings to sign in.');
 			}
 			const transport = new CloudflareTransport({
 				baseUrl,
@@ -262,16 +255,17 @@ class SyncStore {
 		this.status = 'idle';
 
 		const next: SyncSettings = {
-			...(s.sync ?? { enabled: false }),
+			...withBackend(s.sync ?? { enabled: false }, backend, resolved.customUrl),
 			enabled: true,
-			backend,
 			studyId,
 			deviceId: this.#deviceId
 		};
 		await saveSettings({ ...s, sync: next }, { skipDirtyMark: true });
 
-		if (opts.mode === 'pull-remote' && remoteHasData) {
+		if ((opts.mode === 'pull-remote' || opts.mode === 'auto') && remoteHasData) {
 			await this.pullAll();
+		} else if (opts.mode === 'auto') {
+			await this.pushAll();
 		} else if (opts.mode === 'push-local') {
 			await this.pushAll();
 		} else if (opts.mode === 'fresh') {
@@ -689,15 +683,17 @@ class SyncStore {
 	 */
 	async #transport(): Promise<SyncTransport> {
 		const settings = await getSettings();
-		const backend: SyncBackend = defaultBackend(settings.sync);
+		const resolved = resolveBackend(settings.sync);
 		const token = effectiveLichessToken(settings);
 		this.#deviceId = this.#deviceId ?? settings.sync?.deviceId ?? crypto.randomUUID();
 
-		if (backend === 'cloudflare') {
-			const baseUrl = settings.sync?.cloudflareUrl ?? this.cloudflareUrl ?? DEFAULT_SYNC_URL;
-			if (!baseUrl) throw new Error('Cloudflare sync URL is not configured. Set it in Settings.');
+		if (usesWorker(resolved.backend)) {
+			const baseUrl = resolved.workerUrl ?? workerMissing(resolved.backend);
 			const idToken = settings.syncIdentityToken?.accessToken;
-			if (!idToken) throw new Error('Connect a sync identity (Settings) for Cloudflare sync.');
+			if (!idToken)
+				throw new Error(
+					'Sync sign-in is missing. Turn sync off and on again in Settings to sign in.'
+				);
 			const key = `${baseUrl} ${idToken} ${this.#deviceId}`;
 			if (!this.#cfTransport || this.#cfKey !== key) {
 				this.#cfTransport = new CloudflareTransport({
@@ -833,3 +829,12 @@ function announceMerge(s: MergeStats): void {
 }
 
 export const sync = new SyncStore();
+
+/** Error for a Worker backend with no address to talk to. */
+function workerMissing(backend: SyncBackend): never {
+	throw new Error(
+		backend === 'cobra'
+			? 'COBRA DB is not available in this build. Choose Lichess study or your own database.'
+			: 'Enter your database address in Settings before enabling sync.'
+	);
+}

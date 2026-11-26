@@ -37,6 +37,8 @@ jobs:
       - name: Build (root base path for the Cloudflare origin)
         env:
           COBRA_BASE_PATH: ''
+          # Hosted COBRA DB address, from the repo variable (see deploy.yml).
+          COBRA_SYNC_URL: ${{ vars.COBRA_SYNC_URL }}
         run: npm run build
 
       # SPA deep-link fallback for Cloudflare Pages: the static adapter emits

@@ -1,14 +1,15 @@
 /**
  * HTTP client for the community endpoints on the COBRA Worker.
  *
- * Uses the same Worker as Cloudflare sync (the build's default URL, or the
- * one set in Settings) and the same sign-in: a Lichess token is exchanged at
+ * Uses the hosted COBRA DB Worker, or the user's own Worker when they sync to
+ * it, with the same sign-in as sync: a Lichess token is exchanged at
  * `/auth/session` for a short-lived app JWT. Browsing needs no sign-in.
  *
  * Publishing never touches sync data: the only tree it sends is the one built
  * by `buildCommunityTree`.
  */
 import { effectiveLichessToken } from '$lib/storage/settings';
+import { communityWorkerUrl } from '$lib/sync/backend';
 import type { AppSettings } from '$lib/types';
 import type {
 	CommunityMoveCount,
@@ -17,11 +18,6 @@ import type {
 	PublicationSummary,
 	PublishMeta
 } from './types';
-
-const BUILD_DEFAULT_URL =
-	typeof __COBRA_SYNC_URL__ === 'string' && __COBRA_SYNC_URL__.trim()
-		? __COBRA_SYNC_URL__.trim()
-		: null;
 
 export class CommunityError extends Error {
 	constructor(
@@ -35,8 +31,7 @@ export class CommunityError extends Error {
 
 /** The Worker origin community requests go to, or null when none is configured. */
 export function communityBaseUrl(settings: AppSettings | null | undefined): string | null {
-	const url = settings?.sync?.cloudflareUrl?.trim() || BUILD_DEFAULT_URL;
-	return url ? url.replace(/\/+$/, '') : null;
+	return communityWorkerUrl(settings?.sync);
 }
 
 /** The Lichess token used to sign in: the sync identity if connected, else the main one. */
